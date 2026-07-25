@@ -1,0 +1,56 @@
+name: Build Docker Images
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      ci_image_name: ${{ steps.names.outputs.ci_image_name }}
+      dev_image_name: ${{ steps.names.outputs.dev_image_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set lower case image names
+        id: names
+        run: |
+          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "ci_image_name=ghcr.io/${REPO_LOWER}-ci" >> $GITHUB_OUTPUT
+          echo "dev_image_name=ghcr.io/${REPO_LOWER}-dev" >> $GITHUB_OUTPUT
+
+  build_ci_image:
+    needs: prep
+    if: >
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/docker-image.yml
+    with:
+      image-name: ${{ needs.prep.outputs.ci_image_name }}
+      dockerfile: ./Dockerfile
+      target: ci
+      tag-prefix: ci-
+    secrets: inherit
+
+  build_dev_image:
+    needs: [prep, build_ci_image]
+    if: >
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/docker-image.yml
+    with:
+      image-name: ${{ needs.prep.outputs.dev_image_name }}
+      dockerfile: ./Dockerfile
+      target: dev
+      tag-prefix: dev-
+    secrets: inherit
