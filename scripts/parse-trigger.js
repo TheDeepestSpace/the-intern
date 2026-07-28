@@ -37,12 +37,23 @@ function parseTrigger() {
       commentBody = payload.comment.body || '';
     } else if (payload.check_suite) {
       // check_suite
-      targetRepo = payload.repository?.full_name || '';
-      const prs = payload.check_suite.pull_requests || [];
-      issueNumber = prs.length > 0 ? String(prs[0].number) : '';
-      const headBranch = payload.check_suite.head_branch || 'unknown';
+      // Defense-in-depth: the webhook relay (worker/src/index.js) is meant to
+      // filter check_suite events to failures only and to drop events for the
+      // agent-infra repo itself (this workflow's own runs generate check_suite
+      // completions, which would otherwise re-trigger this workflow forever).
+      // Re-check both conditions here so a stale/undeployed relay can't cause
+      // a dispatch loop or a no-op session.
+      const repo = payload.repository?.full_name || '';
       const conclusion = payload.check_suite.conclusion || 'failed';
-      commentBody = `CI check suite completed with status '${conclusion}' on branch '${headBranch}'. Please investigate any failures.`;
+      const infraRepo = process.env.GITHUB_REPOSITORY || '';
+
+      if (conclusion === 'failure' && repo !== infraRepo) {
+        targetRepo = repo;
+        const prs = payload.check_suite.pull_requests || [];
+        issueNumber = prs.length > 0 ? String(prs[0].number) : '';
+        const headBranch = payload.check_suite.head_branch || 'unknown';
+        commentBody = `CI check suite completed with status '${conclusion}' on branch '${headBranch}'. Please investigate any failures.`;
+      }
     } else {
       // Fallback extraction
       targetRepo = payload.repository?.full_name || process.env.INPUT_TARGET_REPO || '';
