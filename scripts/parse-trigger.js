@@ -35,14 +35,6 @@ function parseTrigger() {
       targetRepo = payload.repository?.full_name || '';
       issueNumber = String(payload.pull_request.number || '');
       commentBody = payload.comment.body || '';
-    } else if (payload.check_suite) {
-      // check_suite
-      targetRepo = payload.repository?.full_name || '';
-      const prs = payload.check_suite.pull_requests || [];
-      issueNumber = prs.length > 0 ? String(prs[0].number) : '';
-      const headBranch = payload.check_suite.head_branch || 'unknown';
-      const conclusion = payload.check_suite.conclusion || 'failed';
-      commentBody = `CI check suite completed with status '${conclusion}' on branch '${headBranch}'. Please investigate any failures.`;
     } else {
       // Fallback extraction
       targetRepo = payload.repository?.full_name || process.env.INPUT_TARGET_REPO || '';
