@@ -10,7 +10,17 @@ function base64url(input) {
     .replace(/\//g, '_');
 }
 
+function formatPrivateKey(keyStr) {
+  if (!keyStr) return '';
+  let key = keyStr.trim();
+  if (!key.includes('-----BEGIN')) {
+    key = Buffer.from(key, 'base64').toString('utf8');
+  }
+  return key;
+}
+
 function mintAppJwt(appId, privateKeyPem) {
+  const pem = formatPrivateKey(privateKeyPem);
   const now = Math.floor(Date.now() / 1000);
   const header = { alg: 'RS256', typ: 'JWT' };
   const payload = { iat: now - 60, exp: now + 600, iss: appId };
@@ -21,7 +31,7 @@ function mintAppJwt(appId, privateKeyPem) {
 
   const signer = crypto.createSign('RSA-SHA256');
   signer.update(dataToSign);
-  const signature = base64url(signer.sign(privateKeyPem));
+  const signature = base64url(signer.sign(pem));
 
   return `${dataToSign}.${signature}`;
 }

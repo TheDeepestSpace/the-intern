@@ -121,10 +121,15 @@ async function verifySignature(body, signatureHeader, secret) {
 
 async function getInstallationToken(env, installationId) {
   const appId = env.APP_ID;
-  const privateKey = env.APP_PRIVATE_KEY;
+  let privateKey = env.APP_PRIVATE_KEY;
 
   if (!appId || !privateKey) {
     throw new Error('APP_ID and APP_PRIVATE_KEY secrets must be configured in Worker');
+  }
+
+  privateKey = privateKey.trim();
+  if (!privateKey.includes('-----BEGIN')) {
+    privateKey = Buffer.from(privateKey, 'base64').toString('utf8');
   }
 
   const now = Math.floor(Date.now() / 1000);
