@@ -121,7 +121,7 @@ async function verifySignature(body, signatureHeader, secret) {
 
 async function getInstallationToken(env, installationId) {
   const appId = env.APP_ID;
-  let privateKey = env.APP_PRIVATE_KEY;
+  let privateKey = env.APP_PRIVATE_KEY || ((env.APP_PRIVATE_KEY_PART1 || '') + (env.APP_PRIVATE_KEY_PART2 || ''));
 
   if (!appId || !privateKey) {
     throw new Error('APP_ID and APP_PRIVATE_KEY secrets must be configured in Worker');

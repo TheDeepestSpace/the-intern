@@ -19,6 +19,14 @@ function formatPrivateKey(keyStr) {
   return key;
 }
 
+function getPrivateKey(env) {
+  if (env.APP_PRIVATE_KEY) return env.APP_PRIVATE_KEY;
+  if (env.APP_PRIVATE_KEY_PART1 || env.APP_PRIVATE_KEY_PART2) {
+    return (env.APP_PRIVATE_KEY_PART1 || '') + (env.APP_PRIVATE_KEY_PART2 || '');
+  }
+  return '';
+}
+
 function mintAppJwt(appId, privateKeyPem) {
   const pem = formatPrivateKey(privateKeyPem);
   const now = Math.floor(Date.now() / 1000);
@@ -70,7 +78,7 @@ if (require.main === module) {
   (async () => {
     try {
       const appId = process.env.APP_ID;
-      const privateKey = process.env.APP_PRIVATE_KEY;
+      const privateKey = getPrivateKey(process.env);
       const installationId = process.env.INSTALLATION_ID;
 
       if (!appId || !privateKey || !installationId) {
