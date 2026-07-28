@@ -1,0 +1,110 @@
+name: the-intern-bot dispatcher
+on:
+  repository_dispatch:
+    types: [issue_comment, pull_request_review, pull_request_review_comment, check_suite]
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: 'Target repository (owner/repo)'
+        required: true
+      pr_number:
+        description: 'Issue or PR number'
+        required: true
+      comment_body:
+        description: 'Comment or instruction body'
+        required: true
+      installation_id:
+        description: 'GitHub App Installation ID (optional)'
+        required: false
+
+jobs:
+  handle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout agent-infra
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Parse trigger and extract target repo / params
+        id: parse
+        run: node scripts/parse-trigger.js
+        env:
+          INPUT_TARGET_REPO: ${{ github.event.inputs.target_repo }}
+          INPUT_PR_NUMBER: ${{ github.event.inputs.pr_number }}
+          INPUT_COMMENT_BODY: ${{ github.event.inputs.comment_body }}
+          INPUT_INSTALLATION_ID: ${{ github.event.inputs.installation_id }}
+
+      - name: Mint installation token
+        id: token
+        run: node scripts/mint-installation-token.js
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          INSTALLATION_ID: ${{ steps.parse.outputs.installation_id }}
+
+      - name: Checkout target repository
+        if: steps.parse.outputs.target_repo != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.parse.outputs.target_repo }}
+          token: ${{ steps.token.outputs.token }}
+          path: target
+
+      - name: Fetch prior session summary context
+        id: summary_context
+        run: node scripts/manage-summaries.js fetch
+        env:
+          TARGET_REPO: ${{ steps.parse.outputs.target_repo }}
+          ISSUE_NUMBER: ${{ steps.parse.outputs.issue_number }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run Claude (fresh session per trigger, interactive gh access)
+        if: steps.parse.outputs.target_repo != ''
+        working-directory: target
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          TARGET_REPO: ${{ steps.parse.outputs.target_repo }}
+          ISSUE_NUMBER: ${{ steps.parse.outputs.issue_number }}
+          COMMENT_BODY: ${{ steps.parse.outputs.clean_prompt }}
+          PRIOR_CONTEXT: ${{ steps.summary_context.outputs.summary }}
+        run: |
+          PROMPT="You are @the-intern-bot working on repository ${TARGET_REPO}, issue/PR #${ISSUE_NUMBER}.
+          You have access to the GitHub CLI ('gh') and full git tools. Use 'gh' to post comments, inspect code, run tests, or open PRs as needed.
+
+          "
+          if [ -n "$PRIOR_CONTEXT" ]; then
+            PROMPT="${PROMPT}Previous work summary on this issue/PR:
+          $PRIOR_CONTEXT
+
+          "
+          fi
+          PROMPT="${PROMPT}New request:
+          $COMMENT_BODY"
+
+          claude -p "$PROMPT" --output-format json --dangerously-skip-permissions > result.json || true
+          jq -r '.result // .output // .' result.json > ../session_result.txt || true
+
+      - name: Commit session summary
+        if: steps.parse.outputs.target_repo != '' && steps.parse.outputs.issue_number != ''
+        run: node scripts/manage-summaries.js save
+        env:
+          TARGET_REPO: ${{ steps.parse.outputs.target_repo }}
+          ISSUE_NUMBER: ${{ steps.parse.outputs.issue_number }}
+          CLEAN_PROMPT: ${{ steps.parse.outputs.clean_prompt }}
+          RESULT_FILE: session_result.txt
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
