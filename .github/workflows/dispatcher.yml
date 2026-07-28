@@ -83,6 +83,9 @@ jobs:
           COMMENT_BODY: ${{ steps.parse.outputs.clean_prompt }}
           PRIOR_CONTEXT: ${{ steps.summary_context.outputs.summary }}
         run: |
+          git config user.name "the-intern-bot[bot]"
+          git config user.email "the-intern-bot[bot]@users.noreply.github.com"
+
           PROMPT="You are @the-intern-bot working on repository ${TARGET_REPO}, issue/PR #${ISSUE_NUMBER}.
           You have access to the GitHub CLI ('gh') and full git tools. Use 'gh' to post comments, inspect code, run tests, or open PRs as needed.
 
