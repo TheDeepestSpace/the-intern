@@ -119,9 +119,21 @@ async function verifySignature(body, signatureHeader, secret) {
   return diff === 0;
 }
 
+function getPrivateKey(env) {
+  if (env.APP_PRIVATE_KEY) return env.APP_PRIVATE_KEY;
+  let concatenated = '';
+  for (let i = 1; i <= 10; i++) {
+    const part = env[`APP_PRIVATE_KEY_PART${i}`];
+    if (part) {
+      concatenated += part;
+    }
+  }
+  return concatenated;
+}
+
 async function getInstallationToken(env, installationId) {
   const appId = env.APP_ID;
-  let privateKey = env.APP_PRIVATE_KEY || ((env.APP_PRIVATE_KEY_PART1 || '') + (env.APP_PRIVATE_KEY_PART2 || ''));
+  let privateKey = getPrivateKey(env);
 
   if (!appId || !privateKey) {
     throw new Error('APP_ID and APP_PRIVATE_KEY secrets must be configured in Worker');

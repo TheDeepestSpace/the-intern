@@ -21,10 +21,14 @@ function formatPrivateKey(keyStr) {
 
 function getPrivateKey(env) {
   if (env.APP_PRIVATE_KEY) return env.APP_PRIVATE_KEY;
-  if (env.APP_PRIVATE_KEY_PART1 || env.APP_PRIVATE_KEY_PART2) {
-    return (env.APP_PRIVATE_KEY_PART1 || '') + (env.APP_PRIVATE_KEY_PART2 || '');
+  let concatenated = '';
+  for (let i = 1; i <= 10; i++) {
+    const part = env[`APP_PRIVATE_KEY_PART${i}`];
+    if (part) {
+      concatenated += part;
+    }
   }
-  return '';
+  return concatenated;
 }
 
 function mintAppJwt(appId, privateKeyPem) {
