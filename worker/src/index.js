@@ -56,6 +56,26 @@ export default {
       return new Response('ignored: event type', { status: 200 });
     }
 
+    // Guard: For comments/reviews, only trigger if @the-intern-bot is mentioned
+    const commentBody = payload.comment?.body || payload.review?.body || '';
+    if (eventType.startsWith('issue_comment') || eventType.startsWith('pull_request_review')) {
+      if (!commentBody.toLowerCase().includes('@the-intern-bot')) {
+        return new Response('ignored: bot not mentioned in comment', { status: 200 });
+      }
+    }
+
+    // Guard: For check_suite, only trigger on CI failure (and ignore check_suite on agent-infra repo itself to prevent loops)
+    if (eventType === 'check_suite') {
+      const repoName = payload.repository?.name;
+      const infraRepo = env.AGENT_INFRA_REPO || 'the-intern';
+      if (repoName === infraRepo) {
+        return new Response('ignored: check_suite on infra repo', { status: 200 });
+      }
+      if (payload.check_suite?.conclusion !== 'failure') {
+        return new Response('ignored: check_suite not failure', { status: 200 });
+      }
+    }
+
     const installationId = payload.installation?.id;
     if (!installationId) {
       return new Response('missing installation id', { status: 400 });
