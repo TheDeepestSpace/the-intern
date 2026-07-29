@@ -23,31 +23,7 @@ jobs:
           export TARGET_REPO="${{ github.repository }}"
           node scripts/mint-installation-token.js
 
-      - name: Checkout telegram branch (create if missing)
-        run: |
-          REPO_URL="https://x-access-token:${{ steps.token.outputs.token }}@github.com/${{ github.repository }}.git"
-          git config --global user.name "the-intern-bot[bot]"
-          git config --global user.email "the-intern-bot[bot]@users.noreply.github.com"
-          git config --global --add safe.directory "*"
-
-          rm -rf tg-state
-          if git clone --branch telegram --single-branch "$REPO_URL" tg-state 2>/dev/null; then
-            echo "Cloned existing telegram branch."
-          else
-            echo "Creating orphan telegram branch..."
-            git clone "$REPO_URL" tg-state
-            cd tg-state
-            git checkout --orphan telegram
-            git rm -rf . 2>/dev/null || true
-            echo "# Telegram bot state — not project content, do not merge to main" > README.md
-            git add README.md
-            git commit -m "init telegram branch"
-            git push origin telegram
-            cd ..
-          fi
-
-      - name: Continue (or start) the session
-        working-directory: tg-state
+      - name: Run Claude (fresh session per message)
         run: |
           export CLAUDE_CODE_OAUTH_TOKEN="${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}"
           export TG_BOT_TOKEN="${{ secrets.TG_BOT_TOKEN }}"
@@ -68,41 +44,15 @@ jobs:
             export HOME=\"/home/dev\"
             cd \"$(pwd)\"
             
-            INSTRUCTIONS=\"\$(cat ../instructions/telegram.md 2>/dev/null || true)\"
+            INSTRUCTIONS=\"\$(cat instructions/telegram.md 2>/dev/null || true)\"
             PROMPT=\"\${INSTRUCTIONS}
 
             User message from Telegram:
             $MESSAGE\"
 
-            RUN_SUCCESS=0
-            if [ -f session-id ]; then
-              SID=\"\$(cat session-id | tr -d '\n\r ')\"
-              if [ -n \"\$SID\" ]; then
-                if claude -p \"\$PROMPT\" --resume \"\$SID\" --output-format json --dangerously-skip-permissions > result.json 2>&1; then
-                  RUN_SUCCESS=1
-                fi
-              fi
-            fi
-
-            if [ \"\$RUN_SUCCESS\" -eq 0 ]; then
-              claude -p \"\$PROMPT\" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
-            fi
+            claude -p \"\$PROMPT\" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
 
             echo '=== CLAUDE RESULT.JSON ==='
             cat result.json || true
             echo '=========================='
-
-            if jq -e . result.json >/dev/null 2>&1; then
-              jq -r '.session_id // empty' result.json > session-id || true
-            fi
           "
-
-      - name: Commit updated state to telegram branch
-        working-directory: tg-state
-        run: |
-          export GH_TOKEN="${{ secrets.GITHUB_TOKEN }}"
-          git config user.name "the-intern-bot[bot]"
-          git config user.email "the-intern-bot[bot]@users.noreply.github.com"
-          git add session-id || true
-          git commit -m "telegram: update state $(date -u +%FT%TZ)" || echo "nothing to commit"
-          git push origin telegram
