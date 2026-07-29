@@ -83,6 +83,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Ensure Node.js & runtime dependencies
+        run: |
+          if ! command -v node > /dev/null 2>&1; then
+            (apt-get update && apt-get install -y curl nodejs npm jq git sudo) || true
+          fi
+          if ! command -v claude > /dev/null 2>&1; then
+            npm install -g @anthropic-ai/claude-code || true
+          fi
+
       - name: Mint installation token
         id: token
         run: node scripts/mint-installation-token.js
@@ -132,7 +141,7 @@ jobs:
           PROMPT="${PROMPT}New request:
           $COMMENT_BODY"
 
-          # If running as root (e.g. fallback ubuntu container), switch to non-root 'dev' user to satisfy claude permission rules
+          # If running as root (e.g. fallback container), switch to non-root 'dev' user to satisfy claude permission rules
           if [ "$(id -u)" -eq 0 ]; then
             id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
             chown -R dev:dev /github/workspace /tmp /home/dev 2>/dev/null || true
