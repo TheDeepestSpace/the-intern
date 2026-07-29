@@ -55,9 +55,10 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.temp_token.outputs.token }}
         run: |
+          FALLBACK_IMAGE="ghcr.io/thedeepestspace/the-intern-dev:latest"
           REPO_NAME="${{ steps.parse.outputs.target_repo }}"
           if [ -z "$REPO_NAME" ]; then
-            echo "image=ubuntu:latest" >> "$GITHUB_OUTPUT"
+            echo "image=$FALLBACK_IMAGE" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           REPO_OWNER="${REPO_NAME%%/*}"
@@ -68,8 +69,8 @@ jobs:
             echo "Detected custom container image: $IMAGE:latest"
             echo "image=$IMAGE:latest" >> "$GITHUB_OUTPUT"
           else
-            echo "No custom container image found; using fallback ubuntu:latest"
-            echo "image=ubuntu:latest" >> "$GITHUB_OUTPUT"
+            echo "No repo-specific container image found; using fallback $FALLBACK_IMAGE"
+            echo "image=$FALLBACK_IMAGE" >> "$GITHUB_OUTPUT"
           fi
 
   handle:
@@ -82,15 +83,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Ensure Node.js & runtime dependencies
-        run: |
-          if ! command -v node > /dev/null 2>&1; then
-            (apt-get update && apt-get install -y curl nodejs npm jq git sudo) || true
-          fi
-          if ! command -v claude > /dev/null 2>&1; then
-            npm install -g @anthropic-ai/claude-code || true
-          fi
 
       - name: Mint installation token
         id: token
@@ -141,7 +133,7 @@ jobs:
           PROMPT="${PROMPT}New request:
           $COMMENT_BODY"
 
-          # If running as root (e.g. fallback container), switch to non-root 'dev' user to satisfy claude permission rules
+          # If running as root, switch to non-root 'dev' user to satisfy claude permission rules
           if [ "$(id -u)" -eq 0 ]; then
             id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
             chown -R dev:dev /github/workspace /tmp /home/dev 2>/dev/null || true
