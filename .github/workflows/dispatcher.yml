@@ -112,15 +112,16 @@ jobs:
       - name: Run Claude (fresh session per trigger, as non-root user)
         if: needs.detect-image.outputs.target_repo != ''
         working-directory: target
-        env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          GH_TOKEN: ${{ steps.token.outputs.token }}
-          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
-          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
-          ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
-          COMMENT_BODY: ${{ needs.detect-image.outputs.clean_prompt }}
-          PRIOR_CONTEXT: ${{ steps.summary_context.outputs.summary }}
         run: |
+          export CLAUDE_CODE_OAUTH_TOKEN="${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}"
+          export GH_TOKEN="${{ steps.token.outputs.token }}"
+          export GITHUB_TOKEN="${{ steps.token.outputs.token }}"
+          export TARGET_REPO="${{ needs.detect-image.outputs.target_repo }}"
+          export ISSUE_NUMBER="${{ needs.detect-image.outputs.issue_number }}"
+
+          COMMENT_BODY=$(jq -r '.comment_body // empty' ../parsed_trigger.json 2>/dev/null || echo "${{ needs.detect-image.outputs.clean_prompt }}")
+          PRIOR_CONTEXT=$(cat ../prior_summary.txt 2>/dev/null || echo "${{ steps.summary_context.outputs.summary }}")
+
           PROMPT="You are @the-intern-bot working on repository ${TARGET_REPO}, issue/PR #${ISSUE_NUMBER}.
           You have access to the GitHub CLI ('gh') and full git tools. Use 'gh' to post comments, inspect code, run tests, or open PRs as needed.
 
@@ -134,28 +135,22 @@ jobs:
           PROMPT="${PROMPT}New request:
           $COMMENT_BODY"
 
-          # If running as root, switch to non-root 'dev' user to satisfy claude permission rules
-          if [ "$(id -u)" -eq 0 ]; then
-            id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
-            chown -R dev:dev /github/workspace /tmp /home/dev 2>/dev/null || true
-            su dev -c "
-              export CLAUDE_CODE_OAUTH_TOKEN=\"$CLAUDE_CODE_OAUTH_TOKEN\"
-              export GH_TOKEN=\"$GH_TOKEN\"
-              export GITHUB_TOKEN=\"$GITHUB_TOKEN\"
-              export HOME=\"/home/dev\"
-              cd \"$(pwd)\"
-              git config --global --add safe.directory \"$(pwd)\" 2>/dev/null || true
-              git config user.name \"the-intern-bot[bot]\"
-              git config user.email \"the-intern-bot[bot]@users.noreply.github.com\"
-              claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
-              jq -r '.result // .output // .' result.json > ../session_result.txt || true
-            "
-          else
-            git config user.name "the-intern-bot[bot]"
-            git config user.email "the-intern-bot[bot]@users.noreply.github.com"
-            claude -p "$PROMPT" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
+          # Ensure dev user exists and owns all workspace directories so dev user has write access
+          id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
+          chown -R dev:dev . .. /__w /github/workspace /tmp /home/dev 2>/dev/null || true
+
+          su dev -c "
+            export CLAUDE_CODE_OAUTH_TOKEN=\"$CLAUDE_CODE_OAUTH_TOKEN\"
+            export GH_TOKEN=\"$GH_TOKEN\"
+            export GITHUB_TOKEN=\"$GITHUB_TOKEN\"
+            export HOME=\"/home/dev\"
+            cd \"$(pwd)\"
+            git config --global --add safe.directory \"$(pwd)\" 2>/dev/null || true
+            git config user.name \"the-intern-bot[bot]\"
+            git config user.email \"the-intern-bot[bot]@users.noreply.github.com\"
+            claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
             jq -r '.result // .output // .' result.json > ../session_result.txt || true
-          fi
+          "
 
       - name: Commit session summary
         if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''

@@ -119,6 +119,9 @@ if (require.main === module) {
 
       const token = await getInstallationToken({ appId, privateKey, installationId, targetRepo });
 
+      // Tell GitHub Actions runner to mask this token across all step logs
+      console.log(`::add-mask::${token}`);
+
       if (process.env.GITHUB_OUTPUT) {
         fs.appendFileSync(process.env.GITHUB_OUTPUT, `token=${token}\n`);
       } else {
