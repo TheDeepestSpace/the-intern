@@ -1,0 +1,9 @@
+# Conversation Summary
+
+## svsch repo access
+- `svsch` (TheDeepestSpace/svsch) is a VS Code extension that renders visual block diagrams from SystemVerilog/Verilog. Not checked out under `/__w/the-intern/the-intern` — had to discover it via `GH_TOKEN`'s `/installation/repositories` (a GitHub App installation token scoped to 3 repos: the-intern, svsch, and one other). `gh` CLI is not installed in this environment; use `curl` + `$GH_TOKEN` against the GitHub REST API instead. Cloned to `/tmp/svsch` for research (ephemeral, not persisted).
+
+## 2026-07-29: Ternary operator support in svsch
+- Researched and confirmed svsch has no support for the `?:` conditional operator — it falls through to a generic `comb` block in both the C++/UHDM backend (`getOrPromoteExpr` in `src/parser/backend_cpp/src/extractor_parts/expressions.inc` has no `isConditionalOperation` check, unlike ALU/inverter/replicate which each have one) and the text-fallback parser (`extractContinuousAssigns` in `src/parser/textExtractor.ts`).
+- Filed issue: https://github.com/TheDeepestSpace/svsch/issues/72 — includes root-cause file/line refs, proposed design (hook ternary into `getOrPromoteExpr` the same way ALU/inverter are, so nesting and ternary-embedded-in-larger-expressions both fall out of the existing recursion for free — recommended over the user's initial "whole-expr-only" heuristic), syntax-book YAML test cases needed (`test/syntax-book/cases/muxes.yaml`), and visual regression fixtures needed (`test/visual/fixtures/`, pattern from `test/visual/mux.visual.spec.ts`).
+- Not yet implemented. Next step if user wants it built: comment `@the-intern-bot <instructions>` on issue #72 to kick off the dispatcher pipeline, or the user may want to discuss the open questions in the issue first (port label convention `1`/`0` vs `true`/`false`; whether same-selector ternary chains should eventually collapse to one N-way mux like case statements do).
