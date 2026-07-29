@@ -51,11 +51,13 @@ jobs:
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          CHAT_ID: ${{ github.event.client_payload.chat_id }}
-          MESSAGE: ${{ github.event.client_payload.text }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
         run: |
+          # Read MESSAGE and CHAT_ID dynamically from event JSON file to keep step log header clean
+          MESSAGE=$(jq -r '.client_payload.text // empty' "$GITHUB_EVENT_PATH")
+          CHAT_ID=$(jq -r '.client_payload.chat_id // empty' "$GITHUB_EVENT_PATH")
+
           id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
           chown -R dev:dev . /home/dev 2>/dev/null || true
           su dev -c "
