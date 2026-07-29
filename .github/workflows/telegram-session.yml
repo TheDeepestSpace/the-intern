@@ -42,42 +42,36 @@ jobs:
         working-directory: tg-state
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          MESSAGE: ${{ github.event.client_payload.text }}
-        run: |
-          id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
-          chown -R dev:dev /github/workspace /tmp /home/dev /__w 2>/dev/null || true
-          su dev -c "
-            export CLAUDE_CODE_OAUTH_TOKEN=\"$CLAUDE_CODE_OAUTH_TOKEN\"
-            export HOME=\"/home/dev\"
-            cd \"$(pwd)\"
-            if [ -f session-id ]; then
-              claude -p \"$MESSAGE\" --resume \"\$(cat session-id)\" --output-format json --dangerously-skip-permissions > result.json || true
-            else
-              claude -p \"$MESSAGE\" --output-format json --dangerously-skip-permissions > result.json || true
-            fi
-            jq -r '.session_id // empty' result.json > session-id || true
-            jq -r '.result // .output // .' result.json > reply.txt || true
-          "
-
-      - name: Detect delegation vs pure conversation
-        id: delegate
-        working-directory: tg-state
-        run: |
-          echo "is_delegation=false" >> "$GITHUB_OUTPUT"
-
-      - name: Reply on Telegram
-        working-directory: tg-state
-        env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          MESSAGE: ${{ github.event.client_payload.text }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
         run: |
-          REPLY_TEXT=$(cat reply.txt)
-          if [ -z "$REPLY_TEXT" ]; then
-            REPLY_TEXT="Completed request."
-          fi
-          curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
-            -d chat_id="$CHAT_ID" \
-            --data-urlencode text="$REPLY_TEXT"
+          id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
+          chown -R dev:dev . /home/dev 2>/dev/null || true
+          su dev -c "
+            export CLAUDE_CODE_OAUTH_TOKEN=\"$CLAUDE_CODE_OAUTH_TOKEN\"
+            export TG_BOT_TOKEN=\"$TG_BOT_TOKEN\"
+            export CHAT_ID=\"$CHAT_ID\"
+            export GH_TOKEN=\"$GH_TOKEN\"
+            export GITHUB_TOKEN=\"$GITHUB_TOKEN\"
+            export HOME=\"/home/dev\"
+            cd \"$(pwd)\"
+            
+            INSTRUCTIONS=\"\$(cat ../instructions/telegram.md 2>/dev/null || true)\"
+            PROMPT=\"\${INSTRUCTIONS}
+
+            User message from Telegram:
+            $MESSAGE\"
+
+            if [ -f session-id ]; then
+              claude -p \"\$PROMPT\" --resume \"\$(cat session-id)\" --output-format json --dangerously-skip-permissions > result.json || true
+            else
+              claude -p \"\$PROMPT\" --output-format json --dangerously-skip-permissions > result.json || true
+            fi
+            jq -r '.session_id // empty' result.json > session-id || true
+          "
 
       - name: Commit updated state to telegram branch
         working-directory: tg-state
