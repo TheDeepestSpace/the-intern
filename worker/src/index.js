@@ -36,22 +36,18 @@ async function handleGitHub(request, env) {
     payload.sender?.login ||
     payload.sender?.user?.login;
 
-  // Gate on exact username allowlist (ALLOWED_USERS comma-separated list)
+  // Gate on exact username allowlist or specifically the-intern-bot[bot]
   const allowed = (env.ALLOWED_USERS || '')
     .split(',')
     .map(s => s.trim())
     .filter(Boolean);
 
-  if (allowed.length > 0) {
+  const isBot = author === 'the-intern-bot[bot]';
+
+  if (allowed.length > 0 && !isBot) {
     if (!author || !allowed.includes(author)) {
       return new Response('ignored: author not in allowlist', { status: 200 });
     }
-  }
-
-  // Bot self-comment defense
-  const botLogin = env.BOT_LOGIN || 'the-intern-bot';
-  if (author === botLogin || author === `${botLogin}[bot]`) {
-    return new Response('ignored: self-comment', { status: 200 });
   }
 
   // Filter relevant event types
