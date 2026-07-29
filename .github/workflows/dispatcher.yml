@@ -83,12 +83,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Ensure Node.js for token minting
-        run: |
-          if ! command -v node > /dev/null 2>&1; then
-            (apt-get update && apt-get install -y curl nodejs npm jq git sudo) || true
-          fi
-
       - name: Mint installation token
         id: token
         run: node scripts/mint-installation-token.js
@@ -112,12 +106,6 @@ jobs:
         env:
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
-
-      - name: Ensure Claude Code CLI
-        run: |
-          if ! command -v claude > /dev/null 2>&1; then
-            npm install -g @anthropic-ai/claude-code
-          fi
 
       - name: Run Claude (fresh session per trigger, as non-root user)
         if: needs.detect-image.outputs.target_repo != ''
