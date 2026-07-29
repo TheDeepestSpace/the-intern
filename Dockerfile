@@ -44,6 +44,10 @@ RUN cd /tmp && \
 # Pre-install Claude Code CLI globally
 RUN npm install -g @anthropic-ai/claude-code
 
+# Prepare temp and workspace directories with wide permissions for GHA runner
+RUN mkdir -p /__w /github/workspace /tmp && \
+    chmod -R 777 /__w /github /tmp 2>/dev/null || true
+
 # Setup oh-my-zsh for dev user
 USER dev
 ARG DOCKER_OHMYZSH_SCRIPT_NAME=zsh-in-docker.sh

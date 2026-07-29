@@ -78,6 +78,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ${{ needs.detect-image.outputs.image }}
+      options: --user root
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@v4
@@ -133,28 +134,21 @@ jobs:
           PROMPT="${PROMPT}New request:
           $COMMENT_BODY"
 
-          # If running as root, switch to non-root 'dev' user to satisfy claude permission rules
-          if [ "$(id -u)" -eq 0 ]; then
-            id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
-            chown -R dev:dev /github/workspace /tmp /home/dev 2>/dev/null || true
-            su dev -c "
-              export CLAUDE_CODE_OAUTH_TOKEN=\"$CLAUDE_CODE_OAUTH_TOKEN\"
-              export GH_TOKEN=\"$GH_TOKEN\"
-              export GITHUB_TOKEN=\"$GITHUB_TOKEN\"
-              export HOME=\"/home/dev\"
-              cd \"$(pwd)\"
-              git config --global --add safe.directory \"$(pwd)\" 2>/dev/null || true
-              git config user.name \"the-intern-bot[bot]\"
-              git config user.email \"the-intern-bot[bot]@users.noreply.github.com\"
-              claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions > result.json || true
-              jq -r '.result // .output // .' result.json > ../session_result.txt || true
-            "
-          else
-            git config user.name "the-intern-bot[bot]"
-            git config user.email "the-intern-bot[bot]@users.noreply.github.com"
-            claude -p "$PROMPT" --output-format json --dangerously-skip-permissions > result.json || true
+          # Switch execution to non-root 'dev' user to satisfy claude permission rules
+          id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
+          chown -R dev:dev /github/workspace /tmp /home/dev /__w 2>/dev/null || true
+          su dev -c "
+            export CLAUDE_CODE_OAUTH_TOKEN=\"$CLAUDE_CODE_OAUTH_TOKEN\"
+            export GH_TOKEN=\"$GH_TOKEN\"
+            export GITHUB_TOKEN=\"$GITHUB_TOKEN\"
+            export HOME=\"/home/dev\"
+            cd \"$(pwd)\"
+            git config --global --add safe.directory \"$(pwd)\" 2>/dev/null || true
+            git config user.name \"the-intern-bot[bot]\"
+            git config user.email \"the-intern-bot[bot]@users.noreply.github.com\"
+            claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions > result.json || true
             jq -r '.result // .output // .' result.json > ../session_result.txt || true
-          fi
+          "
 
       - name: Commit session summary
         if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
