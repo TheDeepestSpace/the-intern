@@ -17,11 +17,11 @@ jobs:
 
       - name: Mint installation token
         id: token
-        run: node scripts/mint-installation-token.js
-        env:
-          APP_ID: ${{ secrets.APP_ID }}
-          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
-          TARGET_REPO: ${{ github.repository }}
+        run: |
+          export APP_ID="${{ secrets.APP_ID }}"
+          export APP_PRIVATE_KEY="${{ secrets.APP_PRIVATE_KEY }}"
+          export TARGET_REPO="${{ github.repository }}"
+          node scripts/mint-installation-token.js
 
       - name: Checkout telegram branch (create if missing)
         run: |
@@ -48,13 +48,12 @@ jobs:
 
       - name: Continue (or start) the session
         working-directory: tg-state
-        env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          GH_TOKEN: ${{ steps.token.outputs.token }}
-          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
         run: |
-          # Read MESSAGE and CHAT_ID dynamically from event JSON file to keep step log header clean
+          export CLAUDE_CODE_OAUTH_TOKEN="${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}"
+          export TG_BOT_TOKEN="${{ secrets.TG_BOT_TOKEN }}"
+          export GH_TOKEN="${{ steps.token.outputs.token }}"
+          export GITHUB_TOKEN="${{ steps.token.outputs.token }}"
+
           MESSAGE=$(jq -r '.client_payload.text // empty' "$GITHUB_EVENT_PATH")
           CHAT_ID=$(jq -r '.client_payload.chat_id // empty' "$GITHUB_EVENT_PATH")
 
@@ -86,6 +85,7 @@ jobs:
       - name: Commit updated state to telegram branch
         working-directory: tg-state
         run: |
+          export GH_TOKEN="${{ secrets.GITHUB_TOKEN }}"
           git config user.name "the-intern-bot[bot]"
           git config user.email "the-intern-bot[bot]@users.noreply.github.com"
           git add session-id || true
