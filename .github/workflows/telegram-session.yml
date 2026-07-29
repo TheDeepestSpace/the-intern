@@ -74,15 +74,27 @@ jobs:
             User message from Telegram:
             $MESSAGE\"
 
+            RUN_SUCCESS=0
             if [ -f session-id ]; then
-              claude -p \"\$PROMPT\" --resume \"\$(cat session-id)\" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
-            else
+              SID=\"\$(cat session-id | tr -d '\n\r ')\"
+              if [ -n \"\$SID\" ]; then
+                if claude -p \"\$PROMPT\" --resume \"\$SID\" --output-format json --dangerously-skip-permissions > result.json 2>&1; then
+                  RUN_SUCCESS=1
+                fi
+              fi
+            fi
+
+            if [ \"\$RUN_SUCCESS\" -eq 0 ]; then
               claude -p \"\$PROMPT\" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
             fi
+
             echo '=== CLAUDE RESULT.JSON ==='
             cat result.json || true
             echo '=========================='
-            jq -r '.session_id // empty' result.json > session-id || true
+
+            if jq -e . result.json >/dev/null 2>&1; then
+              jq -r '.session_id // empty' result.json > session-id || true
+            fi
           "
 
       - name: Commit updated state to telegram branch
