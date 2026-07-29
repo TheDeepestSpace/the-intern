@@ -119,9 +119,14 @@ async function handleTelegram(request, env) {
   const message = update.message;
   if (!message || !message.text) return new Response('ok', { status: 200 });
 
-  // Only you — numeric Telegram user ID check
+  // Gate on numeric Telegram user ID check if configured
   if (env.ALLOWED_TG_USER_ID && String(message.from?.id) !== String(env.ALLOWED_TG_USER_ID)) {
     return new Response('ignored: unauthorized sender', { status: 200 });
+  }
+
+  // Gate on numeric Telegram Chat ID check if configured
+  if (env.ALLOWED_TG_CHAT_ID && String(message.chat?.id) !== String(env.ALLOWED_TG_CHAT_ID)) {
+    return new Response('ignored: unauthorized chat_id', { status: 200 });
   }
 
   const owner = env.AGENT_INFRA_OWNER || 'TheDeepestSpace';
