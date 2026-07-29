@@ -26,17 +26,25 @@ jobs:
       - name: Checkout telegram branch (create if missing)
         run: |
           REPO_URL="https://x-access-token:${{ steps.token.outputs.token }}@github.com/${{ github.repository }}.git"
-          git clone --branch telegram --single-branch "$REPO_URL" tg-state || {
+          git config --global user.name "the-intern-bot[bot]"
+          git config --global user.email "the-intern-bot[bot]@users.noreply.github.com"
+          git config --global --add safe.directory "*"
+
+          rm -rf tg-state
+          if git clone --branch telegram --single-branch "$REPO_URL" tg-state 2>/dev/null; then
+            echo "Cloned existing telegram branch."
+          else
+            echo "Creating orphan telegram branch..."
             git clone "$REPO_URL" tg-state
             cd tg-state
-            git config user.name "the-intern-bot[bot]"
-            git config user.email "the-intern-bot[bot]@users.noreply.github.com"
             git checkout --orphan telegram
             git rm -rf . 2>/dev/null || true
             echo "# Telegram bot state — not project content, do not merge to main" > README.md
-            git add README.md && git commit -m "init telegram branch"
+            git add README.md
+            git commit -m "init telegram branch"
             git push origin telegram
-          }
+            cd ..
+          fi
 
       - name: Continue (or start) the session
         working-directory: tg-state
