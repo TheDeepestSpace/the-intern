@@ -49,6 +49,7 @@ jobs:
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           INSTALLATION_ID: ${{ steps.parse.outputs.installation_id }}
+          TARGET_REPO: ${{ steps.parse.outputs.target_repo }}
 
       - name: Check for repo-specific devcontainer image on GHCR
         id: check

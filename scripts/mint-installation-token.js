@@ -48,15 +48,41 @@ function mintAppJwt(appId, privateKeyPem) {
   return `${dataToSign}.${signature}`;
 }
 
-async function getInstallationToken({ appId, privateKey, installationId }) {
-  if (!appId) throw new Error('Missing appId');
-  if (!privateKey) throw new Error('Missing privateKey');
-  if (!installationId) throw new Error('Missing installationId');
+async function getInstallationIdForRepo(appJwt, targetRepo) {
+  if (!targetRepo || !targetRepo.includes('/')) return null;
+  const res = await fetch(`https://api.github.com/repos/${targetRepo}/installation`, {
+    headers: {
+      Authorization: `Bearer ${appJwt}`,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'the-intern-bot',
+    },
+  });
+  if (!res.ok) {
+    console.error(`Lookup installation failed for ${targetRepo} (${res.status}): ${await res.text()}`);
+    return null;
+  }
+  const data = await res.json();
+  return data.id;
+}
+
+async function getInstallationToken({ appId, privateKey, installationId, targetRepo }) {
+  if (!appId) throw new Error('Missing APP_ID secret');
+  if (!privateKey) throw new Error('Missing APP_PRIVATE_KEY secret');
 
   const appJwt = mintAppJwt(appId, privateKey);
 
+  let targetInstallationId = installationId;
+  if (!targetInstallationId && targetRepo) {
+    console.log(`No installationId provided, fetching installation for repo ${targetRepo}...`);
+    targetInstallationId = await getInstallationIdForRepo(appJwt, targetRepo);
+  }
+
+  if (!targetInstallationId) {
+    throw new Error(`Could not determine installationId for repo: ${targetRepo || 'unknown'}`);
+  }
+
   const res = await fetch(
-    `https://api.github.com/app/installations/${installationId}/access_tokens`,
+    `https://api.github.com/app/installations/${targetInstallationId}/access_tokens`,
     {
       method: 'POST',
       headers: {
@@ -76,7 +102,7 @@ async function getInstallationToken({ appId, privateKey, installationId }) {
   return data.token;
 }
 
-module.exports = { getInstallationToken, mintAppJwt };
+module.exports = { getInstallationToken, mintAppJwt, getPrivateKey };
 
 if (require.main === module) {
   (async () => {
@@ -84,13 +110,14 @@ if (require.main === module) {
       const appId = process.env.APP_ID;
       const privateKey = getPrivateKey(process.env);
       const installationId = process.env.INSTALLATION_ID;
+      const targetRepo = process.env.TARGET_REPO;
 
-      if (!appId || !privateKey || !installationId) {
-        console.error('Usage environment variables required: APP_ID, APP_PRIVATE_KEY, INSTALLATION_ID');
+      if (!appId || !privateKey) {
+        console.error('APP_ID and APP_PRIVATE_KEY secrets are required');
         process.exit(1);
       }
 
-      const token = await getInstallationToken({ appId, privateKey, installationId });
+      const token = await getInstallationToken({ appId, privateKey, installationId, targetRepo });
 
       if (process.env.GITHUB_OUTPUT) {
         fs.appendFileSync(process.env.GITHUB_OUTPUT, `token=${token}\n`);
