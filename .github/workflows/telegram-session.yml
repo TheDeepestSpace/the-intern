@@ -1,0 +1,87 @@
+name: telegram session
+on:
+  repository_dispatch:
+    types: [telegram_message]
+
+jobs:
+  respond:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/thedeepestspace/the-intern-dev:latest
+      options: --user root
+    steps:
+      - name: Checkout agent-infra
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Mint installation token
+        id: token
+        run: node scripts/mint-installation-token.js
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          TARGET_REPO: ${{ github.repository }}
+
+      - name: Checkout telegram branch (create if missing)
+        run: |
+          REPO_URL="https://x-access-token:${{ steps.token.outputs.token }}@github.com/${{ github.repository }}.git"
+          git clone --branch telegram --single-branch "$REPO_URL" tg-state || {
+            git clone "$REPO_URL" tg-state
+            cd tg-state
+            git checkout --orphan telegram
+            git rm -rf . 2>/dev/null || true
+            echo "# Telegram bot state — not project content, do not merge to main" > README.md
+            git add README.md && git commit -m "init telegram branch"
+            git push origin telegram
+          }
+
+      - name: Continue (or start) the session
+        working-directory: tg-state
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          MESSAGE: ${{ github.event.client_payload.text }}
+        run: |
+          id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
+          chown -R dev:dev /github/workspace /tmp /home/dev /__w 2>/dev/null || true
+          su dev -c "
+            export CLAUDE_CODE_OAUTH_TOKEN=\"$CLAUDE_CODE_OAUTH_TOKEN\"
+            export HOME=\"/home/dev\"
+            cd \"$(pwd)\"
+            if [ -f session-id ]; then
+              claude -p \"$MESSAGE\" --resume \"\$(cat session-id)\" --output-format json --dangerously-skip-permissions > result.json || true
+            else
+              claude -p \"$MESSAGE\" --output-format json --dangerously-skip-permissions > result.json || true
+            fi
+            jq -r '.session_id // empty' result.json > session-id || true
+            jq -r '.result // .output // .' result.json > reply.txt || true
+          "
+
+      - name: Detect delegation vs pure conversation
+        id: delegate
+        working-directory: tg-state
+        run: |
+          echo "is_delegation=false" >> "$GITHUB_OUTPUT"
+
+      - name: Reply on Telegram
+        working-directory: tg-state
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+        run: |
+          REPLY_TEXT=$(cat reply.txt)
+          if [ -z "$REPLY_TEXT" ]; then
+            REPLY_TEXT="Completed request."
+          fi
+          curl -s -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
+            -d chat_id="$CHAT_ID" \
+            --data-urlencode text="$REPLY_TEXT"
+
+      - name: Commit updated state to telegram branch
+        working-directory: tg-state
+        run: |
+          git config user.name "the-intern-bot[bot]"
+          git config user.email "the-intern-bot[bot]@users.noreply.github.com"
+          git add session-id || true
+          git commit -m "telegram: update state $(date -u +%FT%TZ)" || echo "nothing to commit"
+          git push origin telegram
