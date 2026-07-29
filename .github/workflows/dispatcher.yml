@@ -148,18 +148,12 @@ jobs:
               git config user.name \"the-intern-bot[bot]\"
               git config user.email \"the-intern-bot[bot]@users.noreply.github.com\"
               claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
-              echo '=== CLAUDE RESULT.JSON ==='
-              cat result.json || true
-              echo '=========================='
               jq -r '.result // .output // .' result.json > ../session_result.txt || true
             "
           else
             git config user.name "the-intern-bot[bot]"
             git config user.email "the-intern-bot[bot]@users.noreply.github.com"
             claude -p "$PROMPT" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
-            echo '=== CLAUDE RESULT.JSON ==='
-            cat result.json || true
-            echo '=========================='
             jq -r '.result // .output // .' result.json > ../session_result.txt || true
           fi
 
