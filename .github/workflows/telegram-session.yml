@@ -29,6 +29,8 @@ jobs:
           git clone --branch telegram --single-branch "$REPO_URL" tg-state || {
             git clone "$REPO_URL" tg-state
             cd tg-state
+            git config user.name "the-intern-bot[bot]"
+            git config user.email "the-intern-bot[bot]@users.noreply.github.com"
             git checkout --orphan telegram
             git rm -rf . 2>/dev/null || true
             echo "# Telegram bot state — not project content, do not merge to main" > README.md
