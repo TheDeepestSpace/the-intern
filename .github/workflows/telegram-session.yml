@@ -27,7 +27,7 @@ jobs:
         run: |
           REPO_URL="https://x-access-token:${{ steps.token.outputs.token }}@github.com/${{ github.repository }}.git"
           git config --global user.name "the-intern-bot[bot]"
-          git config --global user.email "the-intern-bot[bot]@users.noreply.github.com"
+          git config user.email "the-intern-bot[bot]@users.noreply.github.com"
           git config --global --add safe.directory "*"
 
           rm -rf tg-state
@@ -75,10 +75,13 @@ jobs:
             $MESSAGE\"
 
             if [ -f session-id ]; then
-              claude -p \"\$PROMPT\" --resume \"\$(cat session-id)\" --output-format json --dangerously-skip-permissions > result.json || true
+              claude -p \"\$PROMPT\" --resume \"\$(cat session-id)\" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
             else
-              claude -p \"\$PROMPT\" --output-format json --dangerously-skip-permissions > result.json || true
+              claude -p \"\$PROMPT\" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
             fi
+            echo '=== CLAUDE RESULT.JSON ==='
+            cat result.json || true
+            echo '=========================='
             jq -r '.session_id // empty' result.json > session-id || true
           "
 
