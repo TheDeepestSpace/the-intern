@@ -23,7 +23,32 @@ jobs:
           export TARGET_REPO="${{ github.repository }}"
           node scripts/mint-installation-token.js
 
-      - name: Run Claude (fresh session per message)
+      - name: Checkout telegram branch (create if missing)
+        run: |
+          REPO_URL="https://x-access-token:${{ steps.token.outputs.token }}@github.com/${{ github.repository }}.git"
+          git config --global user.name "the-intern-bot[bot]"
+          git config --global user.email "the-intern-bot[bot]@users.noreply.github.com"
+          git config --global --add safe.directory "*"
+
+          rm -rf tg-state
+          if git clone --branch telegram --single-branch "$REPO_URL" tg-state 2>/dev/null; then
+            echo "Cloned existing telegram branch."
+          else
+            echo "Creating orphan telegram branch..."
+            git clone "$REPO_URL" tg-state
+            cd tg-state
+            git checkout --orphan telegram
+            git rm -rf . 2>/dev/null || true
+            echo "# Telegram bot state — conversation continuity" > README.md
+            echo "# Ongoing Telegram Conversation Summary" > convo.md
+            git add README.md convo.md
+            git commit -m "init telegram branch"
+            git push origin telegram
+            cd ..
+          fi
+
+      - name: Run Claude (fresh session with convo.md context)
+        working-directory: tg-state
         run: |
           export CLAUDE_CODE_OAUTH_TOKEN="${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}"
           export TG_BOT_TOKEN="${{ secrets.TG_BOT_TOKEN }}"
@@ -44,11 +69,26 @@ jobs:
             export HOME=\"/home/dev\"
             cd \"$(pwd)\"
             
-            INSTRUCTIONS=\"\$(cat instructions/telegram.md 2>/dev/null || true)\"
+            INSTRUCTIONS=\"\$(cat ../instructions/telegram.md 2>/dev/null || true)\"
+            CONVO_CONTEXT=\"\$(cat convo.md 2>/dev/null || true)\"
+
             PROMPT=\"\${INSTRUCTIONS}
 
-            User message from Telegram:
+            Prior Conversation Summary (from convo.md):
+            \${CONVO_CONTEXT}
+
+            New Telegram Message:
             $MESSAGE\"
 
             claude -p \"\$PROMPT\" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
           "
+
+      - name: Commit updated convo.md to telegram branch
+        working-directory: tg-state
+        run: |
+          export GH_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          git config user.name "the-intern-bot[bot]"
+          git config user.email "the-intern-bot[bot]@users.noreply.github.com"
+          git add convo.md || true
+          git commit -m "telegram: update convo.md $(date -u +%FT%TZ)" || echo "nothing to commit"
+          git push origin telegram

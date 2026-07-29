@@ -21,3 +21,6 @@ echo "Message text here" | node ../scripts/send-telegram.js
 
 - Send updates whenever appropriate (once or multiple times per session).
 - Keep replies clear, concise, and easy to read on mobile.
+
+## Maintaining Conversation Continuity (`convo.md`)
+Before completing your session, you **must** update the `convo.md` file in your working directory with a short, rolling summary of key discussion points, decisions, open tasks, or ongoing context. This summary (`convo.md`) will be passed to future sessions so you can maintain continuity across separate messages.
