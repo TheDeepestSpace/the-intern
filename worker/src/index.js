@@ -36,15 +36,13 @@ async function handleGitHub(request, env) {
     payload.sender?.login ||
     payload.sender?.user?.login;
 
-  // Gate on exact username allowlist or specifically the-intern-bot[bot]
+  // Gate on exact username allowlist (ALLOWED_USERS comma-separated list)
   const allowed = (env.ALLOWED_USERS || '')
     .split(',')
     .map(s => s.trim())
     .filter(Boolean);
 
-  const isBot = author === 'the-intern-bot[bot]';
-
-  if (allowed.length > 0 && !isBot) {
+  if (allowed.length > 0) {
     if (!author || !allowed.includes(author)) {
       return new Response('ignored: author not in allowlist', { status: 200 });
     }
