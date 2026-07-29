@@ -38,7 +38,6 @@ jobs:
       image-name: ${{ needs.prep.outputs.ci_image_name }}
       dockerfile: ./Dockerfile
       target: ci
-      tag-prefix: ci-
     secrets: inherit
 
   build_dev_image:
@@ -52,5 +51,4 @@ jobs:
       image-name: ${{ needs.prep.outputs.dev_image_name }}
       dockerfile: ./Dockerfile
       target: dev
-      tag-prefix: dev-
     secrets: inherit
