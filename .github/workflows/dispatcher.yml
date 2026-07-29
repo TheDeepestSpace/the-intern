@@ -86,7 +86,7 @@ jobs:
       - name: Ensure Node.js for token minting
         run: |
           if ! command -v node > /dev/null 2>&1; then
-            (apt-get update && apt-get install -y curl nodejs npm jq git) || true
+            (apt-get update && apt-get install -y curl nodejs npm jq git sudo) || true
           fi
 
       - name: Mint installation token
@@ -119,7 +119,7 @@ jobs:
             npm install -g @anthropic-ai/claude-code
           fi
 
-      - name: Run Claude (fresh session per trigger, inside target image)
+      - name: Run Claude (fresh session per trigger, as non-root user)
         if: needs.detect-image.outputs.target_repo != ''
         working-directory: target
         env:
@@ -131,9 +131,6 @@ jobs:
           COMMENT_BODY: ${{ needs.detect-image.outputs.clean_prompt }}
           PRIOR_CONTEXT: ${{ steps.summary_context.outputs.summary }}
         run: |
-          git config user.name "the-intern-bot[bot]"
-          git config user.email "the-intern-bot[bot]@users.noreply.github.com"
-
           PROMPT="You are @the-intern-bot working on repository ${TARGET_REPO}, issue/PR #${ISSUE_NUMBER}.
           You have access to the GitHub CLI ('gh') and full git tools. Use 'gh' to post comments, inspect code, run tests, or open PRs as needed.
 
@@ -147,8 +144,28 @@ jobs:
           PROMPT="${PROMPT}New request:
           $COMMENT_BODY"
 
-          claude -p "$PROMPT" --output-format json --dangerously-skip-permissions > result.json || true
-          jq -r '.result // .output // .' result.json > ../session_result.txt || true
+          # If running as root (e.g. fallback ubuntu container), switch to non-root 'dev' user to satisfy claude permission rules
+          if [ "$(id -u)" -eq 0 ]; then
+            id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
+            chown -R dev:dev /github/workspace /tmp /home/dev 2>/dev/null || true
+            su dev -c "
+              export CLAUDE_CODE_OAUTH_TOKEN=\"$CLAUDE_CODE_OAUTH_TOKEN\"
+              export GH_TOKEN=\"$GH_TOKEN\"
+              export GITHUB_TOKEN=\"$GITHUB_TOKEN\"
+              export HOME=\"/home/dev\"
+              cd \"$(pwd)\"
+              git config --global --add safe.directory \"$(pwd)\" 2>/dev/null || true
+              git config user.name \"the-intern-bot[bot]\"
+              git config user.email \"the-intern-bot[bot]@users.noreply.github.com\"
+              claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions > result.json || true
+              jq -r '.result // .output // .' result.json > ../session_result.txt || true
+            "
+          else
+            git config user.name "the-intern-bot[bot]"
+            git config user.email "the-intern-bot[bot]@users.noreply.github.com"
+            claude -p "$PROMPT" --output-format json --dangerously-skip-permissions > result.json || true
+            jq -r '.result // .output // .' result.json > ../session_result.txt || true
+          fi
 
       - name: Commit session summary
         if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
