@@ -26,7 +26,6 @@ jobs:
       issue_number: ${{ steps.parse.outputs.issue_number }}
       clean_prompt: ${{ steps.parse.outputs.clean_prompt }}
       installation_id: ${{ steps.parse.outputs.installation_id }}
-      token: ${{ steps.token.outputs.token }}
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@v4
@@ -42,8 +41,8 @@ jobs:
           INPUT_COMMENT_BODY: ${{ github.event.inputs.comment_body }}
           INPUT_INSTALLATION_ID: ${{ github.event.inputs.installation_id }}
 
-      - name: Mint installation token
-        id: token
+      - name: Mint temporary token for image check
+        id: temp_token
         run: node scripts/mint-installation-token.js
         env:
           APP_ID: ${{ secrets.APP_ID }}
@@ -54,7 +53,7 @@ jobs:
       - name: Check for repo-specific devcontainer image on GHCR
         id: check
         env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GH_TOKEN: ${{ steps.temp_token.outputs.token }}
         run: |
           REPO_NAME="${{ steps.parse.outputs.target_repo }}"
           if [ -z "$REPO_NAME" ]; then
@@ -84,12 +83,27 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Ensure Node.js for token minting
+        run: |
+          if ! command -v node > /dev/null 2>&1; then
+            (apt-get update && apt-get install -y curl nodejs npm jq git) || true
+          fi
+
+      - name: Mint installation token
+        id: token
+        run: node scripts/mint-installation-token.js
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          INSTALLATION_ID: ${{ needs.detect-image.outputs.installation_id }}
+          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+
       - name: Checkout target repository
         if: needs.detect-image.outputs.target_repo != ''
         uses: actions/checkout@v4
         with:
           repository: ${{ needs.detect-image.outputs.target_repo }}
-          token: ${{ needs.detect-image.outputs.token }}
+          token: ${{ steps.token.outputs.token }}
           path: target
 
       - name: Fetch prior session summary context
@@ -99,11 +113,8 @@ jobs:
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
 
-      - name: Ensure Node.js & Claude Code CLI
+      - name: Ensure Claude Code CLI
         run: |
-          if ! command -v node > /dev/null 2>&1; then
-            (apt-get update && apt-get install -y curl nodejs npm jq git) || true
-          fi
           if ! command -v claude > /dev/null 2>&1; then
             npm install -g @anthropic-ai/claude-code
           fi
@@ -113,8 +124,8 @@ jobs:
         working-directory: target
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          GH_TOKEN: ${{ needs.detect-image.outputs.token }}
-          GITHUB_TOKEN: ${{ needs.detect-image.outputs.token }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
           COMMENT_BODY: ${{ needs.detect-image.outputs.clean_prompt }}
