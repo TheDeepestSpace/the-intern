@@ -18,13 +18,15 @@ on:
         required: false
 
 jobs:
-  handle:
+  detect-image:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-      issues: write
-
+    outputs:
+      image: ${{ steps.check.outputs.image }}
+      target_repo: ${{ steps.parse.outputs.target_repo }}
+      issue_number: ${{ steps.parse.outputs.issue_number }}
+      clean_prompt: ${{ steps.parse.outputs.clean_prompt }}
+      installation_id: ${{ steps.parse.outputs.installation_id }}
+      token: ${{ steps.token.outputs.token }}
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@v4
@@ -48,39 +50,73 @@ jobs:
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           INSTALLATION_ID: ${{ steps.parse.outputs.installation_id }}
 
-      - name: Checkout target repository
-        if: steps.parse.outputs.target_repo != ''
+      - name: Check for repo-specific devcontainer image on GHCR
+        id: check
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          REPO_NAME="${{ steps.parse.outputs.target_repo }}"
+          if [ -z "$REPO_NAME" ]; then
+            echo "image=ubuntu:latest" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          REPO_OWNER="${REPO_NAME%%/*}"
+          REPO_SLUG="${REPO_NAME##*/}"
+          IMAGE="ghcr.io/${REPO_OWNER,,}/${REPO_SLUG,,}-dev"
+          if curl -s -f -H "Authorization: Bearer $GH_TOKEN" \
+               "https://ghcr.io/v2/${REPO_OWNER,,}/${REPO_SLUG,,}-dev/tags/list" > /dev/null; then
+            echo "Detected custom container image: $IMAGE:latest"
+            echo "image=$IMAGE:latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "No custom container image found; using fallback ubuntu:latest"
+            echo "image=ubuntu:latest" >> "$GITHUB_OUTPUT"
+          fi
+
+  handle:
+    needs: detect-image
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.detect-image.outputs.image }}
+    steps:
+      - name: Checkout agent-infra
         uses: actions/checkout@v4
         with:
-          repository: ${{ steps.parse.outputs.target_repo }}
-          token: ${{ steps.token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Checkout target repository
+        if: needs.detect-image.outputs.target_repo != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.detect-image.outputs.target_repo }}
+          token: ${{ needs.detect-image.outputs.token }}
           path: target
 
       - name: Fetch prior session summary context
         id: summary_context
         run: node scripts/manage-summaries.js fetch
         env:
-          TARGET_REPO: ${{ steps.parse.outputs.target_repo }}
-          ISSUE_NUMBER: ${{ steps.parse.outputs.issue_number }}
+          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - name: Ensure Node.js & Claude Code CLI
+        run: |
+          if ! command -v node > /dev/null 2>&1; then
+            (apt-get update && apt-get install -y curl nodejs npm jq git) || true
+          fi
+          if ! command -v claude > /dev/null 2>&1; then
+            npm install -g @anthropic-ai/claude-code
+          fi
 
-      - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code
-
-      - name: Run Claude (fresh session per trigger, interactive gh access)
-        if: steps.parse.outputs.target_repo != ''
+      - name: Run Claude (fresh session per trigger, inside target image)
+        if: needs.detect-image.outputs.target_repo != ''
         working-directory: target
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          GH_TOKEN: ${{ steps.token.outputs.token }}
-          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
-          TARGET_REPO: ${{ steps.parse.outputs.target_repo }}
-          ISSUE_NUMBER: ${{ steps.parse.outputs.issue_number }}
-          COMMENT_BODY: ${{ steps.parse.outputs.clean_prompt }}
+          GH_TOKEN: ${{ needs.detect-image.outputs.token }}
+          GITHUB_TOKEN: ${{ needs.detect-image.outputs.token }}
+          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
+          COMMENT_BODY: ${{ needs.detect-image.outputs.clean_prompt }}
           PRIOR_CONTEXT: ${{ steps.summary_context.outputs.summary }}
         run: |
           git config user.name "the-intern-bot[bot]"
@@ -103,11 +139,11 @@ jobs:
           jq -r '.result // .output // .' result.json > ../session_result.txt || true
 
       - name: Commit session summary
-        if: steps.parse.outputs.target_repo != '' && steps.parse.outputs.issue_number != ''
+        if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
         run: node scripts/manage-summaries.js save
         env:
-          TARGET_REPO: ${{ steps.parse.outputs.target_repo }}
-          ISSUE_NUMBER: ${{ steps.parse.outputs.issue_number }}
-          CLEAN_PROMPT: ${{ steps.parse.outputs.clean_prompt }}
+          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
+          CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
           RESULT_FILE: session_result.txt
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
