@@ -71,3 +71,10 @@ User wants to be able to kick off a dispatcher session (devcontainer, fresh Clau
 - Filed issue: https://github.com/TheDeepestSpace/svsch/issues/75 — includes the exact error/stack, notes it's isolated to this one spec, and asks to determine whether it's a genuine regression in the reload/position-restore path or test flakiness in the readiness wait.
 - Kicked off dispatcher via comment: https://github.com/TheDeepestSpace/svsch/issues/75#issuecomment-5126011503 — asked it to reproduce, root-cause, fix (or fix the flaky wait), and open a PR.
 - Not yet confirmed complete — check #75 for a PR or follow-up comment on a future turn.
+
+## 2026-07-30: Global concise-writing instructions for bot output
+User asked to file an issue in the-intern for shared instructions making bot-authored issue reports, PR descriptions, and comments concise (thinking tokens are fine, posted text should be tight) — across both the Telegram flow and the dispatch flow.
+- Grounded in code: `instructions/telegram.md` (loaded by `telegram-session.yml` line ~58) already tells the Telegram session to keep replies concise, but the dispatch-session prompt is built inline in `.github/workflows/dispatcher.yml`'s `node -e '...'` block (~line 143) with zero style guidance and no shared file to source it from.
+- **Filed issue**: https://github.com/TheDeepestSpace/the-intern/issues/9 — proposes a shared snippet (e.g. `instructions/shared-style.md`) included by both `instructions/telegram.md` and the dispatcher's inline prompt construction, rather than duplicating text in two places.
+- **Kicked off dispatcher** via comment: https://github.com/TheDeepestSpace/the-intern/issues/9#issuecomment-5126066249
+- Not yet confirmed complete — check #9 for a PR on a future turn.
