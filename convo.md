@@ -45,3 +45,9 @@ User asked directly why the dispatcher fell back to the-intern-dev image instead
 2. **Tag-prefix mismatch**: even with auth fixed, the dispatcher assumes tag `:latest`. svsch's own `.github/workflows/docker-image.yml` + `ci.yml` build the dev image with `tag-prefix: dev-`, so on the default branch the published tag is `dev-latest`, not `latest` (confirmed via GHCR tag list: `dev-latest`, `dev-branch-master`, `dev-pr-10`...`dev-pr-71`, no bare `latest`). So `ghcr.io/thedeepestspace/svsch-dev:latest` would still fail to pull even after bug 1 is fixed.
 - **Filed issue**: https://github.com/TheDeepestSpace/the-intern/issues/6 — full root cause writeup + suggested fixes (proper GHCR token exchange; check for `dev-latest` or otherwise reconcile the dispatcher's tag assumption with each repo's actual publish convention).
 - **Not yet actioned via dispatcher** — told user the fallback-to-ubuntu path works fine (per #5) so a dispatcher run on the-intern repo itself could plausibly self-fix this, and asked whether to kick that off or hold off. Awaiting user direction.
+
+## 2026-07-30: Confirmed this session's GH_TOKEN cannot push to main
+User asked whether I can push to main in the-intern without a PR. Checked directly via API rather than assuming:
+- `GET /repos/TheDeepestSpace/the-intern/branches/main` → `protected: false` (main has no branch-protection rule at the repo-settings level).
+- But `GET /repos/TheDeepestSpace/the-intern` → `permissions.push: false` for this session's GH_TOKEN (GitHub App installation token). So regardless of branch protection, this token is read/comment/issue/PR scoped only — no contents:write, no direct pushes to any branch, main included.
+- Told user: I'm restricted to PR/issue/comment-level actions from this lightweight Telegram session; actual commits land via the dispatcher-triggered sessions (different auth context), not this one.
