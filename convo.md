@@ -200,3 +200,8 @@ User sent a plain test message ("another message test; reply") to check reply-th
 - Confirmed via GitHub Contents API that the deployed `worker/src/index.js` on `main` includes `message_id: message.message_id` (the #4 reply-threading fix) — so the previously-stale Worker is now caught up in production.
 - Conclusion: the whole chain (#4 fix merged → #24 auto-deploy workflow → #27 Node version fix → #29 no-op trigger) is now complete and live. Reply-threading should work on messages going forward. Told user via Telegram; asked them to flag if this message doesn't actually show as a threaded reply, since if the fix is live and still doesn't work, the bug is elsewhere (would need re-investigation, not just "wait for deploy").
 - **Loose end**: issue #27 should be closed (fix is merged, just via an unlinked commit) — not yet done, low priority.
+
+## 2026-07-30: Reply-threading confirmed working by user
+User confirmed: "reply is working nice" — closes out the whole worker deploy chain (#4 fix → #24 auto-deploy workflow → #27 Node version fix → #29 no-op trigger). No further action needed on this thread.
+
+**Remaining loose end (unchanged)**: issue #27 should be closed on GitHub — the Node 20→22 fix landed as a direct commit (86d3d19e), not a PR, so the issue is still showing open even though resolved. Low priority, not yet done.
