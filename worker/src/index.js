@@ -17,7 +17,7 @@ export default {
 async function handleGitHub(request, env) {
   const body = await request.text();
   const signature = request.headers.get('X-Hub-Signature-256') || '';
-  
+
   // Verify HMAC-SHA256 signature if secret is configured
   if (env.WEBHOOK_SECRET) {
     const valid = await verifySignature(body, signature, env.WEBHOOK_SECRET);
