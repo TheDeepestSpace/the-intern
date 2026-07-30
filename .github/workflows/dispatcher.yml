@@ -178,8 +178,21 @@ jobs:
             git config user.email "the-intern-bot[bot]@users.noreply.github.com"
             PROMPT="$(cat /tmp/prompt.txt)"
             claude -p "$PROMPT" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
-            jq -r '.result // .output // .' result.json > ../session_result.txt || true
           '
+
+          node -e '
+            const fs = require("fs");
+            let output = "";
+            try {
+              const raw = fs.readFileSync("result.json", "utf8");
+              const data = JSON.parse(raw);
+              const value = data.result ?? data.output ?? data;
+              output = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+            } catch (e) {
+              output = fs.readFileSync("result.json", "utf8").toString();
+            }
+            fs.writeFileSync("../session_result.txt", output);
+          ' || true
 
       - name: Commit session summary
         if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
