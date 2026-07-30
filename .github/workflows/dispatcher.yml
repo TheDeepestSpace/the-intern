@@ -97,13 +97,157 @@ jobs:
             echo "image=$FALLBACK_IMAGE" >> "$GITHUB_OUTPUT"
           fi
 
-  handle:
+  ensure-agent-overlay:
     needs: detect-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+    steps:
+      - name: Checkout agent-infra
+        uses: actions/checkout@v4
+
+      - name: Check whether base image is our own fallback
+        id: fallback_check
+        run: |
+          if [ "${{ needs.detect-image.outputs.image }}" = "ghcr.io/thedeepestspace/the-intern-dev:latest" ]; then
+            echo "is_fallback=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_fallback=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint temporary token for base image access
+        id: temp_token
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        run: node scripts/mint-installation-token.js
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          INSTALLATION_ID: ${{ needs.detect-image.outputs.installation_id }}
+          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+
+      - name: Resolve base image digest and overlay tag
+        id: overlay_meta
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        env:
+          GH_TOKEN: ${{ steps.temp_token.outputs.token }}
+          REPO_NAME: ${{ needs.detect-image.outputs.target_repo }}
+          BASE_IMAGE: ${{ needs.detect-image.outputs.image }}
+        run: |
+          REPO_OWNER="${REPO_NAME%%/*}"
+          REPO_SLUG="${REPO_NAME##*/}"
+          IMAGE_PATH="${REPO_OWNER,,}/${REPO_SLUG,,}-dev"
+          TAG="${BASE_IMAGE##*:}"
+
+          SCOPE="repository:${IMAGE_PATH}:pull"
+          GHCR_TOKEN=$(curl -s -K - \
+               "https://ghcr.io/token?service=ghcr.io&scope=${SCOPE}" <<CURL_CFG | jq -r '.token // empty'
+          user = "token:${GH_TOKEN}"
+          CURL_CFG
+          )
+
+          if [ -z "$GHCR_TOKEN" ]; then
+            echo "::error::Could not obtain a GHCR token to resolve the base image digest"
+            exit 1
+          fi
+
+          HEADERS=$(curl -s -D - -o /dev/null \
+            -H "Authorization: Bearer $GHCR_TOKEN" \
+            -H "Accept: application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json" \
+            "https://ghcr.io/v2/${IMAGE_PATH}/manifests/${TAG}")
+
+          DIGEST=$(echo "$HEADERS" | grep -i '^docker-content-digest:' | awk '{print $2}' | tr -d '\r\n')
+
+          if [ -z "$DIGEST" ]; then
+            echo "::error::Could not resolve a digest for base image $BASE_IMAGE"
+            exit 1
+          fi
+
+          DIGEST_SHORT=$(echo "$DIGEST" | sed 's/^sha256://' | cut -c1-12)
+          OVERLAY_TAG="${REPO_SLUG,,}-${DIGEST_SHORT}"
+
+          echo "overlay_tag=$OVERLAY_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check for an existing overlay image
+        id: check_overlay
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OVERLAY_TAG: ${{ steps.overlay_meta.outputs.overlay_tag }}
+        run: |
+          SCOPE="repository:thedeepestspace/agent-overlay:pull"
+          GHCR_TOKEN=$(curl -s -K - \
+               "https://ghcr.io/token?service=ghcr.io&scope=${SCOPE}" <<CURL_CFG | jq -r '.token // empty'
+          user = "token:${GH_TOKEN}"
+          CURL_CFG
+          )
+
+          EXISTS="false"
+          if [ -n "$GHCR_TOKEN" ]; then
+            TAGS=$(curl -s -f -H "Authorization: Bearer $GHCR_TOKEN" \
+                 "https://ghcr.io/v2/thedeepestspace/agent-overlay/tags/list" || true)
+            if [ -n "$TAGS" ] && echo "$TAGS" | jq -e --arg tag "$OVERLAY_TAG" '(.tags // []) | index($tag)' > /dev/null 2>&1; then
+              EXISTS="true"
+            fi
+          fi
+
+          echo "exists=$EXISTS" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        if: steps.fallback_check.outputs.is_fallback != 'true' && steps.check_overlay.outputs.exists != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR to pull base image
+        if: steps.fallback_check.outputs.is_fallback != 'true' && steps.check_overlay.outputs.exists != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: x-access-token
+          password: ${{ steps.temp_token.outputs.token }}
+
+      - name: Build agent-overlay image
+        if: steps.fallback_check.outputs.is_fallback != 'true' && steps.check_overlay.outputs.exists != 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/agent-overlay.Dockerfile
+          build-args: |
+            BASE_IMAGE=${{ needs.detect-image.outputs.image }}
+          push: false
+          load: true
+          tags: ghcr.io/thedeepestspace/agent-overlay:${{ steps.overlay_meta.outputs.overlay_tag }}
+          platforms: linux/amd64
+
+      - name: Login to GHCR to push overlay image
+        if: steps.fallback_check.outputs.is_fallback != 'true' && steps.check_overlay.outputs.exists != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push agent-overlay image
+        if: steps.fallback_check.outputs.is_fallback != 'true' && steps.check_overlay.outputs.exists != 'true'
+        run: docker push ghcr.io/thedeepestspace/agent-overlay:${{ steps.overlay_meta.outputs.overlay_tag }}
+
+      - name: Resolve final image output
+        id: resolve
+        run: |
+          if [ "${{ steps.fallback_check.outputs.is_fallback }}" = "true" ]; then
+            echo "image=${{ needs.detect-image.outputs.image }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=ghcr.io/thedeepestspace/agent-overlay:${{ steps.overlay_meta.outputs.overlay_tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  handle:
+    needs: [detect-image, ensure-agent-overlay]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     container:
-      image: ${{ needs.detect-image.outputs.image }}
+      image: ${{ needs.ensure-agent-overlay.outputs.image }}
       options: --user root
     steps:
       - name: Checkout agent-infra
@@ -265,8 +409,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   notify-failure:
-    needs: [detect-image, handle]
-    if: always() && (needs.detect-image.result == 'failure' || needs.handle.result == 'failure')
+    needs: [detect-image, ensure-agent-overlay, handle]
+    if: always() && (needs.detect-image.result == 'failure' || needs.ensure-agent-overlay.result == 'failure' || needs.handle.result == 'failure')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout agent-infra
@@ -283,4 +427,5 @@ jobs:
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
           FAILED_JOBS: >-
             ${{ needs.detect-image.result == 'failure' && 'detect-image' || '' }}
+            ${{ needs.ensure-agent-overlay.result == 'failure' && 'ensure-agent-overlay' || '' }}
             ${{ needs.handle.result == 'failure' && 'handle' || '' }}
