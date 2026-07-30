@@ -17,6 +17,9 @@ on:
         description: 'GitHub App Installation ID (optional)'
         required: false
 
+permissions:
+  contents: read
+
 jobs:
   detect-image:
     runs-on: ubuntu-latest
@@ -54,9 +57,9 @@ jobs:
         id: check
         env:
           GH_TOKEN: ${{ steps.temp_token.outputs.token }}
+          REPO_NAME: ${{ steps.parse.outputs.target_repo }}
         run: |
           FALLBACK_IMAGE="ghcr.io/thedeepestspace/the-intern-dev:latest"
-          REPO_NAME="${{ steps.parse.outputs.target_repo }}"
           if [ -z "$REPO_NAME" ]; then
             echo "image=$FALLBACK_IMAGE" >> "$GITHUB_OUTPUT"
             exit 0
@@ -65,8 +68,11 @@ jobs:
           REPO_SLUG="${REPO_NAME##*/}"
           IMAGE="ghcr.io/${REPO_OWNER,,}/${REPO_SLUG,,}-dev"
           SCOPE="repository:${REPO_OWNER,,}/${REPO_SLUG,,}-dev:pull"
-          GHCR_TOKEN=$(curl -s -u "token:${GH_TOKEN}" \
-               "https://ghcr.io/token?service=ghcr.io&scope=${SCOPE}" | jq -r '.token // empty')
+          GHCR_TOKEN=$(curl -s -K - \
+               "https://ghcr.io/token?service=ghcr.io&scope=${SCOPE}" <<CURL_CFG | jq -r '.token // empty'
+          user = "token:${GH_TOKEN}"
+          CURL_CFG
+          )
 
           TAGS=""
           if [ -n "$GHCR_TOKEN" ]; then
@@ -94,6 +100,8 @@ jobs:
   handle:
     needs: detect-image
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     container:
       image: ${{ needs.detect-image.outputs.image }}
       options: --user root
@@ -131,15 +139,14 @@ jobs:
         if: needs.detect-image.outputs.target_repo != ''
         working-directory: target
         env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
           CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
           SUMMARY_CONTEXT: ${{ steps.summary_context.outputs.summary }}
         run: |
-          export CLAUDE_CODE_OAUTH_TOKEN="${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}"
-          export GH_TOKEN="${{ steps.token.outputs.token }}"
-          export GITHUB_TOKEN="${{ steps.token.outputs.token }}"
-          export TARGET_REPO="${{ needs.detect-image.outputs.target_repo }}"
-          export ISSUE_NUMBER="${{ needs.detect-image.outputs.issue_number }}"
-
           export COMMENT_BODY="$CLEAN_PROMPT"
           export PRIOR_CONTEXT=$(cat ../prior_summary.txt 2>/dev/null || echo "$SUMMARY_CONTEXT")
           export STYLE_GUIDE="$(cat ../instructions/shared-style.md 2>/dev/null || true)"

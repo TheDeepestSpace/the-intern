@@ -3,6 +3,9 @@ on:
   repository_dispatch:
     types: [telegram_message]
 
+permissions:
+  contents: write
+
 jobs:
   respond:
     runs-on: ubuntu-latest
@@ -17,18 +20,21 @@ jobs:
 
       - name: Mint installation token
         id: token
-        run: |
-          export APP_ID="${{ secrets.APP_ID }}"
-          export APP_PRIVATE_KEY="${{ secrets.APP_PRIVATE_KEY }}"
-          export TARGET_REPO="${{ github.repository }}"
-          node scripts/mint-installation-token.js
+        run: node scripts/mint-installation-token.js
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          TARGET_REPO: ${{ github.repository }}
 
       - name: Checkout telegram branch (create if missing)
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
         run: |
-          REPO_URL="https://x-access-token:${{ steps.token.outputs.token }}@github.com/${{ github.repository }}.git"
+          REPO_URL="https://github.com/${{ github.repository }}.git"
           git config --global user.name "the-intern-bot[bot]"
           git config --global user.email "the-intern-bot[bot]@users.noreply.github.com"
           git config --global --add safe.directory "*"
+          git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=$GH_TOKEN"; }; f'
 
           rm -rf tg-state
           if git clone --branch telegram --single-branch "$REPO_URL" tg-state 2>/dev/null; then
@@ -49,12 +55,12 @@ jobs:
 
       - name: Run Claude (fresh session with convo.md context)
         working-directory: tg-state
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
         run: |
-          export CLAUDE_CODE_OAUTH_TOKEN="${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}"
-          export TG_BOT_TOKEN="${{ secrets.TG_BOT_TOKEN }}"
-          export GH_TOKEN="${{ steps.token.outputs.token }}"
-          export GITHUB_TOKEN="${{ steps.token.outputs.token }}"
-
           export INSTRUCTIONS="$(cat ../instructions/telegram.md 2>/dev/null || true)"
           export STYLE_GUIDE="$(cat ../instructions/shared-style.md 2>/dev/null || true)"
           export CONVO_CONTEXT="$(cat convo.md 2>/dev/null || true)"
@@ -88,8 +94,9 @@ jobs:
 
       - name: Commit updated convo.md to telegram branch
         working-directory: tg-state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          export GH_TOKEN="${{ secrets.GITHUB_TOKEN }}"
           git config user.name "the-intern-bot[bot]"
           git config user.email "the-intern-bot[bot]@users.noreply.github.com"
           git add convo.md || true
