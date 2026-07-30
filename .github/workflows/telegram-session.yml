@@ -9,6 +9,10 @@ permissions:
 jobs:
   respond:
     runs-on: ubuntu-latest
+    concurrency:
+      group: telegram-${{ github.event.client_payload.chat_id }}
+      cancel-in-progress: false
+      queue: max
     container:
       image: ghcr.io/thedeepestspace/the-intern-dev:latest
       options: --user root
@@ -66,6 +70,7 @@ jobs:
           export CONVO_CONTEXT="$(cat convo.md 2>/dev/null || true)"
           export MESSAGE="$(jq -r '.client_payload.text // empty' "$GITHUB_EVENT_PATH")"
           export CHAT_ID="$(jq -r '.client_payload.chat_id // empty' "$GITHUB_EVENT_PATH")"
+          export REPLY_TO_MESSAGE_ID="$(jq -r '.client_payload.message_id // empty' "$GITHUB_EVENT_PATH")"
 
           node -e '
             const fs = require("fs");
@@ -83,6 +88,7 @@ jobs:
             export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"
             export TG_BOT_TOKEN="$TG_BOT_TOKEN"
             export CHAT_ID="$CHAT_ID"
+            export REPLY_TO_MESSAGE_ID="$REPLY_TO_MESSAGE_ID"
             export GH_TOKEN="$GH_TOKEN"
             export GITHUB_TOKEN="$GITHUB_TOKEN"
             export HOME="/home/dev"

@@ -3,6 +3,7 @@ const fs = require('fs');
 async function sendTelegramMessage() {
   const botToken = process.env.TG_BOT_TOKEN;
   const chatId = process.env.CHAT_ID;
+  const replyToMessageId = process.env.REPLY_TO_MESSAGE_ID;
   let messageText = process.env.MESSAGE_TEXT || process.argv[2];
 
   if (!botToken || !chatId) {
@@ -20,13 +21,20 @@ async function sendTelegramMessage() {
     process.exit(1);
   }
 
+  const payload = { chat_id: chatId, text: messageText };
+  if (replyToMessageId) {
+    // allow_sending_without_reply falls back to a plain send if the original
+    // message was deleted mid-session, instead of failing the whole request.
+    payload.reply_parameters = {
+      message_id: Number(replyToMessageId),
+      allow_sending_without_reply: true,
+    };
+  }
+
   const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: messageText,
-    }),
+    body: JSON.stringify(payload),
   });
 
   if (!res.ok) {
