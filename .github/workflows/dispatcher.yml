@@ -139,6 +139,7 @@ jobs:
 
           export COMMENT_BODY=$(jq -r '.comment_body // empty' ../parsed_trigger.json 2>/dev/null || echo "${{ needs.detect-image.outputs.clean_prompt }}")
           export PRIOR_CONTEXT=$(cat ../prior_summary.txt 2>/dev/null || echo "${{ steps.summary_context.outputs.summary }}")
+          export STYLE_GUIDE="$(cat ../instructions/shared-style.md 2>/dev/null || true)"
 
           node -e '
             const fs = require("fs");
@@ -146,8 +147,12 @@ jobs:
             const issue = process.env.ISSUE_NUMBER || "";
             const prior = process.env.PRIOR_CONTEXT || "";
             const comment = process.env.COMMENT_BODY || "";
+            const style = process.env.STYLE_GUIDE || "";
 
             let prompt = `You are @the-intern-bot working on repository ${repo}, issue/PR #${issue}.\nYou have access to the GitHub CLI (\x27gh\x27) and full git tools. Use \x27gh\x27 to post comments, inspect code, run tests, or open PRs as needed.\n\n`;
+            if (style) {
+              prompt += `${style}\n\n`;
+            }
             if (prior) {
               prompt += `Previous work summary on this issue/PR:\n${prior}\n\n`;
             }

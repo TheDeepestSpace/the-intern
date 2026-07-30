@@ -56,6 +56,7 @@ jobs:
           export GITHUB_TOKEN="${{ steps.token.outputs.token }}"
 
           export INSTRUCTIONS="$(cat ../instructions/telegram.md 2>/dev/null || true)"
+          export STYLE_GUIDE="$(cat ../instructions/shared-style.md 2>/dev/null || true)"
           export CONVO_CONTEXT="$(cat convo.md 2>/dev/null || true)"
           export MESSAGE="$(jq -r '.client_payload.text // empty' "$GITHUB_EVENT_PATH")"
           export CHAT_ID="$(jq -r '.client_payload.chat_id // empty' "$GITHUB_EVENT_PATH")"
@@ -63,9 +64,10 @@ jobs:
           node -e '
             const fs = require("fs");
             const instructions = process.env.INSTRUCTIONS || "";
+            const style = process.env.STYLE_GUIDE || "";
             const convo = process.env.CONVO_CONTEXT || "";
             const msg = process.env.MESSAGE || "";
-            const prompt = `${instructions}\n\nPrior Conversation Summary (from convo.md):\n${convo}\n\nNew Telegram Message:\n${msg}`;
+            const prompt = `${instructions}\n\n${style}\n\nPrior Conversation Summary (from convo.md):\n${convo}\n\nNew Telegram Message:\n${msg}`;
             fs.writeFileSync("/tmp/prompt.txt", prompt);
           '
 
