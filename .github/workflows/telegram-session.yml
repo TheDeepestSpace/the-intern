@@ -55,33 +55,34 @@ jobs:
           export GH_TOKEN="${{ steps.token.outputs.token }}"
           export GITHUB_TOKEN="${{ steps.token.outputs.token }}"
 
-          MESSAGE=$(jq -r '.client_payload.text // empty' "$GITHUB_EVENT_PATH")
-          CHAT_ID=$(jq -r '.client_payload.chat_id // empty' "$GITHUB_EVENT_PATH")
+          export INSTRUCTIONS="$(cat ../instructions/telegram.md 2>/dev/null || true)"
+          export CONVO_CONTEXT="$(cat convo.md 2>/dev/null || true)"
+          export MESSAGE="$(jq -r '.client_payload.text // empty' "$GITHUB_EVENT_PATH")"
+          export CHAT_ID="$(jq -r '.client_payload.chat_id // empty' "$GITHUB_EVENT_PATH")"
+
+          node -e '
+            const fs = require("fs");
+            const instructions = process.env.INSTRUCTIONS || "";
+            const convo = process.env.CONVO_CONTEXT || "";
+            const msg = process.env.MESSAGE || "";
+            const prompt = `${instructions}\n\nPrior Conversation Summary (from convo.md):\n${convo}\n\nNew Telegram Message:\n${msg}`;
+            fs.writeFileSync("/tmp/prompt.txt", prompt);
+          '
 
           id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
-          chown -R dev:dev . /home/dev 2>/dev/null || true
-          su dev -c "
-            export CLAUDE_CODE_OAUTH_TOKEN=\"$CLAUDE_CODE_OAUTH_TOKEN\"
-            export TG_BOT_TOKEN=\"$TG_BOT_TOKEN\"
-            export CHAT_ID=\"$CHAT_ID\"
-            export GH_TOKEN=\"$GH_TOKEN\"
-            export GITHUB_TOKEN=\"$GITHUB_TOKEN\"
-            export HOME=\"/home/dev\"
-            cd \"$(pwd)\"
+          chown -R dev:dev . /home/dev /tmp/prompt.txt 2>/dev/null || true
+          su dev -c '
+            export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"
+            export TG_BOT_TOKEN="$TG_BOT_TOKEN"
+            export CHAT_ID="$CHAT_ID"
+            export GH_TOKEN="$GH_TOKEN"
+            export GITHUB_TOKEN="$GITHUB_TOKEN"
+            export HOME="/home/dev"
+            cd "$(pwd)"
             
-            INSTRUCTIONS=\"\$(cat ../instructions/telegram.md 2>/dev/null || true)\"
-            CONVO_CONTEXT=\"\$(cat convo.md 2>/dev/null || true)\"
-
-            PROMPT=\"\${INSTRUCTIONS}
-
-            Prior Conversation Summary (from convo.md):
-            \${CONVO_CONTEXT}
-
-            New Telegram Message:
-            $MESSAGE\"
-
-            claude -p \"\$PROMPT\" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
-          "
+            PROMPT="$(cat /tmp/prompt.txt)"
+            claude -p "$PROMPT" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
+          '
 
       - name: Commit updated convo.md to telegram branch
         working-directory: tg-state
