@@ -218,3 +218,10 @@ User reported another failed run (https://github.com/TheDeepestSpace/the-intern/
 - Alternatives noted in the issue: runtime install-on-every-dispatch (simpler, no registry infra, but no real caching), and requiring every repo's own `-dev` image to bring its own agent tooling (zero dispatcher changes, but not centrally enforced — the bug we just hit). Recommended the overlay approach per what the user asked for.
 - No blocking open questions (all resolved with the namespace choice above) — **kicked off dispatcher**: https://github.com/TheDeepestSpace/the-intern/issues/30#issuecomment-5131557637
 - Not yet confirmed complete — check #30 for a PR on a future turn.
+
+## 2026-07-30: Style guide sharpened for terser output — PR #32 (direct API, not dispatcher)
+User asked to update the-intern's bot instructions to be even more concise — e.g. if the honest answer is "ok done", just say that instead of padding it into a paragraph.
+- Confirmed `instructions/shared-style.md` (from #9) is already concatenated separately into both the Telegram prompt (`telegram-session.yml:68-69,81`) and the dispatcher prompt, so a single edit to that file covers both flows — no need to touch `instructions/telegram.md` itself.
+- Added one sentence to the "Match length to substance" bullet: if the answer is just "ok, done"/"fixed"/"yes", say that and stop.
+- **Opened directly via API** (branch + commit + PR, same pattern as #29 — trivial one-line-ish doc edit, skipped the dispatcher): https://github.com/TheDeepestSpace/the-intern/pull/32. TheDeepestSpace added as reviewer.
+- Not yet confirmed merged — check #32 on a future turn.
