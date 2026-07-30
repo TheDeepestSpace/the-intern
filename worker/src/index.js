@@ -159,7 +159,12 @@ async function handleTelegram(request, env) {
         },
         body: JSON.stringify({
           event_type: 'telegram_message',
-          client_payload: { text: message.text, chat_id: message.chat.id, sender_id: message.from.id },
+          client_payload: {
+            text: message.text,
+            chat_id: message.chat.id,
+            sender_id: message.from.id,
+            message_id: message.message_id,
+          },
         }),
       }
     );
