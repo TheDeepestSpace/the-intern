@@ -205,3 +205,8 @@ User sent a plain test message ("another message test; reply") to check reply-th
 User confirmed: "reply is working nice" — closes out the whole worker deploy chain (#4 fix → #24 auto-deploy workflow → #27 Node version fix → #29 no-op trigger). No further action needed on this thread.
 
 **Remaining loose end (unchanged)**: issue #27 should be closed on GitHub — the Node 20→22 fix landed as a direct commit (86d3d19e), not a PR, so the issue is still showing open even though resolved. Low priority, not yet done.
+
+## 2026-07-30: Queueing also confirmed live (second test message)
+User sent another test message ("another queued message test for ya to reply to"). Verified via API rather than assuming: issue #4 (https://github.com/TheDeepestSpace/the-intern/issues/4) is closed, and `telegram-session.yml` on `main` now has `concurrency: { group: telegram-${{ github.event.client_payload.chat_id }}, cancel-in-progress: false, queue: max }` — per-chat message queueing is live alongside the already-confirmed reply-threading. Replied to confirm both. Issue #4 fully resolved end-to-end, nothing further to check on this thread.
+
+**Remaining loose end (unchanged)**: issue #27 should be closed on GitHub (fix merged via direct commit 86d3d19e, not a PR) — low priority, not yet done.
