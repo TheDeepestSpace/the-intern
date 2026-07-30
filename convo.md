@@ -97,3 +97,11 @@ User asked whether Codex CLI has a subscription-plan-limits auth mode like Claud
 - No static long-lived token like `claude setup-token` exists for Codex yet — open upstream feature request (openai/codex#2636).
 - Flagged risk: openai/codex#2000 — some report "Sign in with ChatGPT" still auto-creates an API key and bills anyway; worth a sanity check before relying on it in production.
 - **Updated issue #3** (https://github.com/TheDeepestSpace/the-intern/issues/3) with the full writeup, sources, and an explicit open question: ship v1 with plain `OPENAI_API_KEY` (simpler) and treat device-auth/plan-limits as a fast-follow, or hold #3 for device-auth from the start? Awaiting user direction — not yet actioned via dispatcher.
+
+## 2026-07-30: New dispatcher bug found — jq missing in target repo's dev image (#13)
+- User pointed at another failed run: https://github.com/TheDeepestSpace/the-intern/actions/runs/30512459854/job/90775250005 (svsch#75 dispatch), asked to check + file + kick off.
+- Pulled full job log via API before assuming it was another #11-style injection — it wasn't. Confirmed two earlier fixes are actually live in this run: `COMMENT_BODY`/`CLEAN_PROMPT` now passed via `env:` correctly (#11 fixed), and the job ran in svsch's own `svsch-dev:dev-latest` image, not the ubuntu/the-intern-dev fallback (#6 fixed).
+- New root cause: `dispatcher.yml`'s Run Claude step ends with `jq -r '.result // .output // .' result.json > ../session_result.txt || true` — jq isn't guaranteed to exist in every target repo's dev image; svsch-dev doesn't have it → `jq: not found`, exit 127.
+- **Filed**: https://github.com/TheDeepestSpace/the-intern/issues/13 — proposes replacing the jq line with a `node -e` snippet (node is already a hard dependency of that same step, used earlier to build the prompt file), removing the implicit jq dependency entirely rather than patching per-image.
+- **Kicked off dispatcher** via comment: https://github.com/TheDeepestSpace/the-intern/issues/13#issuecomment-5126257042
+- Not yet confirmed complete — check #13 for a PR on a future turn. Also noted (not filed separately): the same run showed `dubious ownership`/`Access to path denied` errors during checkout/cleanup, likely the same dev-user chown issue as #5, only worth revisiting if it still reproduces after #5 lands.
