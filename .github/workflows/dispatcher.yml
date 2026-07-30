@@ -200,25 +200,6 @@ jobs:
 
           su dev -c /tmp/run_as_dev.sh
 
-      - name: Notify author on Telegram on setup failure
-        if: failure() && needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
-        env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        run: |
-          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          TARGET_REPO="${{ needs.detect-image.outputs.target_repo }}"
-          ISSUE_NUMBER="${{ needs.detect-image.outputs.issue_number }}"
-
-          # Never echo TG_BOT_TOKEN/CHAT_ID — they're only read by send-telegram.js via env.
-          if [ -z "$TG_BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
-            echo "::warning::TG_BOT_TOKEN or TG_CHAT_ID secret not set; skipping Telegram notification"
-            exit 0
-          fi
-
-          MESSAGE_TEXT="⚠️ the-intern-bot session failed before it could run (dispatcher setup error) on ${TARGET_REPO}#${ISSUE_NUMBER}. Run: ${RUN_URL}" \
-            node scripts/send-telegram.js
-
       - name: Commit session summary
         if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
         run: node scripts/manage-summaries.js save
@@ -228,3 +209,24 @@ jobs:
           CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
           RESULT_FILE: session_result.txt
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify-failure:
+    needs: [detect-image, handle]
+    if: always() && (needs.detect-image.result == 'failure' || needs.handle.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout agent-infra
+        uses: actions/checkout@v4
+
+      - name: Email maintainer via GitHub issue mention
+        run: node scripts/notify-failure.js
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          WORKFLOW_NAME: dispatcher
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
+          FAILED_JOBS: >-
+            ${{ needs.detect-image.result == 'failure' && 'detect-image' || '' }}
+            ${{ needs.handle.result == 'failure' && 'handle' || '' }}
