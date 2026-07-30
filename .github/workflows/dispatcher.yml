@@ -187,38 +187,17 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Re-login to GHCR to pull base image for build
+      - name: Build and push agent-overlay image
         if: steps.fallback_check.outputs.is_fallback != 'true' && steps.check_overlay.outputs.exists != 'true'
-        uses: docker/login-action@v3
+        uses: ./.github/actions/build-push-image
         with:
-          registry: ghcr.io
-          username: x-access-token
-          password: ${{ steps.temp_token.outputs.token }}
-
-      - name: Build agent-overlay image
-        if: steps.fallback_check.outputs.is_fallback != 'true' && steps.check_overlay.outputs.exists != 'true'
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: docker/agent-overlay.Dockerfile
+          dockerfile: docker/agent-overlay.Dockerfile
+          image: ${{ steps.overlay_meta.outputs.overlay_image }}
           build-args: |
             BASE_IMAGE=${{ needs.detect-image.outputs.image }}
-          push: false
-          load: true
-          tags: ${{ steps.overlay_meta.outputs.overlay_image }}
-          platforms: linux/amd64
-
-      - name: Login to GHCR to push overlay image
-        if: steps.fallback_check.outputs.is_fallback != 'true' && steps.check_overlay.outputs.exists != 'true'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Push agent-overlay image
-        if: steps.fallback_check.outputs.is_fallback != 'true' && steps.check_overlay.outputs.exists != 'true'
-        run: docker push "${{ steps.overlay_meta.outputs.overlay_image }}"
+          pull-username: x-access-token
+          pull-password: ${{ steps.temp_token.outputs.token }}
+          push-password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Resolve final image output
         id: resolve
