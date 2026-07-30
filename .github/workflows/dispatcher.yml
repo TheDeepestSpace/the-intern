@@ -130,6 +130,9 @@ jobs:
       - name: Run Claude (fresh session per trigger, as non-root user)
         if: needs.detect-image.outputs.target_repo != ''
         working-directory: target
+        env:
+          CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
+          SUMMARY_CONTEXT: ${{ steps.summary_context.outputs.summary }}
         run: |
           export CLAUDE_CODE_OAUTH_TOKEN="${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}"
           export GH_TOKEN="${{ steps.token.outputs.token }}"
@@ -137,8 +140,8 @@ jobs:
           export TARGET_REPO="${{ needs.detect-image.outputs.target_repo }}"
           export ISSUE_NUMBER="${{ needs.detect-image.outputs.issue_number }}"
 
-          export COMMENT_BODY=$(jq -r '.comment_body // empty' ../parsed_trigger.json 2>/dev/null || echo "${{ needs.detect-image.outputs.clean_prompt }}")
-          export PRIOR_CONTEXT=$(cat ../prior_summary.txt 2>/dev/null || echo "${{ steps.summary_context.outputs.summary }}")
+          export COMMENT_BODY="$CLEAN_PROMPT"
+          export PRIOR_CONTEXT=$(cat ../prior_summary.txt 2>/dev/null || echo "$SUMMARY_CONTEXT")
           export STYLE_GUIDE="$(cat ../instructions/shared-style.md 2>/dev/null || true)"
 
           node -e '
