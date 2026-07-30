@@ -150,6 +150,7 @@ jobs:
           export COMMENT_BODY="$CLEAN_PROMPT"
           export PRIOR_CONTEXT=$(cat ../prior_summary.txt 2>/dev/null || echo "$SUMMARY_CONTEXT")
           export STYLE_GUIDE="$(cat ../instructions/shared-style.md 2>/dev/null || true)"
+          export TARGET_DIR="$(pwd)"
 
           node -e '
             const fs = require("fs");
@@ -170,36 +171,64 @@ jobs:
             fs.writeFileSync("/tmp/prompt.txt", prompt);
           '
 
-          # Ensure dev user exists and owns all workspace directories so dev user has write access
-          id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
-          chown -R dev:dev . .. /__w /github/workspace /tmp /home/dev /tmp/prompt.txt 2>/dev/null || true
-
-          su dev -c '
-            export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"
-            export GH_TOKEN="$GH_TOKEN"
-            export GITHUB_TOKEN="$GITHUB_TOKEN"
-            export HOME="/home/dev"
-            cd "$(pwd)"
-            git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
-            git config user.name "the-intern-bot[bot]"
-            git config user.email "the-intern-bot[bot]@users.noreply.github.com"
-            PROMPT="$(cat /tmp/prompt.txt)"
-            claude -p "$PROMPT" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
-          '
-
+          # Extraction logic written to its own file (not inlined via jq, which isn't guaranteed to
+          # be present in every target image) so result.json parsing has no external dependency.
           node -e '
             const fs = require("fs");
-            let output = "";
-            try {
-              const raw = fs.readFileSync("result.json", "utf8");
-              const data = JSON.parse(raw);
-              const value = data.result ?? data.output ?? data;
-              output = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-            } catch (e) {
-              output = fs.readFileSync("result.json", "utf8").toString();
-            }
-            fs.writeFileSync("../session_result.txt", output);
-          ' || true
+            const lines = [
+              "const fs = require(\"fs\");",
+              "let output = \"\";",
+              "try {",
+              "  const raw = fs.readFileSync(\"result.json\", \"utf8\");",
+              "  const data = JSON.parse(raw);",
+              "  const value = data.result ?? data.output ?? data;",
+              "  output = typeof value === \"string\" ? value : JSON.stringify(value, null, 2);",
+              "} catch (e) {",
+              "  output = fs.readFileSync(\"result.json\", \"utf8\").toString();",
+              "}",
+              "fs.writeFileSync(\"../session_result.txt\", output);",
+            ];
+            fs.writeFileSync("/tmp/extract-result.js", lines.join("\n"));
+          '
+
+          # Ensure dev user exists and owns the workspace so it has write access
+          id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
+
+          if ! chown -R dev:dev "$TARGET_DIR" "$GITHUB_WORKSPACE" /tmp /home/dev; then
+            echo "::error::chown failed to grant the dev user write access to workspace directories"
+            exit 1
+          fi
+          if ! su dev -c "test -w '$TARGET_DIR/.git'"; then
+            echo "::error::dev user still lacks write access to $TARGET_DIR/.git after chown; aborting before git config"
+            ls -la "$TARGET_DIR/.git" 2>&1 || true
+            exit 1
+          fi
+
+          # Written to a file (rather than inlined into `su -c '...'`) to avoid fragile nested-quote
+          # escaping — a previous inline version silently truncated the script at the jq filter's
+          # single quotes, dropping everything after it.
+          node -e '
+            const fs = require("fs");
+            const script = [
+              "#!/bin/bash",
+              "set -e",
+              "export HOME=\"/home/dev\"",
+              "cd \"$TARGET_DIR\"",
+              "git config --global --add safe.directory \"$TARGET_DIR\"",
+              "git config user.name \"the-intern-bot[bot]\"",
+              "git config user.email \"the-intern-bot[bot]@users.noreply.github.com\"",
+              "PROMPT=\"$(cat /tmp/prompt.txt)\"",
+              "set +e",
+              "claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions > result.json 2>&1",
+              "set -e",
+              "node /tmp/extract-result.js || true",
+              "",
+            ].join("\n");
+            fs.writeFileSync("/tmp/run_as_dev.sh", script, { mode: 0o755 });
+          '
+          chown dev:dev /tmp/run_as_dev.sh /tmp/extract-result.js
+
+          su dev -c /tmp/run_as_dev.sh
 
       - name: Commit session summary
         if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
@@ -210,3 +239,24 @@ jobs:
           CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
           RESULT_FILE: session_result.txt
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify-failure:
+    needs: [detect-image, handle]
+    if: always() && (needs.detect-image.result == 'failure' || needs.handle.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout agent-infra
+        uses: actions/checkout@v4
+
+      - name: Email maintainer via GitHub issue mention
+        run: node scripts/notify-failure.js
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          WORKFLOW_NAME: dispatcher
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
+          FAILED_JOBS: >-
+            ${{ needs.detect-image.result == 'failure' && 'detect-image' || '' }}
+            ${{ needs.handle.result == 'failure' && 'handle' || '' }}

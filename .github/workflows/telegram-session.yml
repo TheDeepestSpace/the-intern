@@ -102,3 +102,20 @@ jobs:
           git add convo.md || true
           git commit -m "telegram: update convo.md $(date -u +%FT%TZ)" || echo "nothing to commit"
           git push origin telegram
+
+  notify-failure:
+    needs: respond
+    if: always() && needs.respond.result == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout agent-infra
+        uses: actions/checkout@v4
+
+      - name: Email maintainer via GitHub issue mention
+        run: node scripts/notify-failure.js
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          WORKFLOW_NAME: telegram session
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          FAILED_JOBS: respond
