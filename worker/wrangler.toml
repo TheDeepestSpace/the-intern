@@ -6,3 +6,5 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 AGENT_INFRA_OWNER = "TheDeepestSpace"
 AGENT_INFRA_REPO = "the-intern"
+
+# no-op change to trigger deploy-worker.yml after Node 22 fix (#27)
