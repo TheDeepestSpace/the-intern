@@ -105,3 +105,24 @@ User asked whether Codex CLI has a subscription-plan-limits auth mode like Claud
 - **Filed**: https://github.com/TheDeepestSpace/the-intern/issues/13 — proposes replacing the jq line with a `node -e` snippet (node is already a hard dependency of that same step, used earlier to build the prompt file), removing the implicit jq dependency entirely rather than patching per-image.
 - **Kicked off dispatcher** via comment: https://github.com/TheDeepestSpace/the-intern/issues/13#issuecomment-5126257042
 - Not yet confirmed complete — check #13 for a PR on a future turn. Also noted (not filed separately): the same run showed `dubious ownership`/`Access to path denied` errors during checkout/cleanup, likely the same dev-user chown issue as #5, only worth revisiting if it still reproduces after #5 lands.
+
+## 2026-07-30: Comprehensive secret-exposure security audit — the-intern + svsch workflows
+User asked for a full audit of repo(s) for jobs that expose secrets in logs, with a list + removal instructions. Confirmed via `/installation/repositories` this session's GH_TOKEN covers 3 repos (svsch, the-intern, the-intern-testing); the-intern-testing has no `.github/workflows/` of its own (pure sandbox target). Ran two parallel Explore agents, each cloning fresh (`/tmp/the-intern-audit`, `/tmp/svsch-audit`) and reading every workflow + invoked script. Full findings list posted to Telegram; **not yet filed as issues or fixed** — awaiting user go-ahead. Summary (see Telegram for full text with line numbers/fixes):
+
+**the-intern** (dispatcher.yml, telegram-session.yml):
+1. **HIGH** — `dispatcher.yml:140-141` — `TARGET_REPO`/`ISSUE_NUMBER` (unsanitized workflow_dispatch/repository_dispatch input) spliced via `${{ }}` into `run:` in the same shell as live `CLAUDE_CODE_OAUTH_TOKEN`/`GH_TOKEN` exports → command injection → token exfiltration. **Same unresolved bug class as issue #11** (fixed there only for `COMMENT_BODY`/`CLEAN_PROMPT`), just not fixed for these two vars.
+2. **HIGH** — `dispatcher.yml:59` (`detect-image` job) — same pattern, `REPO_NAME` spliced into `run:` alongside a live `GH_TOKEN` (line 56).
+3. MED — `dispatcher.yml:68-69` — `GH_TOKEN` passed via `curl -u "token:${GH_TOKEN}"` (CLI arg, visible via `ps`).
+4. MED — `dispatcher.yml` & `telegram-session.yml` have no `permissions:` block at all (inherit broad default `GITHUB_TOKEN` scope) despite being the two most sensitive workflows.
+5. LOW/MED — `telegram-session.yml:28,38` — install token embedded in git clone URL; fallback clone at line 38 isn't stderr-redirected (unlike line 34), so a git fatal error could print the token-bearing URL verbatim.
+6. LOW/MED — `telegram-session.yml:21-22` — `APP_ID`/`APP_PRIVATE_KEY` (PEM) interpolated into `run:` via `${{ }}` instead of `env:` — inconsistent with `dispatcher.yml`'s correct handling of the same secrets.
+
+**svsch**:
+7. **HIGH** — `.github/workflows/dependabot-changeset.yml` (`pull_request_target`, `contents: write`, checks out PR head) — PR title spliced unescaped into `run:` 3x (lines 25, 39, 46). Dependabot PR titles derive from upstream package names, so a typosquat package with a crafted name (backticks/`$()`) triggers command injection with a write-scoped `GITHUB_TOKEN` in scope — direct token theft/malicious-push vector, no echo bug needed.
+8. LOW/MED — `package.json` `release` script passes `VSCE_PAT`/`OVSX_PAT` as `-p` CLI args to `vsce`/`ovsx` even though `release.yml` already sets them as env vars (which both tools auto-read) — redundant CLI-arg exposure via `ps`/verbose error output.
+
+Checked and clean in both repos: no `set -x`, no `ACTIONS_STEP_DEBUG`/`ACTIONS_RUNNER_DEBUG`, no artifact uploads of secrets, no raw `echo`/`console.log` of a secret value anywhere.
+
+Note: the-intern audit agent's tool output was flagged by the harness as "instruction-shaped" (mentioned `--dangerously-skip-permissions`, a real flag legitimately used by dispatcher.yml to run Claude) — reviewed and it's benign, just descriptive text about the actual workflow content, not a prompt-injection attempt.
+
+Next step: user decides whether to file issues (probably split: the-intern issues 1-2 as one urgent issue given shared root cause/fix pattern, 3-6 as a followup; svsch #7 urgent, #8 minor) and kick off dispatcher fixes. Findings #1/#2 are the most urgent — live token-exfiltration paths, not just log hygiene.
