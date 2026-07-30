@@ -64,10 +64,28 @@ jobs:
           REPO_OWNER="${REPO_NAME%%/*}"
           REPO_SLUG="${REPO_NAME##*/}"
           IMAGE="ghcr.io/${REPO_OWNER,,}/${REPO_SLUG,,}-dev"
-          if curl -s -f -H "Authorization: Bearer $GH_TOKEN" \
-               "https://ghcr.io/v2/${REPO_OWNER,,}/${REPO_SLUG,,}-dev/tags/list" > /dev/null; then
-            echo "Detected custom container image: $IMAGE:latest"
-            echo "image=$IMAGE:latest" >> "$GITHUB_OUTPUT"
+          SCOPE="repository:${REPO_OWNER,,}/${REPO_SLUG,,}-dev:pull"
+          GHCR_TOKEN=$(curl -s -u "token:${GH_TOKEN}" \
+               "https://ghcr.io/token?service=ghcr.io&scope=${SCOPE}" | jq -r '.token // empty')
+
+          TAGS=""
+          if [ -n "$GHCR_TOKEN" ]; then
+            TAGS=$(curl -s -f -H "Authorization: Bearer $GHCR_TOKEN" \
+                 "https://ghcr.io/v2/${REPO_OWNER,,}/${REPO_SLUG,,}-dev/tags/list" || true)
+          fi
+
+          TAG=""
+          if [ -n "$TAGS" ] && echo "$TAGS" | jq -e 'has("tags")' > /dev/null 2>&1; then
+            if echo "$TAGS" | jq -e '.tags | index("dev-latest")' > /dev/null; then
+              TAG="dev-latest"
+            elif echo "$TAGS" | jq -e '.tags | index("latest")' > /dev/null; then
+              TAG="latest"
+            fi
+          fi
+
+          if [ -n "$TAG" ]; then
+            echo "Detected custom container image: $IMAGE:$TAG"
+            echo "image=$IMAGE:$TAG" >> "$GITHUB_OUTPUT"
           else
             echo "No repo-specific container image found; using fallback $FALLBACK_IMAGE"
             echo "image=$FALLBACK_IMAGE" >> "$GITHUB_OUTPUT"
