@@ -127,6 +127,15 @@ jobs:
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
 
+      - name: Snapshot open PR numbers before run
+        id: pr_snapshot
+        if: needs.detect-image.outputs.target_repo != ''
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          PRS=$(gh pr list --repo "${{ needs.detect-image.outputs.target_repo }}" --state open --json number --jq '.[].number' | sort -n | tr '\n' ' ')
+          echo "prs=$PRS" >> "$GITHUB_OUTPUT"
+
       - name: Run Claude (fresh session per trigger, as non-root user)
         if: needs.detect-image.outputs.target_repo != ''
         working-directory: target
@@ -193,6 +202,20 @@ jobs:
             }
             fs.writeFileSync("../session_result.txt", output);
           ' || true
+
+      - name: Add reviewer to newly opened PRs (safety net)
+        if: needs.detect-image.outputs.target_repo != ''
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          BEFORE=" ${{ steps.pr_snapshot.outputs.prs }} "
+          AFTER=$(gh pr list --repo "${{ needs.detect-image.outputs.target_repo }}" --state open --json number --jq '.[].number' | sort -n)
+          for pr in $AFTER; do
+            if [[ "$BEFORE" != *" $pr "* ]]; then
+              echo "New PR #$pr detected; requesting review from TheDeepestSpace"
+              gh pr edit "$pr" --repo "${{ needs.detect-image.outputs.target_repo }}" --add-reviewer TheDeepestSpace || true
+            fi
+          done
 
       - name: Commit session summary
         if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
