@@ -130,6 +130,9 @@ jobs:
       - name: Run Claude (fresh session per trigger, as non-root user)
         if: needs.detect-image.outputs.target_repo != ''
         working-directory: target
+        env:
+          CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
+          SUMMARY_CONTEXT: ${{ steps.summary_context.outputs.summary }}
         run: |
           export CLAUDE_CODE_OAUTH_TOKEN="${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}"
           export GH_TOKEN="${{ steps.token.outputs.token }}"
@@ -137,8 +140,8 @@ jobs:
           export TARGET_REPO="${{ needs.detect-image.outputs.target_repo }}"
           export ISSUE_NUMBER="${{ needs.detect-image.outputs.issue_number }}"
 
-          export COMMENT_BODY=$(jq -r '.comment_body // empty' ../parsed_trigger.json 2>/dev/null || echo "${{ needs.detect-image.outputs.clean_prompt }}")
-          export PRIOR_CONTEXT=$(cat ../prior_summary.txt 2>/dev/null || echo "${{ steps.summary_context.outputs.summary }}")
+          export COMMENT_BODY="$CLEAN_PROMPT"
+          export PRIOR_CONTEXT=$(cat ../prior_summary.txt 2>/dev/null || echo "$SUMMARY_CONTEXT")
           export STYLE_GUIDE="$(cat ../instructions/shared-style.md 2>/dev/null || true)"
           export TARGET_DIR="$(pwd)"
 
@@ -159,6 +162,26 @@ jobs:
             }
             prompt += `New request:\n${comment}`;
             fs.writeFileSync("/tmp/prompt.txt", prompt);
+          '
+
+          # Extraction logic written to its own file (not inlined via jq, which isn't guaranteed to
+          # be present in every target image) so result.json parsing has no external dependency.
+          node -e '
+            const fs = require("fs");
+            const lines = [
+              "const fs = require(\"fs\");",
+              "let output = \"\";",
+              "try {",
+              "  const raw = fs.readFileSync(\"result.json\", \"utf8\");",
+              "  const data = JSON.parse(raw);",
+              "  const value = data.result ?? data.output ?? data;",
+              "  output = typeof value === \"string\" ? value : JSON.stringify(value, null, 2);",
+              "} catch (e) {",
+              "  output = fs.readFileSync(\"result.json\", \"utf8\").toString();",
+              "}",
+              "fs.writeFileSync(\"../session_result.txt\", output);",
+            ];
+            fs.writeFileSync("/tmp/extract-result.js", lines.join("\n"));
           '
 
           # Ensure dev user exists and owns the workspace so it has write access
@@ -191,12 +214,12 @@ jobs:
               "set +e",
               "claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions > result.json 2>&1",
               "set -e",
-              "jq -r \x27.result // .output // .\x27 result.json > ../session_result.txt || true",
+              "node /tmp/extract-result.js || true",
               "",
             ].join("\n");
             fs.writeFileSync("/tmp/run_as_dev.sh", script, { mode: 0o755 });
           '
-          chown dev:dev /tmp/run_as_dev.sh
+          chown dev:dev /tmp/run_as_dev.sh /tmp/extract-result.js
 
           su dev -c /tmp/run_as_dev.sh
 
