@@ -112,7 +112,8 @@ jobs:
       - name: Check whether base image is our own fallback
         id: fallback_check
         run: |
-          if [ "${{ needs.detect-image.outputs.image }}" = "ghcr.io/thedeepestspace/the-intern-dev:latest" ]; then
+          REPO_LOWER=$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          if [ "${{ needs.detect-image.outputs.image }}" = "ghcr.io/${REPO_LOWER}-dev:latest" ]; then
             echo "is_fallback=true" >> "$GITHUB_OUTPUT"
           else
             echo "is_fallback=false" >> "$GITHUB_OUTPUT"
@@ -128,37 +129,31 @@ jobs:
           INSTALLATION_ID: ${{ needs.detect-image.outputs.installation_id }}
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
 
+      - name: Set up Docker Buildx
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR to pull base image
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: x-access-token
+          password: ${{ steps.temp_token.outputs.token }}
+
+      # The overlay tag is derived from the base image's digest (not its mutable
+      # "latest"/"dev-latest" tag), so a new dev-image build in the target repo
+      # naturally produces a new tag here and forces a rebuild on the next dispatch
+      # instead of reusing a stale overlay.
       - name: Resolve base image digest and overlay tag
         id: overlay_meta
         if: steps.fallback_check.outputs.is_fallback != 'true'
         env:
-          GH_TOKEN: ${{ steps.temp_token.outputs.token }}
           REPO_NAME: ${{ needs.detect-image.outputs.target_repo }}
           BASE_IMAGE: ${{ needs.detect-image.outputs.image }}
         run: |
-          REPO_OWNER="${REPO_NAME%%/*}"
           REPO_SLUG="${REPO_NAME##*/}"
-          IMAGE_PATH="${REPO_OWNER,,}/${REPO_SLUG,,}-dev"
-          TAG="${BASE_IMAGE##*:}"
-
-          SCOPE="repository:${IMAGE_PATH}:pull"
-          GHCR_TOKEN=$(curl -s -K - \
-               "https://ghcr.io/token?service=ghcr.io&scope=${SCOPE}" <<CURL_CFG | jq -r '.token // empty'
-          user = "token:${GH_TOKEN}"
-          CURL_CFG
-          )
-
-          if [ -z "$GHCR_TOKEN" ]; then
-            echo "::error::Could not obtain a GHCR token to resolve the base image digest"
-            exit 1
-          fi
-
-          HEADERS=$(curl -s -D - -o /dev/null \
-            -H "Authorization: Bearer $GHCR_TOKEN" \
-            -H "Accept: application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json" \
-            "https://ghcr.io/v2/${IMAGE_PATH}/manifests/${TAG}")
-
-          DIGEST=$(echo "$HEADERS" | grep -i '^docker-content-digest:' | awk '{print $2}' | tr -d '\r\n')
+          DIGEST=$(docker buildx imagetools inspect "$BASE_IMAGE" | awk '/^Digest:/ {print $2}')
 
           if [ -z "$DIGEST" ]; then
             echo "::error::Could not resolve a digest for base image $BASE_IMAGE"
@@ -167,39 +162,32 @@ jobs:
 
           DIGEST_SHORT=$(echo "$DIGEST" | sed 's/^sha256://' | cut -c1-12)
           OVERLAY_TAG="${REPO_SLUG,,}-${DIGEST_SHORT}"
+          OVERLAY_IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/agent-overlay:${OVERLAY_TAG}"
 
           echo "overlay_tag=$OVERLAY_TAG" >> "$GITHUB_OUTPUT"
+          echo "overlay_image=$OVERLAY_IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR to check overlay image
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check for an existing overlay image
         id: check_overlay
         if: steps.fallback_check.outputs.is_fallback != 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OVERLAY_TAG: ${{ steps.overlay_meta.outputs.overlay_tag }}
+          OVERLAY_IMAGE: ${{ steps.overlay_meta.outputs.overlay_image }}
         run: |
-          SCOPE="repository:thedeepestspace/agent-overlay:pull"
-          GHCR_TOKEN=$(curl -s -K - \
-               "https://ghcr.io/token?service=ghcr.io&scope=${SCOPE}" <<CURL_CFG | jq -r '.token // empty'
-          user = "token:${GH_TOKEN}"
-          CURL_CFG
-          )
-
-          EXISTS="false"
-          if [ -n "$GHCR_TOKEN" ]; then
-            TAGS=$(curl -s -f -H "Authorization: Bearer $GHCR_TOKEN" \
-                 "https://ghcr.io/v2/thedeepestspace/agent-overlay/tags/list" || true)
-            if [ -n "$TAGS" ] && echo "$TAGS" | jq -e --arg tag "$OVERLAY_TAG" '(.tags // []) | index($tag)' > /dev/null 2>&1; then
-              EXISTS="true"
-            fi
+          if docker buildx imagetools inspect "$OVERLAY_IMAGE" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-          echo "exists=$EXISTS" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Docker Buildx
-        if: steps.fallback_check.outputs.is_fallback != 'true' && steps.check_overlay.outputs.exists != 'true'
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to GHCR to pull base image
+      - name: Re-login to GHCR to pull base image for build
         if: steps.fallback_check.outputs.is_fallback != 'true' && steps.check_overlay.outputs.exists != 'true'
         uses: docker/login-action@v3
         with:
@@ -217,7 +205,7 @@ jobs:
             BASE_IMAGE=${{ needs.detect-image.outputs.image }}
           push: false
           load: true
-          tags: ghcr.io/thedeepestspace/agent-overlay:${{ steps.overlay_meta.outputs.overlay_tag }}
+          tags: ${{ steps.overlay_meta.outputs.overlay_image }}
           platforms: linux/amd64
 
       - name: Login to GHCR to push overlay image
@@ -230,7 +218,7 @@ jobs:
 
       - name: Push agent-overlay image
         if: steps.fallback_check.outputs.is_fallback != 'true' && steps.check_overlay.outputs.exists != 'true'
-        run: docker push ghcr.io/thedeepestspace/agent-overlay:${{ steps.overlay_meta.outputs.overlay_tag }}
+        run: docker push "${{ steps.overlay_meta.outputs.overlay_image }}"
 
       - name: Resolve final image output
         id: resolve
@@ -238,7 +226,7 @@ jobs:
           if [ "${{ steps.fallback_check.outputs.is_fallback }}" = "true" ]; then
             echo "image=${{ needs.detect-image.outputs.image }}" >> "$GITHUB_OUTPUT"
           else
-            echo "image=ghcr.io/thedeepestspace/agent-overlay:${{ steps.overlay_meta.outputs.overlay_tag }}" >> "$GITHUB_OUTPUT"
+            echo "image=${{ steps.overlay_meta.outputs.overlay_image }}" >> "$GITHUB_OUTPUT"
           fi
 
   handle:
