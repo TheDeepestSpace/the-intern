@@ -140,3 +140,17 @@ Next step: user decides whether to file issues (probably split: the-intern issue
 - **Filed**: https://github.com/TheDeepestSpace/the-intern/issues/17 — two-part fix: (1) primary — add a rule to `instructions/shared-style.md` (already loaded into both `dispatcher.yml` and `telegram-session.yml` prompts) telling the agent to always `gh pr create --reviewer TheDeepestSpace` / `gh pr edit --add-reviewer TheDeepestSpace`; (2) safety net in `dispatcher.yml`'s `handle` job — snapshot open PR numbers for the target repo before running Claude, diff after, `gh pr edit --add-reviewer TheDeepestSpace` on any newly-appeared PR number, since instruction-following alone isn't guaranteed.
 - **Kicked off dispatcher**: https://github.com/TheDeepestSpace/the-intern/issues/17#issuecomment-5126457786
 - Not yet confirmed complete — check #17 for a PR on a future turn.
+
+## 2026-07-30: Status check — 7 infra-bug PRs merged (#5, #6, #9, #11, #13, #16, #17)
+Confirmed via API sweep of closed the-intern PRs: #14→#5 (dev-user git perms), #7→#6 (GHCR image detection), #10→#9 (style guide), #12→#11 (shell injection), #15→#13 (jq→node), #19→#16 (secret exposure), #18→#17 (auto-reviewer) — **all merged**. Dispatcher pipeline is now considerably more solid; treat these as resolved unless new evidence surfaces.
+
+Still open, no PR yet: #3 (Codex backend, awaiting user direction on device-auth vs plain API key), #4 (see below), #8 (issue-free direct dispatch, awaiting user direction on 5 open questions), #2 (pre-existing, not actioned this session). svsch: #72 (ternary), #73 (npm publish auth), #75 (BDD reload test) all dispatched but not yet confirmed complete — recheck for PRs. svsch #74 (new, unprefixed `latest` tag request) not yet looked at.
+
+## 2026-07-30: Issue #4 follow-up — reply-threading + one-by-one queueing, dispatched
+User posted a follow-up comment directly on #4 (not via Telegram) asking for two more things: (1) Telegram sends during a session should use the Bot API "reply" feature threaded to the triggering message, regardless of how many messages the session sends; (2) explicitly rejected the batch-multiple-messages-into-one-prompt idea from the original issue — wants messages "addressed one by one" instead. Asked me to research and update the issue description.
+- Re-read `worker/src/index.js`, `telegram-session.yml`, `scripts/send-telegram.js` to ground the plan in actual code.
+- **Updated issue #4 body** with concrete plan:
+  - Queueing: realized the user's ask is *simpler* than the original two-option proposal — just add `concurrency: { group: telegram-<chat_id>, cancel-in-progress: false }` to `telegram-session.yml`. Actions then queues per-chat runs natively in strict order, no custom Worker/KV queue needed. Dropped the batching option entirely since the user rejected it.
+  - Reply-threading: thread `message_id` from the Telegram webhook update → `worker/src/index.js` `client_payload` → `telegram-session.yml` env (`REPLY_TO_MESSAGE_ID`) → `scripts/send-telegram.js` (`reply_parameters: { message_id }`), set once per session so every message the agent sends during that run replies to the same source message. Fallback to plain send if the reply target is invalid (e.g. deleted).
+- **Kicked off dispatcher**: https://github.com/TheDeepestSpace/the-intern/issues/4#issuecomment-5126724709
+- Not yet confirmed complete — check #4 for a PR on a future turn.
