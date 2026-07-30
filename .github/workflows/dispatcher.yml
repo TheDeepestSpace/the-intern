@@ -140,6 +140,7 @@ jobs:
           export COMMENT_BODY=$(jq -r '.comment_body // empty' ../parsed_trigger.json 2>/dev/null || echo "${{ needs.detect-image.outputs.clean_prompt }}")
           export PRIOR_CONTEXT=$(cat ../prior_summary.txt 2>/dev/null || echo "${{ steps.summary_context.outputs.summary }}")
           export STYLE_GUIDE="$(cat ../instructions/shared-style.md 2>/dev/null || true)"
+          export TARGET_DIR="$(pwd)"
 
           node -e '
             const fs = require("fs");
@@ -160,23 +161,56 @@ jobs:
             fs.writeFileSync("/tmp/prompt.txt", prompt);
           '
 
-          # Ensure dev user exists and owns all workspace directories so dev user has write access
+          # Ensure dev user exists and owns the workspace so it has write access
           id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
-          chown -R dev:dev . .. /__w /github/workspace /tmp /home/dev /tmp/prompt.txt 2>/dev/null || true
 
-          su dev -c '
-            export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"
-            export GH_TOKEN="$GH_TOKEN"
-            export GITHUB_TOKEN="$GITHUB_TOKEN"
-            export HOME="/home/dev"
-            cd "$(pwd)"
-            git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
-            git config user.name "the-intern-bot[bot]"
-            git config user.email "the-intern-bot[bot]@users.noreply.github.com"
-            PROMPT="$(cat /tmp/prompt.txt)"
-            claude -p "$PROMPT" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
-            jq -r '.result // .output // .' result.json > ../session_result.txt || true
+          if ! chown -R dev:dev "$TARGET_DIR" "$GITHUB_WORKSPACE" /tmp /home/dev; then
+            echo "::error::chown failed to grant the dev user write access to workspace directories"
+            exit 1
+          fi
+          if ! su dev -c "test -w '$TARGET_DIR/.git'"; then
+            echo "::error::dev user still lacks write access to $TARGET_DIR/.git after chown; aborting before git config"
+            ls -la "$TARGET_DIR/.git" 2>&1 || true
+            exit 1
+          fi
+
+          # Written to a file (rather than inlined into `su -c '...'`) to avoid fragile nested-quote
+          # escaping — a previous inline version silently truncated the script at the jq filter's
+          # single quotes, dropping everything after it.
+          node -e '
+            const fs = require("fs");
+            const script = [
+              "#!/bin/bash",
+              "set -e",
+              "export HOME=\"/home/dev\"",
+              "cd \"$TARGET_DIR\"",
+              "git config --global --add safe.directory \"$TARGET_DIR\"",
+              "git config user.name \"the-intern-bot[bot]\"",
+              "git config user.email \"the-intern-bot[bot]@users.noreply.github.com\"",
+              "PROMPT=\"$(cat /tmp/prompt.txt)\"",
+              "set +e",
+              "claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions > result.json 2>&1",
+              "set -e",
+              "jq -r \x27.result // .output // .\x27 result.json > ../session_result.txt || true",
+              "",
+            ].join("\n");
+            fs.writeFileSync("/tmp/run_as_dev.sh", script, { mode: 0o755 });
           '
+          chown dev:dev /tmp/run_as_dev.sh
+
+          su dev -c /tmp/run_as_dev.sh
+
+      - name: Report setup failure on target issue
+        if: failure() && needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          BODY=$(jq -n --arg run_url "$RUN_URL" \
+            '{body: ("⚠️ the-intern-bot session failed before it could run (dispatcher setup error). See the [workflow run](" + $run_url + ") for details.")}')
+          curl -s -X POST \
+            -H "Authorization: token ${{ steps.token.outputs.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ needs.detect-image.outputs.target_repo }}/issues/${{ needs.detect-image.outputs.issue_number }}/comments" \
+            -d "$BODY"
 
       - name: Commit session summary
         if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
