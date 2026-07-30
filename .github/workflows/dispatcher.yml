@@ -204,12 +204,28 @@ jobs:
         if: failure() && needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          BODY=$(jq -n --arg run_url "$RUN_URL" \
-            '{body: ("⚠️ the-intern-bot session failed before it could run (dispatcher setup error). See the [workflow run](" + $run_url + ") for details.")}')
+          TARGET_REPO="${{ needs.detect-image.outputs.target_repo }}"
+          ISSUE_NUMBER="${{ needs.detect-image.outputs.issue_number }}"
+
+          # GitHub has no email-sending API; mentioning the author directly is the
+          # closest equivalent — mention notifications are emailed regardless of
+          # whether the author is watching the repo, unlike a plain comment.
+          AUTHOR=$(curl -s -H "Authorization: token ${{ steps.token.outputs.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${TARGET_REPO}/issues/${ISSUE_NUMBER}" \
+            | jq -r '.user.login // empty')
+
+          MENTION=""
+          if [ -n "$AUTHOR" ]; then
+            MENTION="@${AUTHOR} "
+          fi
+
+          BODY=$(jq -n --arg run_url "$RUN_URL" --arg mention "$MENTION" \
+            '{body: ($mention + "⚠️ the-intern-bot session failed before it could run (dispatcher setup error). See the [workflow run](" + $run_url + ") for details.")}')
           curl -s -X POST \
             -H "Authorization: token ${{ steps.token.outputs.token }}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ needs.detect-image.outputs.target_repo }}/issues/${{ needs.detect-image.outputs.issue_number }}/comments" \
+            "https://api.github.com/repos/${TARGET_REPO}/issues/${ISSUE_NUMBER}/comments" \
             -d "$BODY"
 
       - name: Commit session summary
