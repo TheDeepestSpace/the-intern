@@ -179,3 +179,10 @@ User said "yeah lets set up worker auto-deploys, let me know if you need any act
 - **Kicked off dispatcher**: https://github.com/TheDeepestSpace/the-intern/issues/24#issuecomment-5126986389
 - **Action needed from user (told them via Telegram)**: once the PR merges, create a Cloudflare API token (Workers Scripts: Edit) and add it as the `CLOUDFLARE_API_TOKEN` repo secret on the-intern (possibly also `CLOUDFLARE_ACCOUNT_ID`). Workflow will fail until that secret exists — expected.
 - Not yet confirmed complete — check #24 for a PR on a future turn. Note: even after this merges and the secret is added, the *current* stale Worker build (missing #4's message_id fix) still needs one deploy to catch up — the new workflow only auto-deploys future pushes, it won't retroactively redeploy the current main unless a no-op push to worker/ is made or someone triggers it manually once.
+
+## 2026-07-30: Issue #24 merged, first real deploy run failed — Node version mismatch, issue #27 dispatched
+User merged #24's PR (deploy-worker.yml + CLOUDFLARE secrets already added, since the run actually reached the deploy step) and hit a failure on the very first run: https://github.com/TheDeepestSpace/the-intern/actions/runs/30544164262/job/90875977219
+- Pulled the job log via API. Checkout/npm install succeeded; `npx wrangler deploy` failed immediately: `Wrangler requires at least Node.js v22.0.0. You are using v20.20.2.` — `deploy-worker.yml` (as written by #24) sets up Node 20 via `actions/setup-node@v4`, but the installed `wrangler@4.115.0` needs Node >=22.
+- **Filed**: https://github.com/TheDeepestSpace/the-intern/issues/27 — one-line fix, bump `node-version` to `22` in `.github/workflows/deploy-worker.yml`.
+- **Kicked off dispatcher**: https://github.com/TheDeepestSpace/the-intern/issues/27#issuecomment-5131040052
+- Not yet confirmed complete — check #27 for a PR on a future turn. Once this lands, still need one deploy of current main to ship the stale #4 message_id fix live (per the note above) — the auto-deploy workflow only triggers on future pushes to worker/, so either a no-op push or a manual `npm run deploy` is needed to catch main up.
