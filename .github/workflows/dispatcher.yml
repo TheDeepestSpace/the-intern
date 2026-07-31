@@ -257,6 +257,8 @@ jobs:
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
           CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
           SUMMARY_CONTEXT: ${{ steps.summary_context.outputs.summary }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
         run: |
           export COMMENT_BODY="$CLEAN_PROMPT"
           export PRIOR_CONTEXT=$(cat ../prior_summary.txt 2>/dev/null || echo "$SUMMARY_CONTEXT")
@@ -343,7 +345,7 @@ jobs:
 
           # claude's own gh calls are how it normally reports back; if the session
           # crashed or produced nothing usable, that never happens, so detect that
-          # here and post a failure comment instead of leaving the issue/PR silent.
+          # here and notify the admin over Telegram instead of leaving the issue/PR silent.
           if node -e '
             const fs = require("fs");
             const raw = fs.existsSync("result.json") ? fs.readFileSync("result.json", "utf8") : "";
@@ -359,9 +361,9 @@ jobs:
           else
             echo "::warning::Claude produced no usable output or reported an error"
             if [ -n "$ISSUE_NUMBER" ]; then
-              FAILURE_BODY="@the-intern-bot ran into an error and could not complete this request. See the [workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) for details."
-              gh issue comment "$ISSUE_NUMBER" --repo "$TARGET_REPO" --body "$FAILURE_BODY" \
-                || echo "::error::failed to post failure comment on $TARGET_REPO#$ISSUE_NUMBER"
+              FAILURE_TEXT="⚠️ the-intern-bot ran into an error and could not complete a request on ${TARGET_REPO}#${ISSUE_NUMBER}. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+              CHAT_ID="$TG_ADMIN_CHAT_ID" MESSAGE_TEXT="$FAILURE_TEXT" node "$GITHUB_WORKSPACE/scripts/send-telegram.js" \
+                || echo "::error::failed to send Telegram failure notification for $TARGET_REPO#$ISSUE_NUMBER"
             fi
           fi
 
@@ -383,10 +385,11 @@ jobs:
       - name: Checkout agent-infra
         uses: actions/checkout@v4
 
-      - name: Email maintainer via GitHub issue mention
+      - name: Notify maintainer via Telegram
         run: node scripts/notify-failure.js
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
           REPO: ${{ github.repository }}
           WORKFLOW_NAME: dispatcher
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
