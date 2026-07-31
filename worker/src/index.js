@@ -58,10 +58,20 @@ async function handleGitHub(request, env) {
     return new Response('ignored: event type', { status: 200 });
   }
 
-  // Guard: For comments/reviews, only trigger if @the-intern-bot is mentioned
+  // Guard: only trigger if @the-intern-bot is mentioned, OR the comment is on a
+  // thread (issue/PR) authored by the bot itself — but never for comments the
+  // bot itself posts, or every status update would re-trigger a dispatch.
   const commentBody = payload.comment?.body || payload.review?.body || '';
-  if (!commentBody.toLowerCase().includes('@the-intern-bot')) {
-    return new Response('ignored: bot not mentioned in comment', { status: 200 });
+  const botLogin = (env.BOT_LOGIN || 'the-intern-bot[bot]').toLowerCase();
+  const threadAuthor = (
+    payload.issue?.user?.login || payload.pull_request?.user?.login || ''
+  ).toLowerCase();
+  const mentionsBot = commentBody.toLowerCase().includes('@the-intern-bot');
+  const isBotAuthoredThread = threadAuthor === botLogin;
+  const commenterIsBot = (author || '').toLowerCase() === botLogin;
+
+  if (!mentionsBot && !(isBotAuthoredThread && !commenterIsBot)) {
+    return new Response('ignored: bot not mentioned and not a comment on a bot-authored thread', { status: 200 });
   }
 
   const installationId = payload.installation?.id;
