@@ -1,6 +1,6 @@
-# Thin overlay adding agent tooling (node, claude, gh, jq) on top of a target
-# repo's own devcontainer image, so the-intern-bot can run there even if that
-# image was built for the target repo's own CI needs. Installs are static
+# Thin overlay adding agent tooling (node, claude, codex, gh, jq) on top of a
+# target repo's own devcontainer image, so the-intern-bot can run there even if
+# that image was built for the target repo's own CI needs. Installs are static
 # binaries/curl rather than a package manager, since the base image's distro
 # (or presence of one at all) isn't known ahead of time.
 ARG BASE_IMAGE
@@ -36,6 +36,8 @@ RUN if ! command -v node >/dev/null 2>&1; then \
     fi
 
 RUN command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code
+
+RUN command -v codex >/dev/null 2>&1 || npm install -g @openai/codex
 
 RUN if ! command -v gh >/dev/null 2>&1; then \
       ARCH="$(uname -m)"; \

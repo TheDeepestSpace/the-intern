@@ -29,6 +29,7 @@ jobs:
       issue_number: ${{ steps.parse.outputs.issue_number }}
       clean_prompt: ${{ steps.parse.outputs.clean_prompt }}
       installation_id: ${{ steps.parse.outputs.installation_id }}
+      backend: ${{ steps.parse.outputs.backend }}
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@v4
@@ -246,11 +247,13 @@ jobs:
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
 
-      - name: Run Claude (fresh session per trigger, as non-root user)
+      - name: Run agent (fresh session per trigger, as non-root user)
         if: needs.detect-image.outputs.target_repo != ''
         working-directory: target
         env:
+          BACKEND: ${{ needs.detect-image.outputs.backend }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
@@ -302,6 +305,25 @@ jobs:
             fs.writeFileSync("/tmp/extract-result.js", lines.join("\n"));
           '
 
+          # codex exec has no --output-format json like claude; instead it streams
+          # JSONL events to stdout (captured separately, for debugging only) and
+          # writes the final agent message to --output-last-message. This wraps
+          # that final message into the same {result, is_error} shape claude's
+          # own --output-format json produces, so extract-result.js and the
+          # failure-detection step below work unmodified for either backend.
+          node -e '
+            const fs = require("fs");
+            const lines = [
+              "const fs = require(\"fs\");",
+              "const exitCode = process.argv[2];",
+              "let finalMessage = \"\";",
+              "try { finalMessage = fs.readFileSync(\"/tmp/codex-final.txt\", \"utf8\"); } catch (e) {}",
+              "const isError = exitCode !== \"0\" || !finalMessage.trim();",
+              "fs.writeFileSync(\"result.json\", JSON.stringify({ result: finalMessage, is_error: isError }, null, 2));",
+            ];
+            fs.writeFileSync("/tmp/normalize-codex-result.js", lines.join("\n"));
+          '
+
           # Ensure dev user exists and owns the workspace so it has write access
           id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
 
@@ -318,8 +340,25 @@ jobs:
           # Written to a file (rather than inlined into `su -c '...'`) to avoid fragile nested-quote
           # escaping — a previous inline version silently truncated the script at the jq filter's
           # single quotes, dropping everything after it.
+          #
+          # Backend invocation differs (claude vs codex), but both are run with their
+          # sandboxing/approval prompts fully disabled — the isolation here comes from
+          # the ephemeral container and non-root dev user, not from the CLI's own
+          # permission system, same trust model on both backends.
           node -e '
             const fs = require("fs");
+            const backend = process.env.BACKEND === "codex" ? "codex" : "claude";
+            const runLines = backend === "codex"
+              ? [
+                  "codex exec --dangerously-bypass-approvals-and-sandbox --json --output-last-message /tmp/codex-final.txt \"$PROMPT\" > /tmp/codex-events.jsonl 2>&1",
+                  "CODEX_EXIT=$?",
+                  "set -e",
+                  "node /tmp/normalize-codex-result.js \"$CODEX_EXIT\"",
+                ]
+              : [
+                  "claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions 2>&1 | tee result.json",
+                  "set -e",
+                ];
             const script = [
               "#!/bin/bash",
               "set -e",
@@ -330,18 +369,17 @@ jobs:
               "git config user.email \"the-intern-bot[bot]@users.noreply.github.com\"",
               "PROMPT=\"$(cat /tmp/prompt.txt)\"",
               "set +e",
-              "claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions 2>&1 | tee result.json",
-              "set -e",
+              ...runLines,
               "node /tmp/extract-result.js || true",
               "",
             ].join("\n");
             fs.writeFileSync("/tmp/run_as_dev.sh", script, { mode: 0o755 });
           '
-          chown dev:dev /tmp/run_as_dev.sh /tmp/extract-result.js
+          chown dev:dev /tmp/run_as_dev.sh /tmp/extract-result.js /tmp/normalize-codex-result.js
 
           su dev -c /tmp/run_as_dev.sh
 
-          # claude's own gh calls are how it normally reports back; if the session
+          # the agent's own gh calls are how it normally reports back; if the session
           # crashed or produced nothing usable, that never happens, so detect that
           # here and post a failure comment instead of leaving the issue/PR silent.
           if node -e '
@@ -355,9 +393,9 @@ jobs:
               process.exit(1);
             }
           '; then
-            echo "Claude session completed."
+            echo "Agent session completed."
           else
-            echo "::warning::Claude produced no usable output or reported an error"
+            echo "::warning::Agent produced no usable output or reported an error"
             if [ -n "$ISSUE_NUMBER" ]; then
               FAILURE_BODY="@the-intern-bot ran into an error and could not complete this request. See the [workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) for details."
               gh issue comment "$ISSUE_NUMBER" --repo "$TARGET_REPO" --body "$FAILURE_BODY" \

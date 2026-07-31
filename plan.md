@@ -47,6 +47,7 @@ commit any of these to a file that gets pushed.
 | `APP_PRIVATE_KEY` | Worker, Actions | Full contents of the `.pem` file |
 | `WEBHOOK_SECRET` | Worker only | Used to verify `X-Hub-Signature-256` |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Actions | From `claude setup-token` |
+| `CODEX_API_KEY` | Actions | OpenAI Platform API key, used by `codex exec` when a trigger comment specifies `backend=codex`. Metered API billing, not ChatGPT-plan usage — see the "Plan-limits vs API-billing auth" note on issue #3 for why |
 | `BOT_LOGIN` | Worker | e.g. `the-intern-bot[bot]` — used to drop self-triggered events |
 | `ALLOWED_USERS` | Worker only | Comma-separated GitHub usernames permitted to trigger the bot — set to just your own login |
 | `CLOUDFLARE_API_TOKEN` | agent's shell / CI deploying the Worker | Not used at runtime by the Worker itself |

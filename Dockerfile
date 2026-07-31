@@ -44,6 +44,9 @@ RUN cd /tmp && \
 # Pre-install Claude Code CLI globally
 RUN npm install -g @anthropic-ai/claude-code
 
+# Pre-install Codex CLI globally (alternative agent backend)
+RUN npm install -g @openai/codex
+
 # Prepare temp and workspace directories with wide permissions for GHA runner
 RUN mkdir -p /__w /github/workspace /tmp && \
     chmod -R 777 /__w /github /tmp 2>/dev/null || true
