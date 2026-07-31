@@ -24,8 +24,15 @@ function runGit(cmd, options = {}) {
   }
 }
 
+// Defensively mark cwd as safe regardless of what a prior step (e.g. actions/checkout)
+// configured, since that config may not be visible here (different container/UID).
+function ensureSafeDirectory() {
+  runGit(`config --global --add safe.directory "${process.cwd()}"`, { allowFailure: true });
+}
+
 function fetchSummary(targetRepo, issueNumber) {
   if (!targetRepo || !issueNumber) return '';
+  ensureSafeDirectory();
   const branchName = getBranchName(targetRepo, issueNumber);
 
   // Fetch branch from origin if available (it may legitimately not exist yet)
@@ -58,6 +65,7 @@ function fetchSummary(targetRepo, issueNumber) {
 
 function saveSummary(targetRepo, issueNumber, promptText, resultText) {
   if (!targetRepo || !issueNumber) return;
+  ensureSafeDirectory();
   const branchName = getBranchName(targetRepo, issueNumber);
   const timestamp = new Date().toISOString();
   const repoSlug = sanitizeSlug(targetRepo);

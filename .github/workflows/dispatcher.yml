@@ -305,7 +305,7 @@ jobs:
           # Ensure dev user exists and owns the workspace so it has write access
           id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
 
-          if ! chown -R dev:dev "$TARGET_DIR" "$GITHUB_WORKSPACE" /tmp /home/dev; then
+          if ! chown -R dev:dev "$TARGET_DIR" /tmp /home/dev; then
             echo "::error::chown failed to grant the dev user write access to workspace directories"
             exit 1
           fi
