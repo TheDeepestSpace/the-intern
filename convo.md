@@ -252,3 +252,10 @@ User asked to update the-intern's bot instructions to be even more concise — e
 - Added one sentence to the "Match length to substance" bullet: if the answer is just "ok, done"/"fixed"/"yes", say that and stop.
 - **Opened directly via API** (branch + commit + PR, same pattern as #29 — trivial one-line-ish doc edit, skipped the dispatcher): https://github.com/TheDeepestSpace/the-intern/pull/32. TheDeepestSpace added as reviewer.
 - Not yet confirmed merged — check #32 on a future turn.
+
+## 2026-07-31: PR-issue auto-linking instruction — PR #46 (direct API, not dispatcher)
+User asked for agents to reference the triggering issue in PR descriptions (`Closes #xx`/`Fixes #yy`) so GitHub auto-links them.
+- Confirmed `instructions/shared-style.md` is loaded into both the dispatcher prompt and the Telegram prompt, and the dispatcher prompt already states "issue/PR #N" context — so a single style-guide line covers both flows with the issue number already available to the agent.
+- Added: "When opening a pull request for a tracked issue, reference it in the description (e.g. `Closes #42` or `Fixes #42`) so GitHub auto-links and closes it on merge."
+- **Opened directly via API** (same pattern as #29/#32 — trivial one-line doc edit, skipped the dispatcher): https://github.com/TheDeepestSpace/the-intern/pull/46. TheDeepestSpace added as reviewer.
+- Not yet confirmed merged — check #46 on a future turn.
