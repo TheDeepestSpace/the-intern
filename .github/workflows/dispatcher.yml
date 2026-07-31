@@ -217,6 +217,16 @@ jobs:
     container:
       image: ${{ needs.ensure-agent-overlay.outputs.image }}
       options: --user root
+    env:
+      CODEX_HOME: /home/dev/.codex
+    # codex proactively rotates its own refresh token in place, and rotated refresh
+    # tokens are typically single-use — two overlapping codex-backend runs restoring/
+    # persisting CODEX_AUTH_JSON at once would race and strand each other on a stale
+    # token. Claude-backend runs don't touch that secret, so give each of them their
+    # own (unique, non-blocking) group instead of serializing everything.
+    concurrency:
+      group: ${{ needs.detect-image.outputs.backend == 'codex' && 'the-intern-codex-auth' || format('the-intern-handle-{0}', github.run_id) }}
+      cancel-in-progress: false
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@v4
@@ -246,6 +256,22 @@ jobs:
         env:
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
+
+      - name: Install script dependencies for Codex auth round-trip
+        if: needs.detect-image.outputs.backend == 'codex'
+        run: npm ci --omit=dev --include=prod --no-audit --no-fund
+
+      # Personal-account Codex login (~/.codex/auth.json) rather than the metered
+      # CODEX_API_KEY path. Restores the last-known-good auth.json from the
+      # CODEX_AUTH_JSON secret before the run; the matching write-back happens in
+      # "Persist refreshed Codex auth.json" below, after codex has had a chance to
+      # rotate it. See rotate-codex-auth.js for the full rationale and the
+      # log-masking measures — nothing in either step ever echoes token contents.
+      - name: Restore Codex auth.json from secret
+        if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.backend == 'codex'
+        run: node scripts/rotate-codex-auth.js restore
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
 
       - name: Run agent (fresh session per trigger, as non-root user)
         if: needs.detect-image.outputs.target_repo != ''
@@ -402,6 +428,22 @@ jobs:
                 || echo "::error::failed to post failure comment on $TARGET_REPO#$ISSUE_NUMBER"
             fi
           fi
+
+      # Runs even if the step above failed: OpenAI's CI/CD guidance for this flow is
+      # to write back whatever codex left on disk regardless of run outcome, since a
+      # refresh can happen before a mid-run failure and a rotated refresh token is
+      # typically single-use — skipping the write-back on failure would strand the
+      # account on a dead token. REPO_ADMIN_TOKEN is a separate fine-grained PAT
+      # (Secrets: write, scoped to this repo only) because the installation/
+      # GITHUB_TOKEN credentials used elsewhere in this job cannot manage Actions
+      # secrets. Encryption uses the repo's public key via libsodium (GitHub's
+      # documented approach for the secrets API) so the refreshed token is sealed
+      # before it ever leaves the runner.
+      - name: Persist refreshed Codex auth.json to secret
+        if: always() && needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.backend == 'codex'
+        run: node scripts/rotate-codex-auth.js persist
+        env:
+          REPO_ADMIN_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
 
       - name: Commit session summary
         if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
