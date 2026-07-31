@@ -1,5 +1,13 @@
 # Conversation Summary
 
+## 2026-07-31: svsch BDD/visual snapshot tests silently create missing baselines in CI — issue #79, dispatched
+User noticed BDD log output showing "Created or updated baseline graph: ..." for a scenario, asked whether that means the baseline isn't committed to the repo — if so, CI should fail (nothing to compare against) rather than silently create+pass; local dev should still auto-create.
+- Cloned svsch to `/tmp/svsch-investigate` to verify directly. Confirmed in `test/graphRegression.ts`: `compareGraphState` (~line 162-170) and `compareSvgSnapshot` (~line 283) both treat "snapshot file missing" identically to "update requested" — write the actual output as the new baseline and return, no assertion, in CI or not. Same pattern in `test/steps/fixtures.ts`'s `_compareSnapshots` PNG check (~line 238).
+- Confirmed via `git ls-files test/features/snapshots/` that the specific scenario from the log (`Using --svsch-data-dir to find a module's layout independent of --workspace`, `command_line_interface.feature:302`) genuinely has no committed baseline — a real gap, not a false alarm.
+- **Filed**: https://github.com/TheDeepestSpace/svsch/issues/79 — fix: in CI (`process.env.CI`), missing baseline + no `UPDATE_SNAPSHOTS` → throw; locally, keep current auto-create; `UPDATE_SNAPSHOTS=true` keeps working everywhere. Also asked to commit a baseline for the currently-uncovered scenario so it doesn't start failing once this lands.
+- **Kicked off dispatcher**: https://github.com/TheDeepestSpace/svsch/issues/79#issuecomment-5138557480
+- Not yet confirmed complete — check #79 for a PR on a future turn.
+
 ## 2026-07-31: Route failure notifications to Telegram instead of GitHub threads — issue #44, dispatched
 User got `@the-intern-bot ran into an error and could not complete this request. See the workflow run for details.` posted as a comment on a PR thread, asked for such messages to go to Telegram instead of GitHub threads.
 - Confirmed react-telegram.js (issue #41) is live — reacted 👀 successfully as first action.
