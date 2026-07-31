@@ -1,5 +1,15 @@
 # Conversation Summary
 
+## 2026-07-31: Route failure notifications to Telegram instead of GitHub threads — issue #44, dispatched
+User got `@the-intern-bot ran into an error and could not complete this request. See the workflow run for details.` posted as a comment on a PR thread, asked for such messages to go to Telegram instead of GitHub threads.
+- Confirmed react-telegram.js (issue #41) is live — reacted 👀 successfully as first action.
+- Traced the exact source: `dispatcher.yml`'s `handle` job (~line 362) posts `FAILURE_BODY` via `gh issue comment` on the *target* repo when Claude's session errors/produces no output. Found a second, related surface: the `notify-failure` job (in both `dispatcher.yml` and `telegram-session.yml`) opens a new issue in `the-intern` itself via `scripts/notify-failure.js` on job-level failure — same "write to GitHub instead of notifying me" pattern, included it in scope.
+- Key finding: dispatcher/telegram-session failure paths aren't tied to a specific Telegram `chat_id` (unlike normal Telegram-triggered sessions, which get `chat_id` from the incoming webhook) — GitHub-comment-triggered dispatches have no Telegram context at all. So the fix needs a new fixed `TG_ADMIN_CHAT_ID` repo secret (same numeric id as the Worker's `ALLOWED_TG_CHAT_ID`) alongside the existing `TG_BOT_TOKEN` secret, reusing `scripts/send-telegram.js`.
+- **Filed**: https://github.com/TheDeepestSpace/the-intern/issues/44
+- **Kicked off dispatcher**: https://github.com/TheDeepestSpace/the-intern/issues/44#issuecomment-5138421872
+- **Action needed from user**: add `TG_ADMIN_CHAT_ID` repo secret once the PR lands (told them via Telegram) — a coding agent can't set this itself.
+- Not yet confirmed complete — check #44 for a PR on a future turn.
+
 ## 2026-07-31: 👀 start-of-work reaction — issue #41, dispatched
 User asked for agents in both Telegram and dispatch (GH issue/PR) flows to react with 👀 to the triggering message/comment when they *start* working, implemented via agent instructions (not a deterministic GitHub Actions step) — the point being an agent-driven ack proves the Claude session actually launched, which a hardcoded workflow step wouldn't.
 - Cloned `the-intern` to `/tmp` to ground the plan in actual code: `scripts/send-telegram.js` has no reaction support (only `sendMessage`); `TG_BOT_TOKEN`/`CHAT_ID`/`REPLY_TO_MESSAGE_ID` are already in the Telegram session's env (from the #4 reply-threading work) so a reaction script can reuse them directly. On the dispatcher side, `TARGET_REPO`/`ISSUE_NUMBER`/`GH_TOKEN` are already in env for the `handle` job's Claude session (confirmed `su dev -c` preserves the parent step's env in this setup), so `gh api repos/$TARGET_REPO/issues/$ISSUE_NUMBER/reactions -f content=eyes` needs no new plumbing.
