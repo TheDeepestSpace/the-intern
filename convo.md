@@ -1,5 +1,14 @@
 # Conversation Summary
 
+## 2026-07-31: 👀 start-of-work reaction — issue #41, dispatched
+User asked for agents in both Telegram and dispatch (GH issue/PR) flows to react with 👀 to the triggering message/comment when they *start* working, implemented via agent instructions (not a deterministic GitHub Actions step) — the point being an agent-driven ack proves the Claude session actually launched, which a hardcoded workflow step wouldn't.
+- Cloned `the-intern` to `/tmp` to ground the plan in actual code: `scripts/send-telegram.js` has no reaction support (only `sendMessage`); `TG_BOT_TOKEN`/`CHAT_ID`/`REPLY_TO_MESSAGE_ID` are already in the Telegram session's env (from the #4 reply-threading work) so a reaction script can reuse them directly. On the dispatcher side, `TARGET_REPO`/`ISSUE_NUMBER`/`GH_TOKEN` are already in env for the `handle` job's Claude session (confirmed `su dev -c` preserves the parent step's env in this setup), so `gh api repos/$TARGET_REPO/issues/$ISSUE_NUMBER/reactions -f content=eyes` needs no new plumbing.
+- Noted `comment_id` isn't threaded through `parse-trigger.js`/`dispatcher.yml` today, so the GH-side reaction lands on the issue/PR as a whole rather than the exact triggering comment — called out as an acceptable v1 scope, fast-follow only if wanted later.
+- **Filed**: https://github.com/TheDeepestSpace/the-intern/issues/41 — proposes (1) new `scripts/react-telegram.js` mirroring `send-telegram.js`, calling Telegram's `setMessageReaction` Bot API, fail-soft (log + exit 0, doesn't crash the session if the react call fails e.g. on an old message); (2) `instructions/telegram.md` addition: react 👀 via that script as the very first action of a new message; (3) `instructions/shared-style.md` addition (loaded into both telegram + dispatcher prompts): react 👀 on the triggering issue/PR via `gh api ... reactions -f content=eyes` as the first action when triggered by a GH comment.
+- **Kicked off dispatcher**: https://github.com/TheDeepestSpace/the-intern/issues/41#issuecomment-5138007326
+- Not yet confirmed complete — check #41 for a PR on a future turn.
+
+
 ## svsch repo access
 - `svsch` (TheDeepestSpace/svsch) is a VS Code extension that renders visual block diagrams from SystemVerilog/Verilog. Not checked out under `/__w/the-intern/the-intern` — had to discover it via `GH_TOKEN`'s `/installation/repositories` (a GitHub App installation token scoped to 3 repos: the-intern, svsch, and one other). `gh` CLI is not installed in this environment; use `curl` + `$GH_TOKEN` against the GitHub REST API instead. Cloned to `/tmp/svsch` for research (ephemeral, not persisted).
 
