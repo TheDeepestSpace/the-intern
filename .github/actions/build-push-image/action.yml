@@ -1,0 +1,61 @@
+name: Build and push Docker image
+description: >
+  Builds a Docker image (optionally pulling its base from a separately
+  credentialed registry) and pushes it to GHCR under this repo's own
+  credentials.
+
+inputs:
+  dockerfile:
+    description: Path to the Dockerfile to build
+    required: true
+  image:
+    description: Full image ref (including tag) to build and push
+    required: true
+  build-args:
+    description: Newline-separated KEY=VALUE build args
+    required: false
+    default: ""
+  pull-username:
+    description: Username to authenticate with when pulling the build's base image
+    required: false
+    default: "x-access-token"
+  pull-password:
+    description: Password/token to authenticate with when pulling the build's base image
+    required: false
+    default: ""
+  push-password:
+    description: Password/token to authenticate with when pushing the built image
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Login to GHCR to pull base image
+      if: inputs.pull-password != ''
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ inputs.pull-username }}
+        password: ${{ inputs.pull-password }}
+
+    - name: Build image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ${{ inputs.dockerfile }}
+        build-args: ${{ inputs.build-args }}
+        push: false
+        load: true
+        tags: ${{ inputs.image }}
+        platforms: linux/amd64
+
+    - name: Login to GHCR to push image
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ inputs.push-password }}
+
+    - name: Push image
+      shell: bash
+      run: docker push "${{ inputs.image }}"

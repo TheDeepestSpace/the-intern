@@ -97,13 +97,124 @@ jobs:
             echo "image=$FALLBACK_IMAGE" >> "$GITHUB_OUTPUT"
           fi
 
-  handle:
+  ensure-agent-overlay:
     needs: detect-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+    steps:
+      - name: Checkout agent-infra
+        uses: actions/checkout@v4
+
+      - name: Check whether base image is our own fallback
+        id: fallback_check
+        run: |
+          REPO_LOWER=$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          if [ "${{ needs.detect-image.outputs.image }}" = "ghcr.io/${REPO_LOWER}-dev:latest" ]; then
+            echo "is_fallback=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_fallback=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint temporary token for base image access
+        id: temp_token
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        run: node scripts/mint-installation-token.js
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          INSTALLATION_ID: ${{ needs.detect-image.outputs.installation_id }}
+          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+
+      - name: Set up Docker Buildx
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR to pull base image
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: x-access-token
+          password: ${{ steps.temp_token.outputs.token }}
+
+      # The overlay tag is derived from the base image's digest (not its mutable
+      # "latest"/"dev-latest" tag), so a new dev-image build in the target repo
+      # naturally produces a new tag here and forces a rebuild on the next dispatch
+      # instead of reusing a stale overlay.
+      - name: Resolve base image digest and overlay tag
+        id: overlay_meta
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        env:
+          REPO_NAME: ${{ needs.detect-image.outputs.target_repo }}
+          BASE_IMAGE: ${{ needs.detect-image.outputs.image }}
+        run: |
+          REPO_SLUG="${REPO_NAME##*/}"
+          DIGEST=$(docker buildx imagetools inspect "$BASE_IMAGE" | awk '/^Digest:/ {print $2}')
+
+          if [ -z "$DIGEST" ]; then
+            echo "::error::Could not resolve a digest for base image $BASE_IMAGE"
+            exit 1
+          fi
+
+          DIGEST_SHORT=$(echo "$DIGEST" | sed 's/^sha256://' | cut -c1-12)
+          OVERLAY_TAG="${REPO_SLUG,,}-${DIGEST_SHORT}"
+          OVERLAY_IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/agent-overlay:${OVERLAY_TAG}"
+
+          echo "overlay_tag=$OVERLAY_TAG" >> "$GITHUB_OUTPUT"
+          echo "overlay_image=$OVERLAY_IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR to check overlay image
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for an existing overlay image
+        id: check_overlay
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        env:
+          OVERLAY_IMAGE: ${{ steps.overlay_meta.outputs.overlay_image }}
+        run: |
+          if docker buildx imagetools inspect "$OVERLAY_IMAGE" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push agent-overlay image
+        if: steps.fallback_check.outputs.is_fallback != 'true' && steps.check_overlay.outputs.exists != 'true'
+        uses: ./.github/actions/build-push-image
+        with:
+          dockerfile: docker/agent-overlay.Dockerfile
+          image: ${{ steps.overlay_meta.outputs.overlay_image }}
+          build-args: |
+            BASE_IMAGE=${{ needs.detect-image.outputs.image }}
+          pull-username: x-access-token
+          pull-password: ${{ steps.temp_token.outputs.token }}
+          push-password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve final image output
+        id: resolve
+        run: |
+          if [ "${{ steps.fallback_check.outputs.is_fallback }}" = "true" ]; then
+            echo "image=${{ needs.detect-image.outputs.image }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=${{ steps.overlay_meta.outputs.overlay_image }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  handle:
+    needs: [detect-image, ensure-agent-overlay]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     container:
-      image: ${{ needs.detect-image.outputs.image }}
+      image: ${{ needs.ensure-agent-overlay.outputs.image }}
       options: --user root
     steps:
       - name: Checkout agent-infra
@@ -265,8 +376,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   notify-failure:
-    needs: [detect-image, handle]
-    if: always() && (needs.detect-image.result == 'failure' || needs.handle.result == 'failure')
+    needs: [detect-image, ensure-agent-overlay, handle]
+    if: always() && (needs.detect-image.result == 'failure' || needs.ensure-agent-overlay.result == 'failure' || needs.handle.result == 'failure')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout agent-infra
@@ -283,4 +394,5 @@ jobs:
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
           FAILED_JOBS: >-
             ${{ needs.detect-image.result == 'failure' && 'detect-image' || '' }}
+            ${{ needs.ensure-agent-overlay.result == 'failure' && 'ensure-agent-overlay' || '' }}
             ${{ needs.handle.result == 'failure' && 'handle' || '' }}
