@@ -45,7 +45,8 @@ RUN cd /tmp && \
 RUN npm install -g @anthropic-ai/claude-code
 
 # Pre-install Codex CLI globally (alternative agent backend)
-RUN npm install -g @openai/codex
+ARG CODEX_VERSION=0.146.0
+RUN npm install -g @openai/codex@${CODEX_VERSION}
 
 # Prepare temp and workspace directories with wide permissions for GHA runner
 RUN mkdir -p /__w /github/workspace /tmp && \

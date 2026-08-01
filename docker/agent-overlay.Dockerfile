@@ -16,6 +16,8 @@ ARG GH_CLI_VERSION=2.63.2
 ARG GH_TARBALL_HASH_X64="912fdb1ca29cb005fb746fc5d2b787a289078923a29d0f9ec19a0b00272ded00  gh_${GH_CLI_VERSION}_linux_amd64.tar.gz"
 ARG GH_TARBALL_HASH_ARM64="0f31e2a8549c64b5c1679f0b99ce5e0dac7c91da9e86f6246adb8805b0f0b4bb  gh_${GH_CLI_VERSION}_linux_arm64.tar.gz"
 
+ARG CODEX_VERSION=0.146.0
+
 ARG JQ_VERSION=1.7.1
 ARG JQ_BINARY_HASH_X64="5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5  jq-linux-amd64"
 ARG JQ_BINARY_HASH_ARM64="4dd2d8a0661df0b22f1bb9a1f9830f06b6f3b8f7d91211a1ef5d7c4f06a8b4a5  jq-linux-arm64"
@@ -37,7 +39,7 @@ RUN if ! command -v node >/dev/null 2>&1; then \
 
 RUN command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code
 
-RUN command -v codex >/dev/null 2>&1 || npm install -g @openai/codex
+RUN command -v codex >/dev/null 2>&1 || npm install -g @openai/codex@${CODEX_VERSION}
 
 RUN if ! command -v gh >/dev/null 2>&1; then \
       ARCH="$(uname -m)"; \

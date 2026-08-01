@@ -48,6 +48,8 @@ commit any of these to a file that gets pushed.
 | `WEBHOOK_SECRET` | Worker only | Used to verify `X-Hub-Signature-256` |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Actions | From `claude setup-token` |
 | `CODEX_API_KEY` | Actions | OpenAI Platform API key, used by `codex exec` when a trigger comment specifies `backend=codex`. Metered API billing, not ChatGPT-plan usage — see the "Plan-limits vs API-billing auth" note on issue #3 for why |
+| `CODEX_AUTH_JSON` | Actions | Base64-encoded personal-account Codex login (`~/.codex/auth.json`), restored before each `backend=codex` run and persisted back after via `scripts/rotate-codex-auth.js` so a token refresh survives the ephemeral runner |
+| `REPO_ADMIN_TOKEN` | Actions | Fine-grained PAT with repository-secret write permission, used by `scripts/rotate-codex-auth.js` to write a refreshed `CODEX_AUTH_JSON` back after a Codex run |
 | `BOT_LOGIN` | Worker | e.g. `the-intern-bot[bot]` — used to drop self-triggered events |
 | `ALLOWED_USERS` | Worker only | Comma-separated GitHub usernames permitted to trigger the bot — set to just your own login |
 | `CLOUDFLARE_API_TOKEN` | agent's shell / CI deploying the Worker | Not used at runtime by the Worker itself |
