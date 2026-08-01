@@ -121,7 +121,7 @@ async function handleTelegram(request, env) {
 
   const update = await request.json();
   const message = update.message;
-  if (!message || (!message.text && !message.photo)) {
+  if (!message || (!message.text && !message.photo?.length)) {
     return new Response('ok', { status: 200 });
   }
 
