@@ -360,11 +360,13 @@ jobs:
             echo "Claude session completed."
           else
             echo "::warning::Claude produced no usable output or reported an error"
+            CONTEXT="$TARGET_REPO"
             if [ -n "$ISSUE_NUMBER" ]; then
-              FAILURE_TEXT="⚠️ the-intern-bot ran into an error and could not complete a request on ${TARGET_REPO}#${ISSUE_NUMBER}. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-              CHAT_ID="$TG_ADMIN_CHAT_ID" MESSAGE_TEXT="$FAILURE_TEXT" node "$GITHUB_WORKSPACE/scripts/send-telegram.js" \
-                || echo "::error::failed to send Telegram failure notification for $TARGET_REPO#$ISSUE_NUMBER"
+              CONTEXT="${TARGET_REPO}#${ISSUE_NUMBER}"
             fi
+            FAILURE_TEXT="⚠️ the-intern-bot ran into an error and could not complete a request on ${CONTEXT}. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            CHAT_ID="$TG_ADMIN_CHAT_ID" MESSAGE_TEXT="$FAILURE_TEXT" node "$GITHUB_WORKSPACE/scripts/send-telegram.js" \
+              || echo "::error::failed to send Telegram failure notification for $CONTEXT"
           fi
 
       - name: Commit session summary
