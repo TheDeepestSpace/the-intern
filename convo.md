@@ -1,5 +1,11 @@
 # Conversation Summary
 
+## 2026-08-01: Reply-to-message gap — issue #56 filed and dispatched
+User confirmed they want the reply_to_message gap (found earlier this session, see entry directly below) fixed. Filed and kicked off immediately, no further discussion needed.
+- **Filed**: https://github.com/TheDeepestSpace/the-intern/issues/56 — same root cause as the entry below (`worker/src/index.js`'s `handleTelegram` never reads `message.reply_to_message`); fix scope: worker forwards `reply_to_message_id`/`reply_to_text` in client_payload when present, `telegram-session.yml` passes through as env, prompt/instructions surface it as context. Fallback to "[a photo]" placeholder if the replied-to message has neither text nor caption.
+- **Kicked off dispatcher**: https://github.com/TheDeepestSpace/the-intern/issues/56#issuecomment-5152250318
+- Not yet confirmed complete — check #56 for a PR on a future turn.
+
 ## 2026-08-01: Reply-to-message content not visible — worker gap found, not yet filed
 User sent a message that was a Telegram reply to an earlier message, asked whether I could see what it was replying to.
 - Checked `GITHUB_EVENT_PATH`'s `client_payload` directly: only `{chat_id, message_id, sender_id, text}` — no `reply_to_message` data. Confirmed in `worker/src/index.js`'s `handleTelegram` (~line 160-170): `clientPayload` is built from `message.text`/`caption`/`chat_id`/`sender_id`/`message_id`/`photo_file_id` only — `message.reply_to_message` (Telegram's own field carrying the replied-to message's id/text) is never read or forwarded.
