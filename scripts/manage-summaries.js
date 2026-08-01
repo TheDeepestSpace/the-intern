@@ -1,4 +1,5 @@
 const fs = require('fs');
+const crypto = require('crypto');
 const { execSync } = require('child_process');
 const path = require('path');
 
@@ -89,9 +90,9 @@ function saveSummary(targetRepo, issueNumber, promptText, resultText) {
       if (attempt > 1) {
         // Detach so the branch ref is free, drop our stale local copy, and
         // re-fetch the branch's current tip before rebuilding our commit on it.
-        runGit('checkout --detach', { allowFailure: true });
-        runGit(`branch -D ${branchName}`, { allowFailure: true });
-        runGit(`fetch origin ${branchName}:${branchName}`, { allowFailure: true });
+        runGit('checkout --detach');
+        runGit(`branch -D ${branchName}`);
+        runGit(`fetch origin ${branchName}:${branchName}`);
       }
 
       // Create the orphan branch, or switch to it if a prior run already created it
@@ -121,7 +122,7 @@ ${resultText || 'N/A'}
 `;
 
       fs.mkdirSync(dirPath, { recursive: true });
-      const filename = path.join(dirPath, `${Date.now()}.md`);
+      const filename = path.join(dirPath, `${Date.now()}-${crypto.randomUUID()}.md`);
       fs.writeFileSync(filename, summaryContent, 'utf8');
 
       runGit(`add ${filename}`);
@@ -137,7 +138,7 @@ ${resultText || 'N/A'}
         console.log(`Pushed summary to branch ${branchName}`);
         return;
       } catch (err) {
-        const isRejected = /rejected|non-fast-forward|fetch first/i.test(err.message);
+        const isRejected = /non-fast-forward|fetch first/i.test(err.message);
         if (isRejected && attempt < maxAttempts) {
           console.warn(`Push to ${branchName} was rejected (attempt ${attempt}/${maxAttempts}), retrying: ${err.message}`);
           continue;
