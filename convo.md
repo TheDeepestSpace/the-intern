@@ -399,3 +399,9 @@ User tried sending an image with caption text; no dispatcher run fired. Investig
 - **Filed**: https://github.com/TheDeepestSpace/the-intern/issues/52 — fix scope: (1) worker accepts `message.photo` (using `caption || ''` as text, passing largest photo's file_id in client_payload); (2) `telegram-session.yml` downloads the photo via Telegram's `getFile`/file API using `TG_BOT_TOKEN` before invoking Claude; (3) prompt mentions the local file path so Claude can `Read` it directly (no special image-attachment plumbing needed).
 - **Kicked off dispatcher**: https://github.com/TheDeepestSpace/the-intern/issues/52#issuecomment-5150042813
 - Not yet confirmed complete — check #52 for a PR on a future turn.
+
+## 2026-08-01: Answered — current summaries setup (had been missed as a reply earlier)
+User asked (as a reply to an earlier unanswered message) whether each issue/PR gets its own branch with context. Verified against the live repo (`/tmp/the-intern-check`) rather than answering from memory, since this predates [[the-intern#60]]'s private-repo proposal.
+- **Dispatcher sessions**: yes — `scripts/manage-summaries.js` uses one orphan branch per issue/PR, `summaries/<repo-slug>/<issue-number>`, on the-intern itself. Fetches the latest `.md` before a session, appends a new timestamped `.md` (prompt+result) after.
+- **This Telegram flow**: different mechanism entirely — one shared `telegram` branch, single `convo.md` file, read+overwritten by every session (no per-topic branching).
+- Answered directly via Telegram, nothing filed (purely explaining current state).
