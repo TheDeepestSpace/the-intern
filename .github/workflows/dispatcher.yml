@@ -214,6 +214,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    concurrency:
+      group: dispatch-${{ needs.detect-image.outputs.target_repo }}-${{ needs.detect-image.outputs.issue_number }}
+      cancel-in-progress: false
+      queue: max
     container:
       image: ${{ needs.ensure-agent-overlay.outputs.image }}
       options: --user root
@@ -292,6 +296,8 @@ jobs:
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
           CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
           SUMMARY_CONTEXT: ${{ steps.summary_context.outputs.summary }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
         run: |
           export COMMENT_BODY="$CLEAN_PROMPT"
           export PRIOR_CONTEXT=$(cat ../prior_summary.txt 2>/dev/null || echo "$SUMMARY_CONTEXT")
@@ -332,7 +338,7 @@ jobs:
               "} catch (e) {",
               "  output = fs.readFileSync(\"result.json\", \"utf8\").toString();",
               "}",
-              "fs.writeFileSync(\"../session_result.txt\", output);",
+              "fs.writeFileSync(\"session_result.txt\", output);",
             ];
             fs.writeFileSync("/tmp/extract-result.js", lines.join("\n"));
           '
@@ -359,7 +365,7 @@ jobs:
           # Ensure dev user exists and owns the workspace so it has write access
           id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
 
-          if ! chown -R dev:dev "$TARGET_DIR" "$GITHUB_WORKSPACE" /tmp /home/dev; then
+          if ! chown -R dev:dev "$TARGET_DIR" /tmp /home/dev; then
             echo "::error::chown failed to grant the dev user write access to workspace directories"
             exit 1
           fi
@@ -409,11 +415,11 @@ jobs:
           '
           chown dev:dev /tmp/run_as_dev.sh /tmp/extract-result.js /tmp/normalize-codex-result.js
 
-          su dev -c /tmp/run_as_dev.sh
+          env -u TG_BOT_TOKEN -u TG_ADMIN_CHAT_ID su dev -c /tmp/run_as_dev.sh
 
           # the agent's own gh calls are how it normally reports back; if the session
           # crashed or produced nothing usable, that never happens, so detect that
-          # here and post a failure comment instead of leaving the issue/PR silent.
+          # here and notify the admin over Telegram instead of leaving the issue/PR silent.
           if node -e '
             const fs = require("fs");
             const raw = fs.existsSync("result.json") ? fs.readFileSync("result.json", "utf8") : "";
@@ -428,11 +434,13 @@ jobs:
             echo "Agent session completed."
           else
             echo "::warning::Agent produced no usable output or reported an error"
+            CONTEXT="$TARGET_REPO"
             if [ -n "$ISSUE_NUMBER" ]; then
-              FAILURE_BODY="@the-intern-bot ran into an error and could not complete this request. See the [workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) for details."
-              gh issue comment "$ISSUE_NUMBER" --repo "$TARGET_REPO" --body "$FAILURE_BODY" \
-                || echo "::error::failed to post failure comment on $TARGET_REPO#$ISSUE_NUMBER"
+              CONTEXT="${TARGET_REPO}#${ISSUE_NUMBER}"
             fi
+            FAILURE_TEXT="⚠️ the-intern-bot ran into an error and could not complete a request on ${CONTEXT}. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            CHAT_ID="$TG_ADMIN_CHAT_ID" MESSAGE_TEXT="$FAILURE_TEXT" node "$GITHUB_WORKSPACE/scripts/send-telegram.js" \
+              || echo "::error::failed to send Telegram failure notification for $CONTEXT"
           fi
 
       # Runs even if the step above failed: OpenAI's CI/CD guidance for this flow is
@@ -458,7 +466,7 @@ jobs:
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
           CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
-          RESULT_FILE: session_result.txt
+          RESULT_FILE: target/session_result.txt
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   notify-failure:
@@ -469,10 +477,11 @@ jobs:
       - name: Checkout agent-infra
         uses: actions/checkout@v4
 
-      - name: Email maintainer via GitHub issue mention
+      - name: Notify maintainer via Telegram
         run: node scripts/notify-failure.js
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
           REPO: ${{ github.repository }}
           WORKFLOW_NAME: dispatcher
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

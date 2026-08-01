@@ -121,7 +121,9 @@ async function handleTelegram(request, env) {
 
   const update = await request.json();
   const message = update.message;
-  if (!message || !message.text) return new Response('ok', { status: 200 });
+  if (!message || (!message.text && !message.photo?.length)) {
+    return new Response('ok', { status: 200 });
+  }
 
   // Gate on numeric Telegram user ID check if configured
   if (env.ALLOWED_TG_USER_ID && String(message.from?.id) !== String(env.ALLOWED_TG_USER_ID)) {
@@ -157,6 +159,26 @@ async function handleTelegram(request, env) {
 
     const token = await getInstallationToken(env, installationId);
 
+    const clientPayload = {
+      text: message.text || message.caption || '',
+      chat_id: message.chat.id,
+      sender_id: message.from.id,
+      message_id: message.message_id,
+    };
+    if (message.photo && message.photo.length > 0) {
+      // PhotoSize array is ordered smallest to largest.
+      clientPayload.photo_file_id = message.photo[message.photo.length - 1].file_id;
+    }
+    if (message.reply_to_message) {
+      const replyTo = message.reply_to_message;
+      clientPayload.reply_to_message_id = replyTo.message_id;
+      clientPayload.reply_to_text = replyTo.text || replyTo.caption || '';
+      if (replyTo.photo && replyTo.photo.length > 0) {
+        // PhotoSize array is ordered smallest to largest.
+        clientPayload.reply_to_photo_file_id = replyTo.photo[replyTo.photo.length - 1].file_id;
+      }
+    }
+
     const dispatchRes = await fetch(
       `https://api.github.com/repos/${owner}/${repo}/dispatches`,
       {
@@ -169,12 +191,7 @@ async function handleTelegram(request, env) {
         },
         body: JSON.stringify({
           event_type: 'telegram_message',
-          client_payload: {
-            text: message.text,
-            chat_id: message.chat.id,
-            sender_id: message.from.id,
-            message_id: message.message_id,
-          },
+          client_payload: clientPayload,
         }),
       }
     );
