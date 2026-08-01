@@ -1,5 +1,13 @@
 # Conversation Summary
 
+## 2026-08-01: Net-cut-end label false-highlight on marquee select — svsch#89, dispatched
+User noticed: drag-selecting (marquee) a block that has cut nets also visually highlights the net-cut-end labels attached to it, even though they aren't really selected (dragging afterward doesn't move them). Wanted the highlight to only apply when the label itself is actually covered by the selection rectangle.
+- Delegated root-cause investigation to an Explore agent against a fresh clone (`/tmp/svsch-investigate`) rather than guessing. Confirmed: React Flow auto-marks every edge touching a selected node as `edge.selected = true`; `src/webview/nodes/NetLabelNode.tsx:71-88`'s `isHighlighted` treats that propagated `isStubEdgeSelected` as highlight-worthy on its own, even when the net-label node's own `selected` prop is false. The real `hdl-net-label-selected` class (line 99) already correctly gates on own-`selected` — bug is isolated to `isHighlighted`.
+- **Important constraint identified**: `main.tsx:1004-1022`'s "Auto Layout carries cut net ends along" relayout feature deliberately relies on the *same* React-Flow edge-propagation mechanism (see `test/features/diagram_interaction.feature:512-550`) — fix must not touch edge-selection propagation itself, only `NetLabelNode`'s `isHighlighted` computation.
+- **Filed**: https://github.com/TheDeepestSpace/svsch/issues/89 — full root cause, the don't-break-relayout constraint, and BDD test-coverage plan (new scenario near `diagram_interaction.feature:434`, reusing existing "cut net label attached to X" step helpers).
+- **Kicked off dispatcher**: https://github.com/TheDeepestSpace/svsch/issues/89#issuecomment-5152203600 — explicitly restated the one-shot/no-backgrounding rule in the prompt too (belt-and-suspenders, per the #54/#88 saga below).
+- Not yet confirmed complete — check #89 for a PR on a future turn.
+
 ## 2026-08-01: Issue #54 merged, svsch#88 re-dispatched
 User confirmed they merged the-intern#54's fix (one-shot-session rule in shared-style.md). Re-triggered svsch#88 (the "Cut out" button feature, previously wasted a run doing nothing per the entry below).
 - Verified #54 is closed via API before retrying, then posted a fresh trigger comment: https://github.com/TheDeepestSpace/svsch/issues/88#issuecomment-5152163107 — explicitly restated the no-backgrounding rule in the prompt itself, on top of the shared-style.md fix, as a belt-and-suspenders measure.
