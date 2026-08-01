@@ -58,6 +58,20 @@ async function handleGitHub(request, env) {
     return new Response('ignored: event type', { status: 200 });
   }
 
+  // pull_request_review and pull_request_review_comment can both fire for a
+  // single human review submission — stateless partial dedupe (see #58/#59):
+  // skip pull_request_review when it's an inline-only review (empty body),
+  // since the inline comments will each fire their own
+  // pull_request_review_comment delivery anyway. This doesn't catch a review
+  // that has both a mentioning body and a mentioning inline comment — that
+  // still double-fires — but avoids adding a KV dependency for the common case.
+  if (eventType === 'pull_request_review' && !payload.review?.body) {
+    return new Response('ignored: review has no top-level body (inline-only review)', { status: 200 });
+  }
+  if (eventType === 'pull_request_review_comment' && !payload.comment?.pull_request_review_id) {
+    return new Response('ignored: comment not tied to a review', { status: 200 });
+  }
+
   // Guard: only trigger if @the-intern-bot is mentioned, OR the comment is on a
   // thread (issue/PR) authored by the bot itself — but never for comments the
   // bot itself posts, or every status update would re-trigger a dispatch.
@@ -77,25 +91,6 @@ async function handleGitHub(request, env) {
   const installationId = payload.installation?.id;
   if (!installationId) {
     return new Response('missing installation id', { status: 400 });
-  }
-
-  // pull_request_review and pull_request_review_comment can both fire for a
-  // single human review submission (comment.pull_request_review_id ==
-  // review.id) — dedupe on that shared id so only one dispatch fires.
-  if (eventType === 'pull_request_review' || eventType === 'pull_request_review_comment') {
-    const reviewId =
-      eventType === 'pull_request_review'
-        ? payload.review?.id
-        : payload.comment?.pull_request_review_id;
-
-    if (reviewId && env.DISPATCH_DEDUPE) {
-      const dedupeKey = `review:${reviewId}`;
-      const existing = await env.DISPATCH_DEDUPE.get(dedupeKey);
-      if (existing) {
-        return new Response('ignored: duplicate review dispatch', { status: 200 });
-      }
-      await env.DISPATCH_DEDUPE.put(dedupeKey, '1', { expirationTtl: 60 });
-    }
   }
 
   try {
