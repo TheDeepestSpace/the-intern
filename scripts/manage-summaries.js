@@ -65,6 +65,11 @@ function fetchSummary(targetRepo, issueNumber) {
 
 function saveSummary(targetRepo, issueNumber, promptText, resultText) {
   if (!targetRepo || !issueNumber) return;
+  if (!/^[1-9]\d*$/.test(String(issueNumber))) {
+    console.error(`Refusing to save summary: invalid issue number "${issueNumber}"`);
+    process.exitCode = 1;
+    return;
+  }
   ensureSafeDirectory();
   const branchName = getBranchName(targetRepo, issueNumber);
   const repoSlug = sanitizeSlug(targetRepo);
@@ -91,12 +96,15 @@ function saveSummary(targetRepo, issueNumber, promptText, resultText) {
 
       // Create the orphan branch, or switch to it if a prior run already created it
       // (e.g. fetched by `fetchSummary` earlier in the same job, or re-fetched above).
+      // Only clear the working tree on the orphan path: the fallback checkout of an
+      // existing branch may carry another run's already-pushed summary, which must
+      // stay in place (and in the tree) rather than being wiped by this attempt.
       try {
         runGit(`checkout --orphan ${branchName}`);
+        runGit('rm -rf .');
       } catch (err) {
         runGit(`checkout ${branchName}`);
       }
-      runGit('rm -rf .');
 
       const timestamp = new Date().toISOString();
       const summaryContent = `# Session Summary
