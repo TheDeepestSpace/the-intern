@@ -213,6 +213,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    concurrency:
+      group: dispatch-${{ needs.detect-image.outputs.target_repo }}-${{ needs.detect-image.outputs.issue_number }}
+      cancel-in-progress: false
+      queue: max
     container:
       image: ${{ needs.ensure-agent-overlay.outputs.image }}
       options: --user root
