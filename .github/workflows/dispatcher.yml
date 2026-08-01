@@ -341,7 +341,7 @@ jobs:
           '
           chown dev:dev /tmp/run_as_dev.sh /tmp/extract-result.js
 
-          su dev -c /tmp/run_as_dev.sh
+          env -u TG_BOT_TOKEN -u TG_ADMIN_CHAT_ID su dev -c /tmp/run_as_dev.sh
 
           # claude's own gh calls are how it normally reports back; if the session
           # crashed or produced nothing usable, that never happens, so detect that
