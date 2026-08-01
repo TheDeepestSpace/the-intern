@@ -301,7 +301,7 @@ jobs:
               "} catch (e) {",
               "  output = fs.readFileSync(\"result.json\", \"utf8\").toString();",
               "}",
-              "fs.writeFileSync(\"../session_result.txt\", output);",
+              "fs.writeFileSync(\"session_result.txt\", output);",
             ];
             fs.writeFileSync("/tmp/extract-result.js", lines.join("\n"));
           '
@@ -376,7 +376,7 @@ jobs:
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
           CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
-          RESULT_FILE: session_result.txt
+          RESULT_FILE: target/session_result.txt
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   notify-failure:
