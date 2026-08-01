@@ -146,10 +146,11 @@ jobs:
       - name: Checkout agent-infra
         uses: actions/checkout@v4
 
-      - name: Email maintainer via GitHub issue mention
+      - name: Notify maintainer via Telegram
         run: node scripts/notify-failure.js
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
           REPO: ${{ github.repository }}
           WORKFLOW_NAME: telegram session
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
