@@ -74,6 +74,7 @@ jobs:
           export PHOTO_FILE_ID="$(jq -r '.client_payload.photo_file_id // empty' "$GITHUB_EVENT_PATH")"
           export REPLY_CONTEXT_MESSAGE_ID="$(jq -r '.client_payload.reply_to_message_id // empty' "$GITHUB_EVENT_PATH")"
           export REPLY_CONTEXT_TEXT="$(jq -r '.client_payload.reply_to_text // empty' "$GITHUB_EVENT_PATH")"
+          export REPLY_PHOTO_FILE_ID="$(jq -r '.client_payload.reply_to_photo_file_id // empty' "$GITHUB_EVENT_PATH")"
 
           PHOTO_PATH=""
           if [ -n "$PHOTO_FILE_ID" ]; then
@@ -81,6 +82,13 @@ jobs:
             node ../scripts/download-telegram-photo.js "$PHOTO_PATH"
           fi
           export PHOTO_PATH
+
+          REPLY_PHOTO_PATH=""
+          if [ -n "$REPLY_PHOTO_FILE_ID" ]; then
+            REPLY_PHOTO_PATH="telegram_reply_photo.jpg"
+            PHOTO_FILE_ID="$REPLY_PHOTO_FILE_ID" node ../scripts/download-telegram-photo.js "$REPLY_PHOTO_PATH"
+          fi
+          export REPLY_PHOTO_PATH
 
           node -e '
             const fs = require("fs");
@@ -90,8 +98,15 @@ jobs:
             const msg = process.env.MESSAGE || "";
             const photoPath = process.env.PHOTO_PATH || "";
             const photoNote = photoPath ? `\n\nAn image was attached: ${photoPath}` : "";
+            const replyToMessageId = process.env.REPLY_CONTEXT_MESSAGE_ID || "";
             const replyToText = process.env.REPLY_CONTEXT_TEXT || "";
-            const replyNote = replyToText ? `\n\nThis message is a reply to: "${replyToText}"` : "";
+            const replyPhotoPath = process.env.REPLY_PHOTO_PATH || "";
+            let replyNote = "";
+            if (replyToMessageId) {
+              const textPart = replyToText ? `: "${replyToText}"` : "";
+              const photoPart = replyPhotoPath ? ` (photo attached: ${replyPhotoPath})` : "";
+              replyNote = `\n\nThis message is a reply to Telegram message ${replyToMessageId}${textPart}${photoPart}`;
+            }
             const prompt = `${instructions}\n\n${style}\n\nPrior Conversation Summary (from convo.md):\n${convo}\n\nNew Telegram Message:\n${msg}${replyNote}${photoNote}`;
             fs.writeFileSync("/tmp/prompt.txt", prompt);
           '
