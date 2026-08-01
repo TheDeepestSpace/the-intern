@@ -72,6 +72,8 @@ jobs:
           export CHAT_ID="$(jq -r '.client_payload.chat_id // empty' "$GITHUB_EVENT_PATH")"
           export REPLY_TO_MESSAGE_ID="$(jq -r '.client_payload.message_id // empty' "$GITHUB_EVENT_PATH")"
           export PHOTO_FILE_ID="$(jq -r '.client_payload.photo_file_id // empty' "$GITHUB_EVENT_PATH")"
+          export REPLY_CONTEXT_MESSAGE_ID="$(jq -r '.client_payload.reply_to_message_id // empty' "$GITHUB_EVENT_PATH")"
+          export REPLY_CONTEXT_TEXT="$(jq -r '.client_payload.reply_to_text // empty' "$GITHUB_EVENT_PATH")"
 
           PHOTO_PATH=""
           if [ -n "$PHOTO_FILE_ID" ]; then
@@ -88,7 +90,9 @@ jobs:
             const msg = process.env.MESSAGE || "";
             const photoPath = process.env.PHOTO_PATH || "";
             const photoNote = photoPath ? `\n\nAn image was attached: ${photoPath}` : "";
-            const prompt = `${instructions}\n\n${style}\n\nPrior Conversation Summary (from convo.md):\n${convo}\n\nNew Telegram Message:\n${msg}${photoNote}`;
+            const replyToText = process.env.REPLY_CONTEXT_TEXT || "";
+            const replyNote = replyToText ? `\n\nThis message is a reply to: "${replyToText}"` : "";
+            const prompt = `${instructions}\n\n${style}\n\nPrior Conversation Summary (from convo.md):\n${convo}\n\nNew Telegram Message:\n${msg}${replyNote}${photoNote}`;
             fs.writeFileSync("/tmp/prompt.txt", prompt);
           '
 

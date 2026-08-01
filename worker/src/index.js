@@ -169,6 +169,12 @@ async function handleTelegram(request, env) {
       // PhotoSize array is ordered smallest to largest.
       clientPayload.photo_file_id = message.photo[message.photo.length - 1].file_id;
     }
+    if (message.reply_to_message) {
+      const replyTo = message.reply_to_message;
+      clientPayload.reply_to_message_id = replyTo.message_id;
+      clientPayload.reply_to_text =
+        replyTo.text || replyTo.caption || (replyTo.photo?.length ? '[a photo]' : '');
+    }
 
     const dispatchRes = await fetch(
       `https://api.github.com/repos/${owner}/${repo}/dispatches`,
