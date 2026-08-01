@@ -1,5 +1,11 @@
 # Conversation Summary
 
+## 2026-08-01: Reply-to-message content not visible — worker gap found, not yet filed
+User sent a message that was a Telegram reply to an earlier message, asked whether I could see what it was replying to.
+- Checked `GITHUB_EVENT_PATH`'s `client_payload` directly: only `{chat_id, message_id, sender_id, text}` — no `reply_to_message` data. Confirmed in `worker/src/index.js`'s `handleTelegram` (~line 160-170): `clientPayload` is built from `message.text`/`caption`/`chat_id`/`sender_id`/`message_id`/`photo_file_id` only — `message.reply_to_message` (Telegram's own field carrying the replied-to message's id/text) is never read or forwarded.
+- Told user directly: no, I can't see it — this is a real gap, not user error. Offered to file an issue threading `reply_to_message` through worker → client_payload → session env, same pattern as the photo-caption fix (svsch... no, **the-intern#52**). Awaiting user go-ahead before filing.
+- Also noted incidentally: this session's env dump includes `TG_BOT_TOKEN` in plaintext (visible via `env` in the Telegram session container) — expected/by-design (the token has to be readable to call the Telegram API), not a new leak, just don't echo it into any user-facing message or file.
+
 ## 2026-08-01: User sent a photo, asked what's in it — answered directly
 User attached `telegram_photo.jpg` (a screenshot, likely from svsch given the visual style) and asked what it shows.
 - Read the image directly (no dispatcher/issue needed — pure Q&A). It's an svsch-rendered diagram: a ternary mux (`true`/`false` inputs, `s` select, `out`) feeding a `RFMem[Addr3]` register block, plus a separate `RFMem[i]` register below; `clk`/`reset` inputs wired to both registers' clock/reset pins. A red dashed vertical segment sits between the clk/reset nets right where they meet `RFMem[i]` — visually resembles a cut/highlighted net indicator (possibly related to the net-cut-label work in svsch#89 below, but not confirmed — user didn't ask for further investigation).
