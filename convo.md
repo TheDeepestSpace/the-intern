@@ -329,3 +329,10 @@ User reported a failed run (https://github.com/TheDeepestSpace/svsch/actions/run
 - Net effect: 0.2.1 live on npm only, not on VS Code Marketplace or Open VSX, no `.vsix` on the GitHub Release.
 - **Filed**: https://github.com/TheDeepestSpace/svsch/issues/85 — root cause (missing `VSCE_PAT`/`OVSX_PAT` secrets, same class as the earlier missing `NPM_TOKEN` issue #73/#81 — needs a repo admin to create/rotate marketplace PATs, not fixable by a coding agent), plus a suggested code robustness improvement (make vsce/ovsx publish independent so one missing PAT doesn't block the other), plus the retry path (`workflow_dispatch` on `release.yml` with tag `v0.2.1` once secrets are added).
 - Not dispatched (nothing for a coding agent to fix by itself — needs the secrets added first). Reported directly to user via Telegram. Next step: user adds `VSCE_PAT`/`OVSX_PAT` secrets, then re-run the workflow manually for tag v0.2.1.
+
+## 2026-08-01: Telegram photo+caption messages silently dropped — issue #52, dispatched
+User tried sending an image with caption text; no dispatcher run fired. Investigated `worker/src/index.js`'s `handleTelegram` directly (cloned to /tmp/the-intern-img).
+- Root cause: `if (!message || !message.text) return new Response('ok', ...)` — Telegram puts a photo's caption in `message.caption` and the image in `message.photo`, not `message.text`. A photo+caption update has no `message.text`, so the worker silently 200s and never dispatches. Same for any other non-text message type.
+- **Filed**: https://github.com/TheDeepestSpace/the-intern/issues/52 — fix scope: (1) worker accepts `message.photo` (using `caption || ''` as text, passing largest photo's file_id in client_payload); (2) `telegram-session.yml` downloads the photo via Telegram's `getFile`/file API using `TG_BOT_TOKEN` before invoking Claude; (3) prompt mentions the local file path so Claude can `Read` it directly (no special image-attachment plumbing needed).
+- **Kicked off dispatcher**: https://github.com/TheDeepestSpace/the-intern/issues/52#issuecomment-5150042813
+- Not yet confirmed complete — check #52 for a PR on a future turn.
