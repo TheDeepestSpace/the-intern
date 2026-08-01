@@ -79,6 +79,25 @@ async function handleGitHub(request, env) {
     return new Response('missing installation id', { status: 400 });
   }
 
+  // pull_request_review and pull_request_review_comment can both fire for a
+  // single human review submission (comment.pull_request_review_id ==
+  // review.id) — dedupe on that shared id so only one dispatch fires.
+  if (eventType === 'pull_request_review' || eventType === 'pull_request_review_comment') {
+    const reviewId =
+      eventType === 'pull_request_review'
+        ? payload.review?.id
+        : payload.comment?.pull_request_review_id;
+
+    if (reviewId && env.DISPATCH_DEDUPE) {
+      const dedupeKey = `review:${reviewId}`;
+      const existing = await env.DISPATCH_DEDUPE.get(dedupeKey);
+      if (existing) {
+        return new Response('ignored: duplicate review dispatch', { status: 200 });
+      }
+      await env.DISPATCH_DEDUPE.put(dedupeKey, '1', { expirationTtl: 60 });
+    }
+  }
+
   try {
     const token = await getInstallationToken(env, installationId);
 

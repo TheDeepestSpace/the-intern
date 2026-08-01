@@ -8,3 +8,11 @@ AGENT_INFRA_OWNER = "TheDeepestSpace"
 AGENT_INFRA_REPO = "the-intern"
 
 # no-op change to trigger deploy-worker.yml after Node 22 fix (#27)
+
+# Dedupe key store for pull_request_review / pull_request_review_comment
+# webhook pairs that correlate on the same review id (#58). A human must
+# create this namespace in Cloudflare and fill in `id` below, or deploys
+# will fail with "Couldn't find KV namespace".
+[[kv_namespaces]]
+binding = "DISPATCH_DEDUPE"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
