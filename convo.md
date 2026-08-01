@@ -1,5 +1,10 @@
 # Conversation Summary
 
+## 2026-08-01: User sent a photo, asked what's in it — answered directly
+User attached `telegram_photo.jpg` (a screenshot, likely from svsch given the visual style) and asked what it shows.
+- Read the image directly (no dispatcher/issue needed — pure Q&A). It's an svsch-rendered diagram: a ternary mux (`true`/`false` inputs, `s` select, `out`) feeding a `RFMem[Addr3]` register block, plus a separate `RFMem[i]` register below; `clk`/`reset` inputs wired to both registers' clock/reset pins. A red dashed vertical segment sits between the clk/reset nets right where they meet `RFMem[i]` — visually resembles a cut/highlighted net indicator (possibly related to the net-cut-label work in svsch#89 below, but not confirmed — user didn't ask for further investigation).
+- Answered via Telegram, nothing filed. Note: this confirms svsch#52 (photo+caption messages being silently dropped) is now fixed/working — the photo successfully triggered this session.
+
 ## 2026-08-01: Net-cut-end label false-highlight on marquee select — svsch#89, dispatched
 User noticed: drag-selecting (marquee) a block that has cut nets also visually highlights the net-cut-end labels attached to it, even though they aren't really selected (dragging afterward doesn't move them). Wanted the highlight to only apply when the label itself is actually covered by the selection rectangle.
 - Delegated root-cause investigation to an Explore agent against a fresh clone (`/tmp/svsch-investigate`) rather than guessing. Confirmed: React Flow auto-marks every edge touching a selected node as `edge.selected = true`; `src/webview/nodes/NetLabelNode.tsx:71-88`'s `isHighlighted` treats that propagated `isStubEdgeSelected` as highlight-worthy on its own, even when the net-label node's own `selected` prop is false. The real `hdl-net-label-selected` class (line 99) already correctly gates on own-`selected` — bug is isolated to `isHighlighted`.
