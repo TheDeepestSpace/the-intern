@@ -1,5 +1,10 @@
 # Conversation Summary
 
+## 2026-08-01: Issue #54 merged, svsch#88 re-dispatched
+User confirmed they merged the-intern#54's fix (one-shot-session rule in shared-style.md). Re-triggered svsch#88 (the "Cut out" button feature, previously wasted a run doing nothing per the entry below).
+- Verified #54 is closed via API before retrying, then posted a fresh trigger comment: https://github.com/TheDeepestSpace/svsch/issues/88#issuecomment-5152163107 — explicitly restated the no-backgrounding rule in the prompt itself, on top of the shared-style.md fix, as a belt-and-suspenders measure.
+- Not yet confirmed complete — check svsch#88 for a PR on a future turn.
+
 ## 2026-08-01: svsch#88 dispatch wasted 10min/$5.10 doing nothing — root cause found, issue #54 filed+dispatched on the-intern
 User flagged https://github.com/TheDeepestSpace/the-intern/actions/runs/30704221032/job/91380469027 (the svsch#88 "Cut out" button dispatch from earlier this session) as failed. It wasn't a workflow-level failure (job shows green, all steps `success`) — investigated via job log + result.json embedded in the log.
 - **Root cause**: Claude's `result.json` showed `"stop_reason":"end_turn"`, `"result":"Waiting on the full-feature-file regression run (\`bc7un0em2\`) before proceeding."` — it kicked off a long BDD/regression suite as a background task and ended its turn intending to check back later. But `dispatcher.yml`'s `claude -p ...` is a **single-shot, non-interactive session** — there is no later turn; the container tears down the moment the process exits, orphaning the background job. Session reports success (`is_error:false`) since it ended cleanly, so the existing failure-comment logic (only checks `is_error`) never catches this class of no-op.
