@@ -1,5 +1,13 @@
 # Conversation Summary
 
+## 2026-08-01: svsch "Cut out" button feature — issue #88, dispatched
+User asked for a new "Cut out" button on a selected block (like the existing wire "Cut" control), which cuts all wires on that block; multi-select mechanics should mirror the existing multi-wire cut (clicking "Cut out" on one selected block cuts wires on all selected blocks). Also asked for BDD tests in Diagram Interaction.
+- Cloned svsch to `/tmp/svsch` and grounded the plan in actual code before filing: `src/webview/orthogonal/OrthogonalEdge.tsx`'s `showCutButton`/`selectedCuttableEdges` (~line 227-440) is the existing single/multi wire-cut pattern (posts `cutNet`/`cutNets` to the extension host); `src/diagramPanel.ts`'s `saveNetCut`/`saveNetCuts` (~line 698-722) already handle batched cuts via `mergeNetCut`/`mergeNetCuts` — no merge-layout changes needed, just assemble the right edge list from selected block(s) instead of from wire selection. `src/webview/main.tsx`'s `NodeSelectionToolbar` (~line 977) is the existing floating toolbar for selected blocks (currently only "Auto Layout", gated at 2+ selected) — natural home for "Cut out", but that button must also show for a single selected block, so its `selected.length < 2` early-return needs to change to allow 1+ while "Auto Layout" stays gated at 2+.
+- Referenced existing BDD patterns to mirror: `test/features/diagram_interaction.feature`'s "Cutting one wire in a multi-wire selection cuts every selected wire" (~line 479) and "The Auto Layout control only appears once multiple blocks are selected" (~line 495).
+- **Filed**: https://github.com/TheDeepestSpace/svsch/issues/88
+- **Kicked off dispatcher**: https://github.com/TheDeepestSpace/svsch/issues/88#issuecomment-5151892118
+- Not yet confirmed complete — check #88 for a PR on a future turn.
+
 ## 2026-08-01: Answered old open question — workflow-run deletion cadence vs. log masking (informational, nothing filed)
 User re-surfaced a question from an earlier turn that never got a real answer: whether to nightly/hourly-delete the-intern's GitHub Actions runs to limit leak exposure, or find a way to not post workflow run logs publicly at all (without going private).
 - Verified directly rather than answering from memory: repo is confirmed public (`private: false`) via API. `scripts/mint-installation-token.js:123` already does `console.log(\`::add-mask::${token}\`)` immediately after minting the GH App install token (the one token not covered by GitHub's automatic `secrets.*` masking) — so the actual leak vector is already mitigated at the source. This lines up with the 2026-08-01 271-run log audit (see below) that found zero real leaks.
