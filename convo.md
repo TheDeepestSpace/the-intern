@@ -283,3 +283,9 @@ User pointed at https://github.com/TheDeepestSpace/the-intern/actions/runs/30604
 - **Filed**: https://github.com/TheDeepestSpace/the-intern/issues/47 — two-part fix: (1) `manage-summaries.js`'s `fetchSummary`/`saveSummary` self-heal by running `git config --global --add safe.directory "$(pwd)"` as their first action, instead of trusting an earlier step; (2) narrow `dispatcher.yml`'s chown to just `$TARGET_DIR`/`/tmp`/`/home/dev`, dropping `$GITHUB_WORKSPACE` (nothing in that step needs write access to the top-level checkout).
 - **Kicked off dispatcher**: https://github.com/TheDeepestSpace/the-intern/issues/47#issuecomment-5147930003
 - Not yet confirmed complete — check #47 for a PR on a future turn.
+
+## 2026-08-01: GitHub Models backend research — dead end, service retired, nothing filed
+User asked to research integrating GitHub Models as a separate backend (in addition to claude/codex/agy) for the dispatcher, noting it's apparently free for open-source projects, and explicitly asked to check online before filing.
+- Checked online per instructions rather than assuming: GitHub Models (the inference API, playground, model catalog, and BYOK) was **fully retired on 2026-07-30** — two days before this conversation. Confirmed via GitHub's own docs page (`docs.github.com/en/rest/models/inference`, now just says retired + points to Azure AI Foundry/Copilot) and the official changelog post (`github.blog/changelog/2026-07-30-github-models-is-now-retired`). GitHub announced the shutdown 2026-07-01 with brownouts on 07-16/07-23 before the hard cutoff.
+- Nothing to integrate — did not file an issue. Told user via Telegram and suggested the live alternatives instead: Azure AI Foundry (GitHub's official suggested replacement) or the already-scoped Codex device-auth/ChatGPT-plan-limits backend ([[the-intern#3]], researched 2026-07-30 above).
+- No further action pending unless user wants Azure AI Foundry or #3 pursued.
