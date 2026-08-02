@@ -214,8 +214,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # Per-issue serialization (queue: max) keeps a review and a follow-up comment on
+    # the same PR from racing on checkout/push. codex-backend runs additionally need
+    # global serialization: codex proactively rotates its own refresh token in place,
+    # and rotated refresh tokens are typically single-use, so two overlapping
+    # codex-backend runs restoring/persisting CODEX_AUTH_JSON at once would race and
+    # strand each other on a stale token.
     concurrency:
-      group: dispatch-${{ needs.detect-image.outputs.target_repo }}-${{ needs.detect-image.outputs.issue_number }}
+      group: ${{ needs.detect-image.outputs.backend == 'codex' && 'the-intern-codex-auth' || format('dispatch-{0}-{1}', needs.detect-image.outputs.target_repo, needs.detect-image.outputs.issue_number) }}
       cancel-in-progress: false
       queue: max
     container:
@@ -223,14 +229,6 @@ jobs:
       options: --user root
     env:
       CODEX_HOME: /home/dev/.codex
-    # codex proactively rotates its own refresh token in place, and rotated refresh
-    # tokens are typically single-use — two overlapping codex-backend runs restoring/
-    # persisting CODEX_AUTH_JSON at once would race and strand each other on a stale
-    # token. Claude-backend runs don't touch that secret, so give each of them their
-    # own (unique, non-blocking) group instead of serializing everything.
-    concurrency:
-      group: ${{ needs.detect-image.outputs.backend == 'codex' && 'the-intern-codex-auth' || format('the-intern-handle-{0}', github.run_id) }}
-      cancel-in-progress: false
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@v4
@@ -265,18 +263,18 @@ jobs:
         if: needs.detect-image.outputs.backend == 'codex'
         run: npm ci --omit=dev --include=prod --no-audit --no-fund
 
-      # Personal-account Codex login (~/.codex/auth.json) rather than the metered
-      # CODEX_API_KEY path. Restores the last-known-good auth.json from the
-      # CODEX_AUTH_JSON secret before the run; the matching write-back happens in
-      # "Persist refreshed Codex auth.json" below, after codex has had a chance to
-      # rotate it. See rotate-codex-auth.js for the full rationale and the
-      # log-masking measures — nothing in either step ever echoes token contents.
+      # Personal-account Codex login (~/.codex/auth.json) is the only supported auth
+      # path for backend=codex — no API-key fallback. Restores the last-known-good
+      # auth.json from the CODEX_AUTH_JSON secret before the run; the matching
+      # write-back happens in "Persist refreshed Codex auth.json" below, after codex
+      # has had a chance to rotate it. See rotate-codex-auth.js for the full
+      # rationale and the log-masking measures — nothing in either step ever echoes
+      # token contents. Restore failures are logged but non-fatal so the job still
+      # reaches "Run agent" (which then fails cleanly on missing credentials) instead
+      # of aborting silently and skipping the failure-notification flow below.
       - name: Restore Codex auth.json from secret
-        id: restore_codex_auth
         if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.backend == 'codex'
-        run: |
-          node scripts/rotate-codex-auth.js restore
-          test -f "${CODEX_HOME}/auth.json" && echo "has_auth_json=true" >> "$GITHUB_OUTPUT" || echo "has_auth_json=false" >> "$GITHUB_OUTPUT"
+        run: node scripts/rotate-codex-auth.js restore || echo "::warning::Codex auth.json restore failed; codex exec will fail without valid credentials"
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
 
@@ -285,11 +283,7 @@ jobs:
         working-directory: target
         env:
           BACKEND: ${{ needs.detect-image.outputs.backend }}
-          # Scoped per backend: codex only takes CODEX_API_KEY as a fallback when the
-          # restore step above didn't produce an auth.json, since a non-empty
-          # CODEX_API_KEY takes precedence over auth.json in `codex exec`.
           CLAUDE_CODE_OAUTH_TOKEN: ${{ needs.detect-image.outputs.backend != 'codex' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
-          CODEX_API_KEY: ${{ needs.detect-image.outputs.backend == 'codex' && steps.restore_codex_auth.outputs.has_auth_json != 'true' && secrets.CODEX_API_KEY || '' }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}

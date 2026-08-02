@@ -57,7 +57,7 @@ function restore() {
 async function persist() {
   const authPath = getAuthPath();
   if (!fs.existsSync(authPath)) {
-    console.log(`No auth.json at ${authPath}; nothing to persist (codex likely ran on CODEX_API_KEY).`);
+    console.log(`No auth.json at ${authPath}; nothing to persist (restore likely failed).`);
     return;
   }
 
