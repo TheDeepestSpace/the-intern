@@ -1,5 +1,11 @@
 # Conversation Summary
 
+## 2026-08-02: SHA-pinning GitHub Actions — recommended, awaiting go-ahead
+User followed up on an earlier unanswered question ("think its a good idea to sha-pin github actions?"). Checked the-intern's actual workflows directly (fresh clone) before answering: all actions currently pinned to floating major-version tags (`actions/checkout@v4`, `docker/*@v3`-`v6`, `actions/setup-node@v4`) across dispatcher.yml, telegram-session.yml, deploy-worker.yml, docker-image.yml, docker-build.yml — no action is SHA-pinned anywhere.
+- **Recommended yes**, citing the tj-actions/changed-files 2025 supply-chain incident (compromised maintainer repoints a tag to malicious code, no diff/review trigger) as the concrete threat model — fits this repo's existing security-hardening track record (#16 audit, #11 shell-injection fix, 271-run leak audit).
+- Flagged the tradeoff: SHA pins don't auto-update, but Dependabot's `github-actions` ecosystem supports SHA-pinned actions natively (opens PRs bumping the SHA with a version comment), so nothing is lost, just not automatic.
+- Offered to do it as a small direct-API PR (same pattern as #29/#32/#46/#67 — mechanical, no dispatcher needed) plus add `.github/dependabot.yml` for the `github-actions` ecosystem. **Awaiting user go-ahead** — nothing implemented yet.
+
 ## 2026-08-02: Machine accounts vs GitHub Apps — researched and explained, nothing filed
 User asked to explain machine accounts vs GitHub Apps (incl. how to create a machine account) and see how it could improve the agentic setup — explicitly said not to file any issues yet.
 - Verified current org/repo state directly rather than assuming: `TheDeepestSpace` is a personal User account (not an org), and the-intern/svsch are public — confirmed via API. This matters because it removes the usual "Apps save a paid seat" argument (org seat billing doesn't apply to personal-account collaborators).
