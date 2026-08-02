@@ -92,12 +92,16 @@ jobs:
             let instructions = "";
             try {
               instructions = fs.readFileSync("../instructions/telegram.md", "utf8");
-            } catch (err) {}
+            } catch (err) {
+              if (err.code !== "ENOENT") throw err;
+            }
 
             let style = "";
             try {
               style = fs.readFileSync("../instructions/shared-style.md", "utf8");
-            } catch (err) {}
+            } catch (err) {
+              if (err.code !== "ENOENT") throw err;
+            }
 
             let convo = "";
             try {
@@ -114,7 +118,9 @@ jobs:
               } else {
                 convo = buffer.toString("utf8");
               }
-            } catch (err) {}
+            } catch (err) {
+              if (err.code !== "ENOENT") throw err;
+            }
 
             const msg = process.env.MESSAGE || "";
             const photoPath = process.env.PHOTO_PATH || "";
