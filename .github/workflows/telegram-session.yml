@@ -94,7 +94,16 @@ jobs:
             const fs = require("fs");
             const instructions = process.env.INSTRUCTIONS || "";
             const style = process.env.STYLE_GUIDE || "";
-            const convo = process.env.CONVO_CONTEXT || "";
+            let convo = process.env.CONVO_CONTEXT || "";
+            const MAX_CONVO_BYTES = 20 * 1024;
+            if (Buffer.byteLength(convo, "utf8") > MAX_CONVO_BYTES) {
+              const buffer = Buffer.from(convo, "utf8");
+              convo = buffer.subarray(buffer.length - MAX_CONVO_BYTES).toString("utf8");
+              const firstNewline = convo.indexOf("\n");
+              if (firstNewline !== -1) {
+                convo = convo.substring(firstNewline + 1);
+              }
+            }
             const msg = process.env.MESSAGE || "";
             const photoPath = process.env.PHOTO_PATH || "";
             const photoNote = photoPath ? `\n\nAn image was attached: ${photoPath}` : "";
