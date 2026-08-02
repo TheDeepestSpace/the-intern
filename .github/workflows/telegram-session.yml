@@ -124,7 +124,7 @@ jobs:
             cd "$(pwd)"
             
             PROMPT="$(cat /tmp/prompt.txt)"
-            claude -p "$PROMPT" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
+            claude -p "$PROMPT" --output-format json --dangerously-skip-permissions 2>&1 | tee result.json || true
           '
 
       - name: Commit updated convo.md to telegram branch
