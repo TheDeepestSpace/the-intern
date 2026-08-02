@@ -109,10 +109,17 @@ describe('handleGitHub event-type filtering', () => {
   it.each(['issue_comment', 'pull_request_review', 'pull_request_review_comment'])(
     'accepts relevant event type %s through to the mention gate',
     async eventType => {
+      const overrides = { comment: { user: { login: 'alice' }, body: 'no mention' } };
+      if (eventType === 'pull_request_review') {
+        overrides.review = { body: 'no mention' };
+      }
+      if (eventType === 'pull_request_review_comment') {
+        overrides.comment.pull_request_review_id = 123;
+      }
       const res = await worker.fetch(
         githubRequest({
           eventType,
-          body: issueCommentPayload({ comment: { user: { login: 'alice' }, body: 'no mention' } }),
+          body: issueCommentPayload(overrides),
         }),
         baseGithubEnv()
       );
