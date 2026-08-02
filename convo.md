@@ -1,5 +1,12 @@
 # Conversation Summary
 
+## 2026-08-02: Machine accounts vs GitHub Apps — researched and explained, nothing filed
+User asked to explain machine accounts vs GitHub Apps (incl. how to create a machine account) and see how it could improve the agentic setup — explicitly said not to file any issues yet.
+- Verified current org/repo state directly rather than assuming: `TheDeepestSpace` is a personal User account (not an org), and the-intern/svsch are public — confirmed via API. This matters because it removes the usual "Apps save a paid seat" argument (org seat billing doesn't apply to personal-account collaborators).
+- Answered via Telegram: definitions, a how-to for creating/scoping a machine account (new account+2FA, add as collaborator, fine-grained PAT with expiration, store as secret, manual rotation), and a tradeoff comparison grounded in the-intern's actual bug history — App installation tokens auto-expire (~1hr) vs a PAT sitting in a secret for months; the one edge Apps give up is automatic `secrets.*` masking (why `mint-installation-token.js` needed a manual `::add-mask::`, tied to why [[the-intern#11]]/[[the-intern#16]] existed) — already fixed and confirmed leak-free (2026-08-01 271-run audit); the one place a machine account is structurally necessary is anything needing literal *User* identity (issue assignee, some Projects/GraphQL mutations — GitHub Apps are bot-type actors and can't be assigned issues).
+- **Verdict given**: nothing in the current flow is blocked by using an App — it's already the better fit for this setup. Recommended not adding a machine account unless a concrete real-user-semantics gap shows up (e.g. wanting the-intern-bot to be an issue assignee).
+- Purely advisory — nothing filed or changed. Revisit only if user wants to pursue a specific capability gap (e.g. issue-assignee support).
+
 ## 2026-08-02: Testing strategy for the-intern — 4 issues filed, 3 dispatched, 1 backburner
 User said "very nice" to the tier breakdown below and gave explicit direction: file+dispatch tiers 1 and 2, file+dispatch tier 3 as research-only, file (don't dispatch) the fixtures idea as backburner.
 - **Filed & dispatched**: https://github.com/TheDeepestSpace/the-intern/issues/61 (Worker tests, `@cloudflare/vitest-pool-workers`) — https://github.com/TheDeepestSpace/the-intern/issues/61#issuecomment-5154138727
