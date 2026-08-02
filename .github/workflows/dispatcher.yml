@@ -326,6 +326,15 @@ jobs:
           # single quotes, dropping everything after it.
           node -e '
             const fs = require("fs");
+            const path = require("path");
+            // Stop-hook backstop (issue #69): wired via a per-user settings.json rather than a
+            // .claude/settings.json committed to the target repo, since the target checkout is
+            // untrusted and this container is torn down after the run anyway.
+            const agentInfraDir = path.dirname(process.env.TARGET_DIR || "");
+            const stopHookScript = path.join(agentInfraDir, "scripts", "check-stop-hook.js");
+            const stopHookSettings = JSON.stringify({
+              hooks: { Stop: [{ type: "command", command: `node ${stopHookScript}`, timeout: 30 }] },
+            }, null, 2);
             const script = [
               "#!/bin/bash",
               "set -e",
@@ -334,6 +343,16 @@ jobs:
               "git config --global --add safe.directory \"$TARGET_DIR\"",
               "git config user.name \"the-intern-bot[bot]\"",
               "git config user.email \"the-intern-bot[bot]@users.noreply.github.com\"",
+              "mkdir -p \"$HOME/.claude\"",
+              // Unquoted heredoc delimiter here (STOPHOOKEOF, not a quoted variant) since this
+              // whole script string is itself wrapped in single quotes by the outer node -e
+              // invocation below; a quoted delimiter needs literal single quote characters, which
+              // would terminate that outer string early. The JSON body has no dollar signs or
+              // backticks, so skipping shell-expansion protection in the heredoc is safe.
+              "cat > \"$HOME/.claude/settings.json\" <<STOPHOOKEOF",
+              stopHookSettings,
+              "STOPHOOKEOF",
+              "git rev-parse HEAD > /tmp/stop_hook_baseline_sha.txt 2>/dev/null || true",
               "PROMPT=\"$(cat /tmp/prompt.txt)\"",
               "set +e",
               "claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions 2>&1 | tee result.json",
