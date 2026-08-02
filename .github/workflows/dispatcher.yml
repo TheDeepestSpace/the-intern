@@ -145,7 +145,10 @@ jobs:
       # The overlay tag is derived from the base image's digest (not its mutable
       # "latest"/"dev-latest" tag), so a new dev-image build in the target repo
       # naturally produces a new tag here and forces a rebuild on the next dispatch
-      # instead of reusing a stale overlay.
+      # instead of reusing a stale overlay. It also folds in a hash of the overlay
+      # Dockerfile itself, so editing docker/agent-overlay.Dockerfile forces a
+      # rebuild too, instead of silently reusing a stale cached image built from
+      # the old Dockerfile.
       - name: Resolve base image digest and overlay tag
         id: overlay_meta
         if: steps.fallback_check.outputs.is_fallback != 'true'
@@ -162,7 +165,8 @@ jobs:
           fi
 
           DIGEST_SHORT=$(echo "$DIGEST" | sed 's/^sha256://' | cut -c1-12)
-          OVERLAY_TAG="${REPO_SLUG,,}-${DIGEST_SHORT}"
+          DOCKERFILE_HASH=$(sha256sum docker/agent-overlay.Dockerfile | cut -c1-12)
+          OVERLAY_TAG="${REPO_SLUG,,}-${DIGEST_SHORT}-${DOCKERFILE_HASH}"
           OVERLAY_IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/agent-overlay:${OVERLAY_TAG}"
 
           echo "overlay_tag=$OVERLAY_TAG" >> "$GITHUB_OUTPUT"
