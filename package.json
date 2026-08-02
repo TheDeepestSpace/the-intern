@@ -1,5 +1,10 @@
 {
+  "scripts": {
+    "test": "vitest run"
+  },
   "devDependencies": {
+    "undici": "^7.29.0",
+    "vitest": "^4.1.10",
     "wrangler": "^4.115.0"
   }
 }
