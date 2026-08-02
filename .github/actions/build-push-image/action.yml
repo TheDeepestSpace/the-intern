@@ -32,14 +32,14 @@ runs:
   steps:
     - name: Login to GHCR to pull base image
       if: inputs.pull-password != ''
-      uses: docker/login-action@v3
+      uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
       with:
         registry: ghcr.io
         username: ${{ inputs.pull-username }}
         password: ${{ inputs.pull-password }}
 
     - name: Build image
-      uses: docker/build-push-action@v5
+      uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
       with:
         context: .
         file: ${{ inputs.dockerfile }}
@@ -50,7 +50,7 @@ runs:
         platforms: linux/amd64
 
     - name: Login to GHCR to push image
-      uses: docker/login-action@v3
+      uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
