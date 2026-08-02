@@ -285,6 +285,7 @@ jobs:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
 
       - name: Run agent (fresh session per trigger, as non-root user)
+        id: run_agent
         if: needs.detect-image.outputs.target_repo != ''
         working-directory: target
         env:
@@ -454,16 +455,47 @@ jobs:
             }
           '; then
             echo "Agent session completed."
+            echo "is_error=false" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::Agent produced no usable output or reported an error"
+            echo "is_error=true" >> "$GITHUB_OUTPUT"
             CONTEXT="$TARGET_REPO"
             if [ -n "$ISSUE_NUMBER" ]; then
               CONTEXT="${TARGET_REPO}#${ISSUE_NUMBER}"
             fi
             FAILURE_TEXT="⚠️ the-intern-bot ran into an error and could not complete a request on ${CONTEXT}. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            # codex has no equivalent of claude's --output-format json; its raw JSONL event
+            # stream (captured to /tmp/codex-events.jsonl) is the only place a genuine
+            # codex crash shows up, since normalize-codex-result.js only ever sees an empty
+            # final message either way. A short tail of it, inlined here, is enough to tell
+            # an intermittent codex error apart from a real "couldn't answer" failure without
+            # requiring a trip to the (ephemeral, already-torn-down-by-then) container; the
+            # full log is also uploaded as a workflow artifact below for deeper digging.
+            if [ "$BACKEND" = "codex" ] && [ -s /tmp/codex-events.jsonl ]; then
+              CODEX_LOG_SNIPPET=$(tail -c 3000 /tmp/codex-events.jsonl)
+              if [ -n "$CODEX_LOG_SNIPPET" ]; then
+                FAILURE_TEXT="${FAILURE_TEXT}"$'\n\nLast codex log lines:\n'"${CODEX_LOG_SNIPPET}"
+              fi
+            fi
             CHAT_ID="$TG_ADMIN_CHAT_ID" MESSAGE_TEXT="$FAILURE_TEXT" node "$GITHUB_WORKSPACE/scripts/send-telegram.js" \
               || echo "::error::failed to send Telegram failure notification for $CONTEXT"
           fi
+
+      # The container (and with it, /tmp/codex-events.jsonl) is torn down at the end of
+      # the job, so without this the raw codex JSONL event stream — the only place a
+      # genuine codex crash/stack shows up — is unrecoverable after the fact (issue #93).
+      # Uploads whenever the "Run agent" step's own failure detection saw is_error, or the
+      # step itself failed outright (e.g. codex exec never produced a final message at
+      # all); if-no-files-found is left at "warn" since the file won't exist for very early
+      # failures (before codex ever ran) or for the claude backend.
+      - name: Upload codex debug log
+        if: always() && needs.detect-image.outputs.backend == 'codex' && needs.detect-image.outputs.target_repo != '' && (steps.run_agent.outputs.is_error == 'true' || steps.run_agent.outcome == 'failure')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codex-events-${{ github.run_id }}-${{ needs.detect-image.outputs.issue_number }}
+          path: /tmp/codex-events.jsonl
+          retention-days: 14
+          if-no-files-found: warn
 
       # Runs even if the step above failed: OpenAI's CI/CD guidance for this flow is
       # to write back whatever codex left on disk regardless of run outcome, since a
