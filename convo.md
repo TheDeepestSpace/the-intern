@@ -54,3 +54,10 @@ User flagged https://github.com/TheDeepestSpace/svsch/pull/100 (first codex-auth
 - Since the-intern already injects one shared prompt (`instructions/shared-style.md`, read in `dispatcher.yml`'s prompt-construction step) into both backends' prompts identically, **recommended fixing there instead of svsch's AGENTS.md**: add (a) explicit "run lint+tests before opening a PR; don't report results you didn't observe" and (b) "compose PR/issue bodies via a file + `gh ... --body-file`, never inline `--body` with escaped newlines" — fixes the quoting bug class for both backends, not just codex.
 - Told user `effort=` isn't really a "did it run tests" switch (indirect at best — more reasoning depth/carefulness), advised against bumping the default for this reason alone.
 - **Nothing filed/dispatched yet — asked user whether to file+dispatch the shared-style.md update.**
+
+## 2026-08-02: RFMem investigation follow-up — thread was dropped, told user
+User followed up on msg 219 ("Got the image + the Verilog. Digging into svsch's source now to find exactly why RFMem got exploded into disconnected combinational boxes + two conflicting register nodes instead of one memory block. Will report findings before filing anything.") asking why no follow-up ever came.
+- Checked convo.md (no mention of RFMem anywhere) and svsch issue tracker (`repo:TheDeepestSpace/svsch RFMem` search — 0 results, and skimmed last 30 issues by date, none match) — confirmed the investigation was never filed and no findings were recorded anywhere.
+- No image/Verilog file present in this working directory (stripped-down env, nothing persisted from that session).
+- Told user honestly: the thread got dropped, nothing was found/filed, and asked them to re-share the image + Verilog so the RFMem investigation can restart from scratch.
+- **Open**: waiting on user to re-send the image + Verilog for RFMem (svsch memory-block rendering exploded into disconnected comb boxes + two conflicting register nodes instead of one block).
