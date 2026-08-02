@@ -325,18 +325,21 @@ jobs:
 
           # Extraction logic written to its own file (not inlined via jq, which isn't guaranteed to
           # be present in every target image) so result.json parsing has no external dependency.
+          # Reads from /tmp/result.json (outside the target/ working tree, issue #71) so a git
+          # clean/reset run by Claude inside target/ can't unlink it out from under `tee`; still
+          # writes session_result.txt into target/ (cwd), per #54's "Commit session summary" step.
           node -e '
             const fs = require("fs");
             const lines = [
               "const fs = require(\"fs\");",
               "let output = \"\";",
               "try {",
-              "  const raw = fs.readFileSync(\"result.json\", \"utf8\");",
+              "  const raw = fs.readFileSync(\"/tmp/result.json\", \"utf8\");",
               "  const data = JSON.parse(raw);",
               "  const value = data.result ?? data.output ?? data;",
               "  output = typeof value === \"string\" ? value : JSON.stringify(value, null, 2);",
               "} catch (e) {",
-              "  output = fs.readFileSync(\"result.json\", \"utf8\").toString();",
+              "  output = fs.readFileSync(\"/tmp/result.json\", \"utf8\").toString();",
               "}",
               "fs.writeFileSync(\"session_result.txt\", output);",
             ];
@@ -357,7 +360,7 @@ jobs:
               "let finalMessage = \"\";",
               "try { finalMessage = fs.readFileSync(\"/tmp/codex-final.txt\", \"utf8\"); } catch (e) {}",
               "const isError = exitCode !== \"0\" || !finalMessage.trim();",
-              "fs.writeFileSync(\"result.json\", JSON.stringify({ result: finalMessage, is_error: isError }, null, 2));",
+              "fs.writeFileSync(\"/tmp/result.json\", JSON.stringify({ result: finalMessage, is_error: isError }, null, 2));",
             ];
             fs.writeFileSync("/tmp/normalize-codex-result.js", lines.join("\n"));
           '
@@ -385,6 +388,7 @@ jobs:
           # permission system, same trust model on both backends.
           node -e '
             const fs = require("fs");
+            const path = require("path");
             const backend = process.env.BACKEND === "codex" ? "codex" : "claude";
             const runLines = backend === "codex"
               ? [
@@ -394,9 +398,17 @@ jobs:
                   "node /tmp/normalize-codex-result.js \"$CODEX_EXIT\" || true",
                 ]
               : [
-                  "claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions 2>&1 | tee result.json",
+                  "claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions 2>&1 | tee /tmp/result.json",
                   "set -e",
                 ];
+            // Stop-hook backstop (issue #69): wired via a per-user settings.json rather than a
+            // .claude/settings.json committed to the target repo, since the target checkout is
+            // untrusted and this container is torn down after the run anyway.
+            const agentInfraDir = path.dirname(process.env.TARGET_DIR || "");
+            const stopHookScript = path.join(agentInfraDir, "scripts", "check-stop-hook.js");
+            const stopHookSettings = JSON.stringify({
+              hooks: { Stop: [{ hooks: [{ type: "command", command: `node ${stopHookScript}`, timeout: 30 }] }] },
+            }, null, 2);
             const script = [
               "#!/bin/bash",
               "set -e",
@@ -405,6 +417,16 @@ jobs:
               "git config --global --add safe.directory \"$TARGET_DIR\"",
               "git config user.name \"the-intern-bot[bot]\"",
               "git config user.email \"the-intern-bot[bot]@users.noreply.github.com\"",
+              "mkdir -p \"$HOME/.claude\"",
+              // Unquoted heredoc delimiter here (STOPHOOKEOF, not a quoted variant) since this
+              // whole script string is itself wrapped in single quotes by the outer node -e
+              // invocation below; a quoted delimiter needs literal single quote characters, which
+              // would terminate that outer string early. The JSON body has no dollar signs or
+              // backticks, so skipping shell-expansion protection in the heredoc is safe.
+              "cat > \"$HOME/.claude/settings.json\" <<STOPHOOKEOF",
+              stopHookSettings,
+              "STOPHOOKEOF",
+              "git rev-parse HEAD > /tmp/stop_hook_baseline_sha.txt 2>/dev/null || true",
               "PROMPT=\"$(cat /tmp/prompt.txt)\"",
               "set +e",
               ...runLines,
@@ -422,7 +444,7 @@ jobs:
           # here and notify the admin over Telegram instead of leaving the issue/PR silent.
           if node -e '
             const fs = require("fs");
-            const raw = fs.existsSync("result.json") ? fs.readFileSync("result.json", "utf8") : "";
+            const raw = fs.existsSync("/tmp/result.json") ? fs.readFileSync("/tmp/result.json", "utf8") : "";
             if (!raw.trim()) process.exit(1);
             try {
               const data = JSON.parse(raw);

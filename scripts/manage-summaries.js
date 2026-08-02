@@ -1,4 +1,5 @@
 const fs = require('fs');
+const crypto = require('crypto');
 const { execSync } = require('child_process');
 const path = require('path');
 
@@ -65,13 +66,49 @@ function fetchSummary(targetRepo, issueNumber) {
 
 function saveSummary(targetRepo, issueNumber, promptText, resultText) {
   if (!targetRepo || !issueNumber) return;
+  if (!/^[1-9]\d*$/.test(String(issueNumber))) {
+    console.error(`Refusing to save summary: invalid issue number "${issueNumber}"`);
+    process.exitCode = 1;
+    return;
+  }
   ensureSafeDirectory();
   const branchName = getBranchName(targetRepo, issueNumber);
-  const timestamp = new Date().toISOString();
   const repoSlug = sanitizeSlug(targetRepo);
   const dirPath = path.join('summaries', repoSlug, String(issueNumber));
+  const hasToken = !!(process.env.GITHUB_TOKEN || process.env.GH_TOKEN);
 
-  const summaryContent = `# Session Summary
+  // Concurrent runs (e.g. fetch + save jobs racing on the same issue) can push
+  // to this branch between our fetch and our push, so a couple of retries
+  // absorb the ordinary non-fast-forward rejection instead of failing the step.
+  const maxAttempts = 3;
+
+  try {
+    runGit('config user.name "the-intern-bot[bot]"');
+    runGit('config user.email "the-intern-bot[bot]@users.noreply.github.com"');
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (attempt > 1) {
+        // Detach so the branch ref is free, drop our stale local copy, and
+        // re-fetch the branch's current tip before rebuilding our commit on it.
+        runGit('checkout --detach');
+        runGit(`branch -D ${branchName}`);
+        runGit(`fetch origin ${branchName}:${branchName}`);
+      }
+
+      // Create the orphan branch, or switch to it if a prior run already created it
+      // (e.g. fetched by `fetchSummary` earlier in the same job, or re-fetched above).
+      // Only clear the working tree on the orphan path: the fallback checkout of an
+      // existing branch may carry another run's already-pushed summary, which must
+      // stay in place (and in the tree) rather than being wiped by this attempt.
+      try {
+        runGit(`checkout --orphan ${branchName}`);
+        runGit('rm -rf .');
+      } catch (err) {
+        runGit(`checkout ${branchName}`);
+      }
+
+      const timestamp = new Date().toISOString();
+      const summaryContent = `# Session Summary
 
 - **Timestamp**: ${timestamp}
 - **Target Repo**: ${targetRepo}
@@ -84,32 +121,30 @@ ${promptText || 'N/A'}
 ${resultText || 'N/A'}
 `;
 
-  try {
-    // Configure git user if needed
-    runGit('config user.name "the-intern-bot[bot]"');
-    runGit('config user.email "the-intern-bot[bot]@users.noreply.github.com"');
+      fs.mkdirSync(dirPath, { recursive: true });
+      const filename = path.join(dirPath, `${Date.now()}-${crypto.randomUUID()}.md`);
+      fs.writeFileSync(filename, summaryContent, 'utf8');
 
-    // Create the orphan branch, or switch to it if a prior run already created it
-    // (e.g. fetched by `fetchSummary` earlier in the same job).
-    try {
-      runGit(`checkout --orphan ${branchName}`);
-    } catch (err) {
-      runGit(`checkout ${branchName}`);
-    }
-    runGit('rm -rf .');
+      runGit(`add ${filename}`);
+      runGit(`commit -m "summary: ${targetRepo} #${issueNumber} at ${timestamp}"`);
 
-    fs.mkdirSync(dirPath, { recursive: true });
-    const filename = path.join(dirPath, `${Date.now()}.md`);
-    fs.writeFileSync(filename, summaryContent, 'utf8');
+      if (!hasToken) {
+        console.log('No GITHUB_TOKEN/GH_TOKEN set; skipping push of summary branch.');
+        return;
+      }
 
-    runGit(`add ${filename}`);
-    runGit(`commit -m "summary: ${targetRepo} #${issueNumber} at ${timestamp}"`);
-
-    if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) {
-      runGit(`push origin ${branchName}`);
-      console.log(`Pushed summary to branch ${branchName}`);
-    } else {
-      console.log('No GITHUB_TOKEN/GH_TOKEN set; skipping push of summary branch.');
+      try {
+        runGit(`push origin ${branchName}`);
+        console.log(`Pushed summary to branch ${branchName}`);
+        return;
+      } catch (err) {
+        const isRejected = /non-fast-forward|fetch first/i.test(err.message);
+        if (isRejected && attempt < maxAttempts) {
+          console.warn(`Push to ${branchName} was rejected (attempt ${attempt}/${maxAttempts}), retrying: ${err.message}`);
+          continue;
+        }
+        throw err;
+      }
     }
   } catch (err) {
     console.error(`Failed to save session summary for ${targetRepo} #${issueNumber}: ${err.message}`);

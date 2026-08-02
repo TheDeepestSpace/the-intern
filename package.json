@@ -1,8 +1,13 @@
 {
+  "scripts": {
+    "test": "vitest run"
+  },
   "dependencies": {
     "libsodium-wrappers": "^0.7.15"
   },
   "devDependencies": {
+    "undici": "^7.29.0",
+    "vitest": "^4.1.10",
     "wrangler": "^4.115.0"
   }
 }

@@ -33,3 +33,6 @@ echo "Message text here" | node ../scripts/send-telegram.js
 
 ## Maintaining Conversation Continuity (`convo.md`)
 Before completing your session, you **must** update the `convo.md` file in your working directory with a short, rolling summary of key discussion points, decisions, open tasks, or ongoing context. This summary (`convo.md`) will be passed to future sessions so you can maintain continuity across separate messages.
+
+- **Append to the end**: Always append your new summary to the **end** of `convo.md` (in chronological order), never at the front.
+- **Keep it concise and bounded**: Summarize key discussion points, decisions, and open tasks so context remains tight and actionable. Prune older, resolved entries from the top when updating so `convo.md` stays within ~20 KiB.
