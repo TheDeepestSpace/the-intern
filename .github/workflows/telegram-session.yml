@@ -65,9 +65,6 @@ jobs:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
         run: |
-          export INSTRUCTIONS="$(cat ../instructions/telegram.md 2>/dev/null || true)"
-          export STYLE_GUIDE="$(cat ../instructions/shared-style.md 2>/dev/null || true)"
-          export CONVO_CONTEXT="$(cat convo.md 2>/dev/null || true)"
           export MESSAGE="$(jq -r '.client_payload.text // empty' "$GITHUB_EVENT_PATH")"
           export CHAT_ID="$(jq -r '.client_payload.chat_id // empty' "$GITHUB_EVENT_PATH")"
           export REPLY_TO_MESSAGE_ID="$(jq -r '.client_payload.message_id // empty' "$GITHUB_EVENT_PATH")"
@@ -92,9 +89,39 @@ jobs:
 
           node -e '
             const fs = require("fs");
-            const instructions = process.env.INSTRUCTIONS || "";
-            const style = process.env.STYLE_GUIDE || "";
-            const convo = process.env.CONVO_CONTEXT || "";
+            let instructions = "";
+            try {
+              instructions = fs.readFileSync("../instructions/telegram.md", "utf8");
+            } catch (err) {
+              if (err.code !== "ENOENT") throw err;
+            }
+
+            let style = "";
+            try {
+              style = fs.readFileSync("../instructions/shared-style.md", "utf8");
+            } catch (err) {
+              if (err.code !== "ENOENT") throw err;
+            }
+
+            let convo = "";
+            try {
+              const buffer = fs.readFileSync("convo.md");
+              const MAX_CONVO_BYTES = 20 * 1024;
+              if (buffer.length > MAX_CONVO_BYTES) {
+                const start = buffer.length - MAX_CONVO_BYTES;
+                let contentStart = start;
+                if (start > 0 && buffer[start - 1] !== 0x0a) {
+                  const firstNewline = buffer.indexOf(0x0a, start);
+                  contentStart = firstNewline === -1 ? buffer.length : firstNewline + 1;
+                }
+                convo = buffer.subarray(contentStart).toString("utf8");
+              } else {
+                convo = buffer.toString("utf8");
+              }
+            } catch (err) {
+              if (err.code !== "ENOENT") throw err;
+            }
+
             const msg = process.env.MESSAGE || "";
             const photoPath = process.env.PHOTO_PATH || "";
             const photoNote = photoPath ? `\n\nAn image was attached: ${photoPath}` : "";
