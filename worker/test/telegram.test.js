@@ -21,13 +21,17 @@ function baseMessage(overrides = {}) {
   };
 }
 
-async function dispatchedClientPayload(fetchSpy) {
+function dispatchedRequestBody(fetchSpy) {
   const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
     new URL(typeof input === 'string' ? input : input.url).pathname.endsWith('/dispatches')
   );
   expect(dispatchCall).toBeTruthy();
   const [, init] = dispatchCall;
-  return JSON.parse(init.body).client_payload;
+  return JSON.parse(init.body);
+}
+
+async function dispatchedClientPayload(fetchSpy) {
+  return dispatchedRequestBody(fetchSpy).client_payload;
 }
 
 describe('handleTelegram gating', () => {
@@ -193,11 +197,7 @@ describe('handleTelegram client_payload construction', () => {
     const fetchSpy = mockGithubDispatchFlow();
     await worker.fetch(telegramRequest({ update: { message: baseMessage() } }), baseTelegramEnv());
 
-    const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
-      new URL(typeof input === 'string' ? input : input.url).pathname.endsWith('/dispatches')
-    );
-    const body = JSON.parse(dispatchCall[1].body);
-    expect(body.event_type).toBe('telegram_message');
+    expect(dispatchedRequestBody(fetchSpy).event_type).toBe('telegram_message');
   });
 });
 

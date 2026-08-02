@@ -72,41 +72,20 @@ export function telegramRequest({ update, headers = {} } = {}) {
   });
 }
 
-// Mocks the two outbound GitHub API calls made once gating passes:
-// installation-token mint, then repository_dispatch. Returns a spy so tests
-// can assert on the dispatch call's body/headers.
-export function mockGithubDispatchFlow({ dispatchOk = true } = {}) {
-  const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+// Shared handler for the access-token and dispatch branches used by both
+// mockGithubDispatchFlow and mockInstallationLookupAndDispatchFlow below.
+// When installationId is set, also serves the installation-id lookup
+// (GET /repos/:owner/:repo/installation), used on the Telegram-triggered path.
+function githubApiFetchHandler({ installationId, dispatchOk = true } = {}) {
+  return async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
 
     if (
-      request.method === 'POST' &&
-      url.pathname.match(/^\/app\/installations\/\d+\/access_tokens$/)
+      installationId !== undefined &&
+      request.method === 'GET' &&
+      url.pathname.match(/^\/repos\/.+\/.+\/installation$/)
     ) {
-      return new Response(JSON.stringify({ token: 'test-installation-token' }), { status: 201 });
-    }
-
-    if (request.method === 'POST' && url.pathname.match(/\/repos\/.+\/.+\/dispatches$/)) {
-      return dispatchOk
-        ? new Response(null, { status: 204 })
-        : new Response('nope', { status: 422 });
-    }
-
-    throw new Error(`Unexpected fetch: ${request.method} ${url.pathname}`);
-  });
-  return fetchSpy;
-}
-
-// Like mockGithubDispatchFlow, but also serves the installation-id lookup
-// (GET /repos/:owner/:repo/installation) used when AGENT_INFRA_INSTALLATION_ID
-// isn't preset, i.e. the Telegram-triggered path.
-export function mockInstallationLookupAndDispatchFlow({ installationId = 999, dispatchOk = true } = {}) {
-  const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-    const request = new Request(input, init);
-    const url = new URL(request.url);
-
-    if (request.method === 'GET' && url.pathname.match(/^\/repos\/.+\/.+\/installation$/)) {
       return new Response(JSON.stringify({ id: installationId }), { status: 200 });
     }
 
@@ -124,6 +103,21 @@ export function mockInstallationLookupAndDispatchFlow({ installationId = 999, di
     }
 
     throw new Error(`Unexpected fetch: ${request.method} ${url.pathname}`);
-  });
-  return fetchSpy;
+  };
+}
+
+// Mocks the two outbound GitHub API calls made once gating passes:
+// installation-token mint, then repository_dispatch. Returns a spy so tests
+// can assert on the dispatch call's body/headers.
+export function mockGithubDispatchFlow({ dispatchOk = true } = {}) {
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(githubApiFetchHandler({ dispatchOk }));
+}
+
+// Like mockGithubDispatchFlow, but also serves the installation-id lookup
+// (GET /repos/:owner/:repo/installation) used when AGENT_INFRA_INSTALLATION_ID
+// isn't preset, i.e. the Telegram-triggered path.
+export function mockInstallationLookupAndDispatchFlow({ installationId = 999, dispatchOk = true } = {}) {
+  return vi
+    .spyOn(globalThis, 'fetch')
+    .mockImplementation(githubApiFetchHandler({ installationId, dispatchOk }));
 }
