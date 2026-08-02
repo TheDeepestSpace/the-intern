@@ -39,6 +39,9 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: npm audit
+        run: npm audit --audit-level=high
+
   scripts-test:
     runs-on: ubuntu-latest
     steps:
@@ -55,3 +58,6 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      - name: npm audit
+        run: npm audit --audit-level=high
