@@ -178,6 +178,7 @@ describe('rotate-codex-auth', () => {
 
       expect(process.exitCode).toBe(1);
       expect(errorSpy.join('\n')).toContain('Failed to fetch repo public key');
+      expect(logSpy.join('\n')).toContain('::add-mask::abc');
     });
 
     it('sets exitCode to 1 when updating the secret fails', async () => {
@@ -201,6 +202,7 @@ describe('rotate-codex-auth', () => {
 
       expect(process.exitCode).toBe(1);
       expect(errorSpy.join('\n')).toContain('Failed to update CODEX_AUTH_JSON secret');
+      expect(logSpy.join('\n')).toContain('::add-mask::abc');
     });
 
     it('encrypts the refreshed auth.json with the repo public key and PUTs it to the secret', async () => {
@@ -239,7 +241,11 @@ describe('rotate-codex-auth', () => {
       const decoded = Buffer.from(sodium.to_string(decrypted), 'base64').toString('utf8');
       expect(JSON.parse(decoded)).toEqual(refreshed);
 
-      expect(logSpy.join('\n')).toContain('Persisted refreshed Codex auth.json');
+      const logged = logSpy.join('\n');
+      expect(logged).toContain('::add-mask::new-access');
+      expect(logged).toContain('::add-mask::new-refresh');
+      expect(logged).toContain(`::add-mask::${Buffer.from(JSON.stringify(refreshed), 'utf8').toString('base64')}`);
+      expect(logged).toContain('Persisted refreshed Codex auth.json');
     });
   });
 });
