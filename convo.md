@@ -1,6 +1,14 @@
 # Conversation Summary
 
-## 2026-08-02: Testing strategy research for the-intern (Actions + Worker) — researched only, no issue filed
+## 2026-08-02: Testing strategy for the-intern — 4 issues filed, 3 dispatched, 1 backburner
+User said "very nice" to the tier breakdown below and gave explicit direction: file+dispatch tiers 1 and 2, file+dispatch tier 3 as research-only, file (don't dispatch) the fixtures idea as backburner.
+- **Filed & dispatched**: https://github.com/TheDeepestSpace/the-intern/issues/61 (Worker tests, `@cloudflare/vitest-pool-workers`) — https://github.com/TheDeepestSpace/the-intern/issues/61#issuecomment-5154138727
+- **Filed & dispatched**: https://github.com/TheDeepestSpace/the-intern/issues/62 (scripts/*.js tests, undici MockAgent + real scratch git for manage-summaries.js) — https://github.com/TheDeepestSpace/the-intern/issues/62#issuecomment-5154138759
+- **Filed & dispatched (research-only)**: https://github.com/TheDeepestSpace/the-intern/issues/63 (act-based Actions YAML testing) — instructions explicitly told the agent to only investigate the 4 open questions (act fidelity to hosted-runner UID/ownership semantics, redirecting hardcoded API URLs, fake-bin image maintenance cost, lighter static-lint alternative) and post findings/go-no-go as a comment, not write code or open a PR: https://github.com/TheDeepestSpace/the-intern/issues/63#issuecomment-5154138786
+- **Filed only, NOT dispatched (backburner)**: https://github.com/TheDeepestSpace/the-intern/issues/64 (turn past incident payloads — #52 photo+caption, #56 reply-to-message, #49/#58 duplicate-review race — into regression fixtures). Revisit once #61/#62 land.
+- Next steps: check #61/#62 for PRs, check #63 for the research findings comment (then decide whether to open a follow-up implementation issue), #64 stays parked until #61/#62 are done.
+
+## 2026-08-02 (earlier this session): Testing strategy research for the-intern (Actions + Worker) — researched only, no issue filed
 User asked to research how to test GitHub Actions workflows and the Cloudflare Worker better, with "fake APIs/executables," as a regression suite — explicitly said not to file an issue yet, just wants the breakdown.
 - Confirmed via direct repo check: **zero tests exist anywhere** in the-intern today (no test dir, no test framework in package.json, no CI test job).
 - Read `worker/src/index.js` (current version — has evolved since earlier convo.md entries; GitHub events now forward the entire raw payload via `client_payload.raw`, with `parse-trigger.js` doing the comment/review/PR extraction on the dispatcher side instead of the worker), `scripts/parse-trigger.js`, `scripts/mint-installation-token.js` to ground the plan in real code.
