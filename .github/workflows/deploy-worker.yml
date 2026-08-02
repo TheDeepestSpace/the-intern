@@ -5,12 +5,15 @@ on:
     branches: [main]
     paths:
       - 'worker/**'
+  pull_request:
+    paths:
+      - 'worker/**'
 
 permissions:
   contents: read
 
 jobs:
-  deploy:
+  test:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -29,6 +32,25 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+  deploy:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
 
       - name: Deploy to Cloudflare Workers
         run: npx wrangler deploy
