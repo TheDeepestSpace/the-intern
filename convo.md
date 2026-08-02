@@ -1,5 +1,11 @@
 # Conversation Summary
 
+## 2026-08-02: GitHub App installation token format change — checked, not relevant, nothing needed
+User saw an Actions-tab notification about GitHub's upcoming change to installation token format (new stateless `ghs_...` tokens, ~520 chars, "apps with hardcoded length assumptions may break") and asked to check the linked changelog + whether it affects us.
+- Fetched the changelog (correct URL has a typo fix: `installation-tokens-` plural) and audited the-intern's actual token handling (`scripts/mint-installation-token.js` + every consumer in `dispatcher.yml`/`telegram-session.yml`) via a subagent rather than assuming.
+- Confirmed: token is treated as a fully opaque string everywhere (mint → `::add-mask::` → env var/Basic-auth pass-through) — no length checks, substring/slice ops, or prefix/format regexes anywhere in the repo. Rollout is staged through late June 2026 (Cloud-only, GHES unaffected).
+- **Verdict: no code change needed.** Purely informational — nothing filed.
+
 ## 2026-08-02: Photo message that "didn't trigger a GitHub Action" — investigated, no code bug found, retry-hardening proposed (awaiting go-ahead)
 User sent a photo (screenshot of an unrelated notification re: a GitHub blog post on App-installation-token per-request override headers) + caption saying they'd sent this same message before and it didn't seem to trigger anything, asked me to figure out why.
 - Verified directly rather than guessing: `worker/src/index.js` on main already handles `message.photo`/caption correctly (confirmed live — this exact message triggered this very session fine, same code path). `telegram-session.yml` trigger/concurrency config unchanged and correct. Telegram `getWebhookInfo` showed 0 pending updates, no recorded last_error. Checked for cancelled/skipped `telegram-session.yml` runs (in case GitHub Actions' "only one pending run per concurrency group" behavior silently dropped a queued run during a burst) — zero found, ruled out.
