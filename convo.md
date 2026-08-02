@@ -439,3 +439,10 @@ User saw CodeRabbit reply "Skipped: comment is from another GitHub bot" in threa
 - Also checked CodeRabbit's newer "Triggers" feature (author allowlist for bots/apps) — that's a different system entirely (Slack-message/monitoring-alert-triggered agent runs), not the GitHub PR comment/chat flow the-intern-bot uses.
 - **Conclusion given to user**: this is very likely a hardcoded anti-loop safeguard (prevents bot-replies-to-bot-replies infinite loops), not an exposed setting — no self-service fix in the CodeRabbit UI. Suggested: (a) ask CodeRabbit support directly to allowlist the-intern-bot's account, or (b) have a human manually @-mention `@coderabbitai` after the-intern-bot posts a fix to trigger a re-review.
 - Purely informational, nothing filed. No further action pending unless user wants to pursue contacting CodeRabbit support.
+
+## 2026-08-02: npm audit set up for worker package — PR #67 (direct API, not dispatcher)
+User asked to set up npm audit for the worker package in the-intern.
+- Found `worker/package.json` had no lockfile at all (only devDependency `wrangler`), so `npm ci`/deterministic audits weren't possible. Generated `worker/package-lock.json` locally (`npm install --package-lock-only`) — confirmed `npm audit --audit-level=high` reports 0 vulnerabilities currently.
+- Added `.github/workflows/audit-worker.yml`: runs `npm audit --audit-level=high` on push/PR touching `worker/package*.json`, plus a weekly (Monday) schedule so newly-disclosed CVEs are caught even without a dependency bump, plus `workflow_dispatch`.
+- **Opened directly via API** (same pattern as #29/#32/#46 — mechanical, well-scoped, no need for the dispatcher pipeline): https://github.com/TheDeepestSpace/the-intern/pull/67. TheDeepestSpace added as reviewer. The new "Audit worker dependencies" check already ran and passed on the PR itself.
+- Not yet confirmed merged — check #67 on a future turn.
