@@ -209,6 +209,30 @@ describe('parse-trigger', () => {
 
       expect(result.clean_prompt).toBe('Please inspect the context and assist with this issue or pull request.');
     });
+
+    it('does not strip key=value text that appears later in the prompt, only leading control tokens', () => {
+      process.env.INPUT_COMMENT_BODY =
+        '@the-intern-bot add `-c model="sol" -c model_reasoning_effort="xhigh"` to the codex exec invocation';
+
+      const result = parseTrigger();
+
+      expect(result.model).toBe('default');
+      expect(result.clean_prompt).toBe(
+        'add `-c model="sol" -c model_reasoning_effort="xhigh"` to the codex exec invocation'
+      );
+    });
+
+    it('extracts leading control tokens regardless of order and leaves the rest of the prompt intact', () => {
+      process.env.INPUT_COMMENT_BODY =
+        '@the-intern-bot effort=high backend=codex model=sol fix backend=legacy references in the docs';
+
+      const result = parseTrigger();
+
+      expect(result.backend).toBe('codex');
+      expect(result.model).toBe('sol');
+      expect(result.effort).toBe('high');
+      expect(result.clean_prompt).toBe('fix backend=legacy references in the docs');
+    });
   });
 
   describe('GITHUB_OUTPUT writing', () => {
