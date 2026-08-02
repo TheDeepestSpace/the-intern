@@ -29,6 +29,7 @@ jobs:
       issue_number: ${{ steps.parse.outputs.issue_number }}
       clean_prompt: ${{ steps.parse.outputs.clean_prompt }}
       installation_id: ${{ steps.parse.outputs.installation_id }}
+      backend: ${{ steps.parse.outputs.backend }}
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@v4
@@ -213,13 +214,21 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # Per-issue serialization (queue: max) keeps a review and a follow-up comment on
+    # the same PR from racing on checkout/push. codex-backend runs additionally need
+    # global serialization: codex proactively rotates its own refresh token in place,
+    # and rotated refresh tokens are typically single-use, so two overlapping
+    # codex-backend runs restoring/persisting CODEX_AUTH_JSON at once would race and
+    # strand each other on a stale token.
     concurrency:
-      group: dispatch-${{ needs.detect-image.outputs.target_repo }}-${{ needs.detect-image.outputs.issue_number }}
+      group: ${{ needs.detect-image.outputs.backend == 'codex' && 'the-intern-codex-auth' || format('dispatch-{0}-{1}', needs.detect-image.outputs.target_repo, needs.detect-image.outputs.issue_number) }}
       cancel-in-progress: false
       queue: max
     container:
       image: ${{ needs.ensure-agent-overlay.outputs.image }}
       options: --user root
+    env:
+      CODEX_HOME: /home/dev/.codex
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@v4
@@ -250,11 +259,31 @@ jobs:
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
 
-      - name: Run Claude (fresh session per trigger, as non-root user)
+      - name: Install script dependencies for Codex auth round-trip
+        if: needs.detect-image.outputs.backend == 'codex'
+        run: npm ci --omit=dev --include=prod --no-audit --no-fund
+
+      # Personal-account Codex login (~/.codex/auth.json) is the only supported auth
+      # path for backend=codex — no API-key fallback. Restores the last-known-good
+      # auth.json from the CODEX_AUTH_JSON secret before the run; the matching
+      # write-back happens in "Persist refreshed Codex auth.json" below, after codex
+      # has had a chance to rotate it. See rotate-codex-auth.js for the full
+      # rationale and the log-masking measures — nothing in either step ever echoes
+      # token contents. Restore failures are logged but non-fatal so the job still
+      # reaches "Run agent" (which then fails cleanly on missing credentials) instead
+      # of aborting silently and skipping the failure-notification flow below.
+      - name: Restore Codex auth.json from secret
+        if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.backend == 'codex'
+        run: node scripts/rotate-codex-auth.js restore || echo "::warning::Codex auth.json restore failed; codex exec will fail without valid credentials"
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+
+      - name: Run agent (fresh session per trigger, as non-root user)
         if: needs.detect-image.outputs.target_repo != ''
         working-directory: target
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          BACKEND: ${{ needs.detect-image.outputs.backend }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ needs.detect-image.outputs.backend != 'codex' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
@@ -311,6 +340,25 @@ jobs:
             fs.writeFileSync("/tmp/extract-result.js", lines.join("\n"));
           '
 
+          # codex exec has no --output-format json like claude; instead it streams
+          # JSONL events to stdout (captured separately, for debugging only) and
+          # writes the final agent message to --output-last-message. This wraps
+          # that final message into the same {result, is_error} shape claude's
+          # own --output-format json produces, so extract-result.js and the
+          # failure-detection step below work unmodified for either backend.
+          node -e '
+            const fs = require("fs");
+            const lines = [
+              "const fs = require(\"fs\");",
+              "const exitCode = process.argv[2];",
+              "let finalMessage = \"\";",
+              "try { finalMessage = fs.readFileSync(\"/tmp/codex-final.txt\", \"utf8\"); } catch (e) {}",
+              "const isError = exitCode !== \"0\" || !finalMessage.trim();",
+              "fs.writeFileSync(\"/tmp/result.json\", JSON.stringify({ result: finalMessage, is_error: isError }, null, 2));",
+            ];
+            fs.writeFileSync("/tmp/normalize-codex-result.js", lines.join("\n"));
+          '
+
           # Ensure dev user exists and owns the workspace so it has write access
           id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
 
@@ -327,9 +375,26 @@ jobs:
           # Written to a file (rather than inlined into `su -c '...'`) to avoid fragile nested-quote
           # escaping — a previous inline version silently truncated the script at the jq filter's
           # single quotes, dropping everything after it.
+          #
+          # Backend invocation differs (claude vs codex), but both are run with their
+          # sandboxing/approval prompts fully disabled — the isolation here comes from
+          # the ephemeral container and non-root dev user, not from the CLI's own
+          # permission system, same trust model on both backends.
           node -e '
             const fs = require("fs");
             const path = require("path");
+            const backend = process.env.BACKEND === "codex" ? "codex" : "claude";
+            const runLines = backend === "codex"
+              ? [
+                  "codex exec --dangerously-bypass-approvals-and-sandbox --json --output-last-message /tmp/codex-final.txt \"$PROMPT\" > /tmp/codex-events.jsonl 2>&1",
+                  "CODEX_EXIT=$?",
+                  "set -e",
+                  "node /tmp/normalize-codex-result.js \"$CODEX_EXIT\" || true",
+                ]
+              : [
+                  "claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions 2>&1 | tee /tmp/result.json",
+                  "set -e",
+                ];
             // Stop-hook backstop (issue #69): wired via a per-user settings.json rather than a
             // .claude/settings.json committed to the target repo, since the target checkout is
             // untrusted and this container is torn down after the run anyway.
@@ -358,18 +423,17 @@ jobs:
               "git rev-parse HEAD > /tmp/stop_hook_baseline_sha.txt 2>/dev/null || true",
               "PROMPT=\"$(cat /tmp/prompt.txt)\"",
               "set +e",
-              "claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions 2>&1 | tee /tmp/result.json",
-              "set -e",
+              ...runLines,
               "node /tmp/extract-result.js || true",
               "",
             ].join("\n");
             fs.writeFileSync("/tmp/run_as_dev.sh", script, { mode: 0o755 });
           '
-          chown dev:dev /tmp/run_as_dev.sh /tmp/extract-result.js
+          chown dev:dev /tmp/run_as_dev.sh /tmp/extract-result.js /tmp/normalize-codex-result.js
 
           env -u TG_BOT_TOKEN -u TG_ADMIN_CHAT_ID su dev -c /tmp/run_as_dev.sh
 
-          # claude's own gh calls are how it normally reports back; if the session
+          # the agent's own gh calls are how it normally reports back; if the session
           # crashed or produced nothing usable, that never happens, so detect that
           # here and notify the admin over Telegram instead of leaving the issue/PR silent.
           if node -e '
@@ -383,9 +447,9 @@ jobs:
               process.exit(1);
             }
           '; then
-            echo "Claude session completed."
+            echo "Agent session completed."
           else
-            echo "::warning::Claude produced no usable output or reported an error"
+            echo "::warning::Agent produced no usable output or reported an error"
             CONTEXT="$TARGET_REPO"
             if [ -n "$ISSUE_NUMBER" ]; then
               CONTEXT="${TARGET_REPO}#${ISSUE_NUMBER}"
@@ -394,6 +458,22 @@ jobs:
             CHAT_ID="$TG_ADMIN_CHAT_ID" MESSAGE_TEXT="$FAILURE_TEXT" node "$GITHUB_WORKSPACE/scripts/send-telegram.js" \
               || echo "::error::failed to send Telegram failure notification for $CONTEXT"
           fi
+
+      # Runs even if the step above failed: OpenAI's CI/CD guidance for this flow is
+      # to write back whatever codex left on disk regardless of run outcome, since a
+      # refresh can happen before a mid-run failure and a rotated refresh token is
+      # typically single-use — skipping the write-back on failure would strand the
+      # account on a dead token. REPO_ADMIN_TOKEN is a separate fine-grained PAT
+      # (Secrets: write, scoped to this repo only) because the installation/
+      # GITHUB_TOKEN credentials used elsewhere in this job cannot manage Actions
+      # secrets. Encryption uses the repo's public key via libsodium (GitHub's
+      # documented approach for the secrets API) so the refreshed token is sealed
+      # before it ever leaves the runner.
+      - name: Persist refreshed Codex auth.json to secret
+        if: always() && needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.backend == 'codex'
+        run: node scripts/rotate-codex-auth.js persist
+        env:
+          REPO_ADMIN_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
 
       - name: Commit session summary
         if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''

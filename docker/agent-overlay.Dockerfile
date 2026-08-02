@@ -1,6 +1,6 @@
-# Thin overlay adding agent tooling (node, claude, gh, jq) on top of a target
-# repo's own devcontainer image, so the-intern-bot can run there even if that
-# image was built for the target repo's own CI needs. Installs are static
+# Thin overlay adding agent tooling (node, claude, codex, gh, jq) on top of a
+# target repo's own devcontainer image, so the-intern-bot can run there even if
+# that image was built for the target repo's own CI needs. Installs are static
 # binaries/curl rather than a package manager, since the base image's distro
 # (or presence of one at all) isn't known ahead of time.
 ARG BASE_IMAGE
@@ -15,6 +15,8 @@ ARG NODE_TARBALL_HASH_ARM64="f3d5a797b5d210ce8e2cb265544c8e482eaedcb8aa409a8b46d
 ARG GH_CLI_VERSION=2.63.2
 ARG GH_TARBALL_HASH_X64="912fdb1ca29cb005fb746fc5d2b787a289078923a29d0f9ec19a0b00272ded00  gh_${GH_CLI_VERSION}_linux_amd64.tar.gz"
 ARG GH_TARBALL_HASH_ARM64="0f31e2a8549c64b5c1679f0b99ce5e0dac7c91da9e86f6246adb8805b0f0b4bb  gh_${GH_CLI_VERSION}_linux_arm64.tar.gz"
+
+ARG CODEX_VERSION=0.146.0
 
 ARG JQ_VERSION=1.7.1
 ARG JQ_BINARY_HASH_X64="5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5  jq-linux-amd64"
@@ -36,6 +38,8 @@ RUN if ! command -v node >/dev/null 2>&1; then \
     fi
 
 RUN command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code
+
+RUN command -v codex >/dev/null 2>&1 || npm install -g @openai/codex@${CODEX_VERSION}
 
 RUN if ! command -v gh >/dev/null 2>&1; then \
       ARCH="$(uname -m)"; \
