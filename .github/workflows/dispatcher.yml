@@ -138,7 +138,7 @@ jobs:
 
       - name: Login to GHCR to pull base image
         if: steps.fallback_check.outputs.is_fallback != 'true'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: x-access-token
@@ -176,7 +176,7 @@ jobs:
 
       - name: Login to GHCR to check overlay image
         if: steps.fallback_check.outputs.is_fallback != 'true'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
