@@ -1,11 +1,13 @@
 # Conversation Summary
 
-## 2026-08-02: Researched Stop-hook fix for premature-exit bug — proposed, awaiting go-ahead
-User shared a screenshot of the svsch#88 retry comment (from the 2026-08-01 "svsch#88 dispatch wasted 10min/$5.10" saga — [[the-intern#54]] added a prompt-only "don't background and end-turn" instruction to shared-style.md) and asked to research online how to actually stop Claude from exiting prematurely, since the earlier fix was clearly just a nudge, not a guarantee.
+## 2026-08-02: Stop-hook backstop for premature-exit bug — issue #69 filed and dispatched
+User shared a screenshot of the svsch#88 retry comment (from the 2026-08-01 "svsch#88 dispatch wasted 10min/$5.10" saga — [[the-intern#54]] added a prompt-only "don't background and end-turn" instruction to shared-style.md) and asked to research online how to actually stop Claude from exiting prematurely, since the earlier fix was clearly just a nudge, not a guarantee. After the research (below), user said "yeah file and issue and kick off a fix".
 - Researched via WebSearch: Claude Code has a **Stop hook** built exactly for this — fires when Claude tries to end its turn, can return exit code 2 (or `{"decision":"block","reason":...}`) to force it to keep working instead of exiting. Must check the `stop_hook_active` flag to avoid infinite-loop forcing. Docs: https://docs.claude.com/en/docs/claude-code/hooks
 - Also confirmed via Claude Code's own issue tracker: `claude -p` headless sessions already kill any backgrounded shell ~5s after printing the result — so even the current no-op-but-successful-exit failure mode is somewhat contained (nothing survives), but the real fix is preventing the empty-turn exit in the first place, which only a Stop hook (not a prompt instruction) can guarantee.
-- **Proposed to user via Telegram**: file an issue on the-intern to add a Stop-hook script to `dispatcher.yml` that checks whether the turn actually produced a commit/branch/PR (or result.json's stop_reason mentions waiting/background/later) and blocks the exit if not, as a hard backstop on top of the existing shared-style.md instruction. **Awaiting go-ahead** — nothing filed yet.
-- Incidentally noted the svsch#88 retry (from the screenshot, re-triggered by user's "work on this" comment at 2026-08-02T00:55:25Z) was still in-progress dispatcher run 30726104604 at the time of this turn — not yet confirmed whether it succeeded this time; check on a future turn.
+- **Filed**: https://github.com/TheDeepestSpace/the-intern/issues/69 — Stop hook + check script wired into the dispatcher's Claude invocation, blocking the turn from ending if the result looks like it's waiting/backgrounding with nothing actually landed (no commit/branch/PR produced), checking `stop_hook_active` to avoid an infinite block loop. Keeps the existing shared-style.md instruction as a first line of defense, this is an additional hard backstop.
+- **Kicked off dispatcher**: https://github.com/TheDeepestSpace/the-intern/issues/69#issuecomment-5154370715
+- Not yet confirmed complete — check #69 for a PR on a future turn.
+- Incidentally noted the svsch#88 retry (from the screenshot, re-triggered by user's "work on this" comment at 2026-08-02T00:55:25Z) was still in-progress dispatcher run 30726104604 at the time of an earlier turn — not yet confirmed whether it succeeded; check on a future turn.
 
 ## 2026-08-02: SHA-pinning GitHub Actions — implemented in both repos, PRs open
 User said "yeah do that; both in the-intern and svsch repos" (go-ahead on the recommendation below).
