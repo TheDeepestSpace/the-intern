@@ -392,7 +392,7 @@ jobs:
             const backend = process.env.BACKEND === "codex" ? "codex" : "claude";
             const runLines = backend === "codex"
               ? [
-                  "codex exec --dangerously-bypass-approvals-and-sandbox --json --output-last-message /tmp/codex-final.txt \"$PROMPT\" > /tmp/codex-events.jsonl 2>&1",
+                  "codex exec --dangerously-bypass-approvals-and-sandbox -c model=\\\"sol\\\" -c model_reasoning_effort=\\\"xhigh\\\" --json --output-last-message /tmp/codex-final.txt \"$PROMPT\" > /tmp/codex-events.jsonl 2>&1",
                   "CODEX_EXIT=$?",
                   "set -e",
                   "node /tmp/normalize-codex-result.js \"$CODEX_EXIT\" || true",
