@@ -54,10 +54,11 @@ function getLastAssistantMessage(input) {
       }
       const content = entry && entry.type === 'assistant' && entry.message && entry.message.content;
       if (Array.isArray(content)) {
-        return content
+        const text = content
           .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
           .map((block) => block.text)
           .join('\n');
+        if (text.trim()) return text;
       }
     }
   } catch (err) {

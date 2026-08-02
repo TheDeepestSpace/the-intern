@@ -333,7 +333,7 @@ jobs:
             const agentInfraDir = path.dirname(process.env.TARGET_DIR || "");
             const stopHookScript = path.join(agentInfraDir, "scripts", "check-stop-hook.js");
             const stopHookSettings = JSON.stringify({
-              hooks: { Stop: [{ type: "command", command: `node ${stopHookScript}`, timeout: 30 }] },
+              hooks: { Stop: [{ hooks: [{ type: "command", command: `node ${stopHookScript}`, timeout: 30 }] }] },
             }, null, 2);
             const script = [
               "#!/bin/bash",
