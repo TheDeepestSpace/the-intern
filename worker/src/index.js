@@ -65,7 +65,8 @@ async function handleGitHub(request, env) {
   // pull_request_review_comment delivery anyway. This doesn't catch a review
   // that has both a mentioning body and a mentioning inline comment — that
   // still double-fires — but avoids adding a KV dependency for the common case.
-  if (eventType === 'pull_request_review' && !payload.review?.body) {
+  const reviewBody = payload.review?.body;
+  if (eventType === 'pull_request_review' && (typeof reviewBody !== 'string' || reviewBody.trim() === '')) {
     return new Response('ignored: review has no top-level body (inline-only review)', { status: 200 });
   }
   if (eventType === 'pull_request_review_comment' && !payload.comment?.pull_request_review_id) {
