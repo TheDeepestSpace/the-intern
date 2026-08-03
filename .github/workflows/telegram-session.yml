@@ -89,9 +89,15 @@ jobs:
           BACKEND: ${{ steps.parse.outputs.backend }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ steps.parse.outputs.backend != 'codex' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
           CLEAN_TEXT: ${{ steps.parse.outputs.clean_text }}
+          RETRY_SOURCE: telegram
+          WORKFLOW_FILE: telegram-session.yml
+          DISPATCH_REF: ${{ github.ref_name }}
+          MAX_RETRIES: 3
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           export MESSAGE="$CLEAN_TEXT"
           export CHAT_ID="$(jq -r '.client_payload.chat_id // empty' "$GITHUB_EVENT_PATH")"
@@ -208,6 +214,12 @@ jobs:
               claude -p "$PROMPT" --output-format json --dangerously-skip-permissions 2>&1 | tee result.json || true
             fi
           '
+
+          # See dispatcher.yml's matching step: detects a Claude usage-limit stall
+          # (issue #100) and queues a pending-retries.json entry instead of leaving
+          # this conversation silently stuck, or clears/pings on resume.
+          RESULT_FILE=result.json RETRY_KEY="telegram:${CHAT_ID}" RETRY_CHAT_ID="$CHAT_ID" \
+            node "$GITHUB_WORKSPACE/scripts/handle-agent-outcome.js"
 
       # Runs even if the step above failed — see dispatcher.yml's matching step for
       # why a mid-run failure can still leave a rotated, single-use refresh token

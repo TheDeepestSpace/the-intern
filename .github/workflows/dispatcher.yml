@@ -313,6 +313,12 @@ jobs:
           SUMMARY_CONTEXT: ${{ steps.summary_context.outputs.summary }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
+          RETRY_KEY: dispatcher:${{ needs.detect-image.outputs.target_repo }}#${{ needs.detect-image.outputs.issue_number }}
+          RETRY_SOURCE: dispatcher
+          WORKFLOW_FILE: dispatcher.yml
+          DISPATCH_REF: ${{ github.ref_name }}
+          MAX_RETRIES: 3
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           export COMMENT_BODY="$CLEAN_PROMPT"
           export PRIOR_CONTEXT=$(cat ../prior_summary.txt 2>/dev/null || echo "$SUMMARY_CONTEXT")
@@ -456,29 +462,12 @@ jobs:
 
           # the agent's own gh calls are how it normally reports back; if the session
           # crashed or produced nothing usable, that never happens, so detect that
-          # here and notify the admin over Telegram instead of leaving the issue/PR silent.
-          if node -e '
-            const fs = require("fs");
-            const raw = fs.existsSync("/tmp/result.json") ? fs.readFileSync("/tmp/result.json", "utf8") : "";
-            if (!raw.trim()) process.exit(1);
-            try {
-              const data = JSON.parse(raw);
-              process.exit(data && data.is_error ? 1 : 0);
-            } catch (e) {
-              process.exit(1);
-            }
-          '; then
-            echo "Agent session completed."
-          else
-            echo "::warning::Agent produced no usable output or reported an error"
-            CONTEXT="$TARGET_REPO"
-            if [ -n "$ISSUE_NUMBER" ]; then
-              CONTEXT="${TARGET_REPO}#${ISSUE_NUMBER}"
-            fi
-            FAILURE_TEXT="⚠️ the-intern-bot ran into an error and could not complete a request on ${CONTEXT}. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            CHAT_ID="$TG_ADMIN_CHAT_ID" MESSAGE_TEXT="$FAILURE_TEXT" node "$GITHUB_WORKSPACE/scripts/send-telegram.js" \
-              || echo "::error::failed to send Telegram failure notification for $CONTEXT"
-          fi
+          # here. handle-agent-outcome.js also checks whether the failure looks like
+          # a Claude usage-limit stall (issue #100): if so it queues an auto-retry on
+          # the pending-retries branch instead of the generic failure notification,
+          # and separately clears any queued retry (with a "resumed" ping) when this
+          # run succeeded.
+          RESULT_FILE=/tmp/result.json node "$GITHUB_WORKSPACE/scripts/handle-agent-outcome.js"
 
       # Runs even if the step above failed: OpenAI's CI/CD guidance for this flow is
       # to write back whatever codex left on disk regardless of run outcome, since a
