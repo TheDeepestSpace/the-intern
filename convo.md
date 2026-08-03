@@ -78,3 +78,6 @@ Filed **the-intern#97** (https://github.com/TheDeepestSpace/the-intern/issues/97
 
 ## 2026-08-03: bot identity
 User asked the bot's name and creator. Answered: The Intern (`@the-intern-bot`), powered by OpenAI Codex, with the Telegram/GitHub integration built and configured by TheDeepestSpace.
+
+## 2026-08-03: explained bot reply to CodeRabbit on the-intern PR #98
+Confirmed it was not triggered by CodeRabbit and did not bypass the `ALLOWED_USERS` webhook gate. Dispatcher run 30783005096 was triggered at 03:55:22Z by the bot's explicit `@the-intern-bot backend=codex` comment on issue #97. That same Codex session opened PR #98 at 04:03, remained active until 04:11, noticed CodeRabbit's inline finding at 04:05 during its normal PR follow-through, committed fix 71416b7 at 04:08:17, and replied at 04:08:23. PR #96's dedicated CodeRabbit-review dispatch was still unmerged and therefore uninvolved.
