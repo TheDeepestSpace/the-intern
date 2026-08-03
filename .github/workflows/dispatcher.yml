@@ -29,7 +29,7 @@ jobs:
       issue_number: ${{ steps.parse.outputs.issue_number }}
       clean_prompt: ${{ steps.parse.outputs.clean_prompt }}
       installation_id: ${{ steps.parse.outputs.installation_id }}
-      backend: ${{ steps.parse.outputs.backend }}
+      backend: ${{ steps.resolve_backend.outputs.backend }}
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -44,6 +44,21 @@ jobs:
           INPUT_PR_NUMBER: ${{ github.event.inputs.pr_number }}
           INPUT_COMMENT_BODY: ${{ github.event.inputs.comment_body }}
           INPUT_INSTALLATION_ID: ${{ github.event.inputs.installation_id }}
+
+      - name: Fetch persisted backend
+        id: persisted_backend
+        run: node scripts/manage-summaries.js backend
+        env:
+          TARGET_REPO: ${{ steps.parse.outputs.target_repo }}
+          ISSUE_NUMBER: ${{ steps.parse.outputs.issue_number }}
+
+      - name: Resolve backend
+        id: resolve_backend
+        run: node scripts/manage-summaries.js resolve-backend
+        env:
+          REQUESTED_BACKEND: ${{ steps.parse.outputs.backend }}
+          BACKEND_EXPLICIT: ${{ steps.parse.outputs.backend_explicit }}
+          PERSISTED_BACKEND: ${{ steps.persisted_backend.outputs.backend }}
 
       - name: Mint temporary token for image check
         id: temp_token
@@ -487,6 +502,7 @@ jobs:
         env:
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
+          BACKEND: ${{ needs.detect-image.outputs.backend }}
           CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
           RESULT_FILE: target/session_result.txt
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -206,6 +206,7 @@ describe('parse-trigger', () => {
       const result = parseTrigger();
 
       expect(result.backend).toBe('codex');
+      expect(result.backend_explicit).toBe(true);
       expect(result.model).toBe('gpt-5');
       expect(result.effort).toBe('high');
       expect(result.clean_prompt).toBe('please refactor the parser');
@@ -217,6 +218,7 @@ describe('parse-trigger', () => {
       const result = parseTrigger();
 
       expect(result.backend).toBe('claude');
+      expect(result.backend_explicit).toBe(false);
       expect(result.model).toBe('default');
       expect(result.effort).toBe('default');
       expect(result.clean_prompt).toBe('just look at this');

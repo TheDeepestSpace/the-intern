@@ -57,6 +57,7 @@ function parseTrigger() {
 
   // Parse backend/model/effort parameters from commentBody if present
   let backend = 'claude';
+  let backendExplicit = false;
   let model = 'default';
   let effort = 'default';
 
@@ -81,7 +82,10 @@ function parseTrigger() {
     if (matchEffort) effort = matchEffort[1];
 
     const matchBackend = tokenRun.match(/\bbackend=(\S+)/i);
-    if (matchBackend) backend = matchBackend[1];
+    if (matchBackend) {
+      backend = matchBackend[1];
+      backendExplicit = true;
+    }
 
     cleanComment = cleanComment.slice(tokenRun.length).trim();
   }
@@ -99,6 +103,7 @@ function parseTrigger() {
     clean_prompt: cleanComment,
     installation_id: installationId,
     backend,
+    backend_explicit: backendExplicit,
     model,
     effort,
     event_type: eventType,

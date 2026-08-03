@@ -3,6 +3,8 @@ const crypto = require('crypto');
 const { execSync } = require('child_process');
 const path = require('path');
 
+const SUPPORTED_BACKENDS = new Set(['claude', 'codex']);
+
 function sanitizeSlug(repo) {
   return repo.replace(/[^a-zA-Z0-9_-]/g, '-');
 }
@@ -31,8 +33,24 @@ function ensureSafeDirectory() {
   runGit(`config --global --add safe.directory "${process.cwd()}"`, { allowFailure: true });
 }
 
-function fetchSummary(targetRepo, issueNumber) {
-  if (!targetRepo || !issueNumber) return '';
+function normalizeBackend(backend) {
+  const normalized = String(backend || '').trim().toLowerCase();
+  return SUPPORTED_BACKENDS.has(normalized) ? normalized : '';
+}
+
+function writeOutput(name, value) {
+  if (!process.env.GITHUB_OUTPUT) return;
+
+  if (typeof value === 'string' && value.includes('\n')) {
+    const delimiter = `EOF_${Math.random().toString(36).substring(2, 10)}`;
+    fs.appendFileSync(process.env.GITHUB_OUTPUT, `${name}<<${delimiter}\n${value}\n${delimiter}\n`);
+  } else {
+    fs.appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${value}\n`);
+  }
+}
+
+function fetchLatestSummary(targetRepo, issueNumber) {
+  if (!targetRepo || !issueNumber) return { content: '', filename: '' };
   ensureSafeDirectory();
   const branchName = getBranchName(targetRepo, issueNumber);
 
@@ -45,26 +63,46 @@ function fetchSummary(targetRepo, issueNumber) {
   const files = runGit(`ls-tree -r --name-only ${branchName}`, { allowFailure: true });
   if (!files) {
     console.log(`No prior summary branch found for ${branchName}`);
-    return '';
+    return { content: '', filename: '' };
   }
 
   const fileList = files.split('\n').filter(f => f.endsWith('.md')).sort();
-  if (fileList.length === 0) return '';
+  if (fileList.length === 0) return { content: '', filename: '' };
 
-  const latestFile = fileList[fileList.length - 1];
-  const content = runGit(`show ${branchName}:${latestFile}`, { allowFailure: true });
+  const filename = fileList[fileList.length - 1];
+  const content = runGit(`show ${branchName}:${filename}`, { allowFailure: true });
 
-  console.log(`Retrieved prior summary from ${latestFile}`);
+  console.log(`Retrieved prior summary from ${filename}`);
+  return { content, filename };
+}
 
-  if (process.env.GITHUB_OUTPUT) {
-    const delimiter = `EOF_${Math.random().toString(36).substring(2, 10)}`;
-    fs.appendFileSync(process.env.GITHUB_OUTPUT, `summary<<${delimiter}\n${content}\n${delimiter}\n`);
-  }
+function fetchSummary(targetRepo, issueNumber) {
+  const { content } = fetchLatestSummary(targetRepo, issueNumber);
+  if (content) writeOutput('summary', content);
 
   return content;
 }
 
-function saveSummary(targetRepo, issueNumber, promptText, resultText) {
+function fetchBackend(targetRepo, issueNumber) {
+  const { content } = fetchLatestSummary(targetRepo, issueNumber);
+  const match = content.match(/^- \*\*Backend\*\*:\s*(\S+)\s*$/mi);
+  const backend = normalizeBackend(match?.[1]);
+
+  if (backend) {
+    console.log(`Retrieved persisted backend: ${backend}`);
+    writeOutput('backend', backend);
+  }
+
+  return backend;
+}
+
+function resolveBackend(requestedBackend, backendExplicit, persistedBackend) {
+  const isExplicit = backendExplicit === true || backendExplicit === 'true';
+  const candidate = isExplicit ? requestedBackend : persistedBackend;
+  return normalizeBackend(candidate) || 'claude';
+}
+
+function saveSummary(targetRepo, issueNumber, promptText, resultText, backend) {
   if (!targetRepo || !issueNumber) return;
   if (!/^[1-9]\d*$/.test(String(issueNumber))) {
     console.error(`Refusing to save summary: invalid issue number "${issueNumber}"`);
@@ -76,6 +114,7 @@ function saveSummary(targetRepo, issueNumber, promptText, resultText) {
   const repoSlug = sanitizeSlug(targetRepo);
   const dirPath = path.join('summaries', repoSlug, String(issueNumber));
   const hasToken = !!(process.env.GITHUB_TOKEN || process.env.GH_TOKEN);
+  const effectiveBackend = normalizeBackend(backend) || 'claude';
 
   // Concurrent runs (e.g. fetch + save jobs racing on the same issue) can push
   // to this branch between our fetch and our push, so a couple of retries
@@ -113,6 +152,7 @@ function saveSummary(targetRepo, issueNumber, promptText, resultText) {
 - **Timestamp**: ${timestamp}
 - **Target Repo**: ${targetRepo}
 - **Issue/PR**: #${issueNumber}
+- **Backend**: ${effectiveBackend}
 
 ## Prompt / Request
 ${promptText || 'N/A'}
@@ -159,6 +199,15 @@ if (require.main === module) {
 
   if (mode === 'fetch') {
     fetchSummary(targetRepo, issueNumber);
+  } else if (mode === 'backend') {
+    fetchBackend(targetRepo, issueNumber);
+  } else if (mode === 'resolve-backend') {
+    const backend = resolveBackend(
+      process.env.REQUESTED_BACKEND,
+      process.env.BACKEND_EXPLICIT,
+      process.env.PERSISTED_BACKEND
+    );
+    writeOutput('backend', backend);
   } else if (mode === 'save') {
     const promptText = process.env.CLEAN_PROMPT;
     const resultFile = process.env.RESULT_FILE;
@@ -166,8 +215,8 @@ if (require.main === module) {
     if (resultFile && fs.existsSync(resultFile)) {
       resultText = fs.readFileSync(resultFile, 'utf8');
     }
-    saveSummary(targetRepo, issueNumber, promptText, resultText);
+    saveSummary(targetRepo, issueNumber, promptText, resultText, process.env.BACKEND);
   }
 }
 
-module.exports = { fetchSummary, saveSummary };
+module.exports = { fetchBackend, fetchSummary, resolveBackend, saveSummary };
