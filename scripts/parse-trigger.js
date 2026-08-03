@@ -58,21 +58,28 @@ function parseTrigger() {
     .replace(/@the-intern-bot\s*(claude|codex|agy)?\s*/gi, '')
     .trim();
 
-  // Extract key=value options like model=claude-3-7-sonnet effort=high backend=claude
-  const matchModel = cleanComment.match(/\bmodel=([^\s]+)/i);
-  if (matchModel) model = matchModel[1];
+  // Extract key=value options like model=claude-3-7-sonnet effort=high backend=claude.
+  // These only count as control tokens when they form a leading run right after the
+  // mention - matching anywhere in the string would also strip incidental key=value
+  // text later in the prompt (e.g. a quoted shell flag like `-c model="sol"`).
+  const leadingTokens = cleanComment.match(/^(?:(?:model|effort|backend)=\S+\s*)+/i);
 
-  const matchEffort = cleanComment.match(/\beffort=([^\s]+)/i);
-  if (matchEffort) effort = matchEffort[1];
+  if (leadingTokens) {
+    const tokenRun = leadingTokens[0];
 
-  const matchBackend = cleanComment.match(/\bbackend=([^\s]+)/i);
-  if (matchBackend) backend = matchBackend[1];
+    const matchModel = tokenRun.match(/\bmodel=(\S+)/i);
+    if (matchModel) model = matchModel[1];
 
-  // Remove key=value parameters from clean comment to get prompt
-  cleanComment = cleanComment
-    .replace(/\b(model|effort|backend)=([^\s]+)/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+    const matchEffort = tokenRun.match(/\beffort=(\S+)/i);
+    if (matchEffort) effort = matchEffort[1];
+
+    const matchBackend = tokenRun.match(/\bbackend=(\S+)/i);
+    if (matchBackend) backend = matchBackend[1];
+
+    cleanComment = cleanComment.slice(tokenRun.length).trim();
+  }
+
+  cleanComment = cleanComment.replace(/\s+/g, ' ').trim();
 
   if (!cleanComment) {
     cleanComment = 'Please inspect the context and assist with this issue or pull request.';
