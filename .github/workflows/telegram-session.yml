@@ -9,18 +9,31 @@ permissions:
 jobs:
   respond:
     runs-on: ubuntu-latest
+    # codex-backend runs need global serialization across the whole repo (not just
+    # per-chat): codex proactively rotates its own refresh token in place, and
+    # rotated refresh tokens are typically single-use, so an overlapping codex run
+    # from here and from dispatcher.yml restoring/persisting CODEX_AUTH_JSON at once
+    # would race and strand each other on a stale token. `steps.*` outputs aren't
+    # available yet when this group is resolved, so the backend keyword is matched
+    # straight out of the raw event text.
     concurrency:
-      group: telegram-${{ github.event.client_payload.chat_id }}
+      group: ${{ contains(github.event.client_payload.text, 'backend=codex') && 'the-intern-codex-auth' || format('telegram-{0}', github.event.client_payload.chat_id) }}
       cancel-in-progress: false
       queue: max
     container:
       image: ghcr.io/thedeepestspace/the-intern-dev:latest
       options: --user root
+    env:
+      CODEX_HOME: /home/dev/.codex
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+
+      - name: Parse backend from Telegram message
+        id: parse
+        run: node scripts/parse-telegram-trigger.js
 
       - name: Mint installation token
         id: token
@@ -57,15 +70,30 @@ jobs:
             cd ..
           fi
 
-      - name: Run Claude (fresh session with convo.md context)
+      - name: Install script dependencies for Codex auth round-trip
+        if: steps.parse.outputs.backend == 'codex'
+        run: npm ci --omit=dev --include=prod --no-audit --no-fund
+
+      # See dispatcher.yml's matching step for the full rationale — same
+      # personal-account Codex login round-trip, just triggered from Telegram
+      # instead of a GH comment.
+      - name: Restore Codex auth.json from secret
+        if: steps.parse.outputs.backend == 'codex'
+        run: node scripts/rotate-codex-auth.js restore || echo "::warning::Codex auth.json restore failed; codex exec will fail without valid credentials"
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+
+      - name: Run agent (fresh session with convo.md context)
         working-directory: tg-state
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          BACKEND: ${{ steps.parse.outputs.backend }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ steps.parse.outputs.backend != 'codex' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          CLEAN_TEXT: ${{ steps.parse.outputs.clean_text }}
         run: |
-          export MESSAGE="$(jq -r '.client_payload.text // empty' "$GITHUB_EVENT_PATH")"
+          export MESSAGE="$CLEAN_TEXT"
           export CHAT_ID="$(jq -r '.client_payload.chat_id // empty' "$GITHUB_EVENT_PATH")"
           export REPLY_TO_MESSAGE_ID="$(jq -r '.client_payload.message_id // empty' "$GITHUB_EVENT_PATH")"
           export PHOTO_FILE_ID="$(jq -r '.client_payload.photo_file_id // empty' "$GITHUB_EVENT_PATH")"
@@ -138,8 +166,27 @@ jobs:
             fs.writeFileSync("/tmp/prompt.txt", prompt);
           '
 
+          # codex exec has no --output-format json like claude; instead it streams
+          # JSONL events to stdout (captured separately, for debugging only) and
+          # writes the final agent message to --output-last-message. This wraps
+          # that final message into the same {result, is_error} shape claude's
+          # own --output-format json produces, mirroring dispatcher.yml's
+          # normalize-codex-result.js.
+          node -e '
+            const fs = require("fs");
+            const lines = [
+              "const fs = require(\"fs\");",
+              "const exitCode = process.argv[2];",
+              "let finalMessage = \"\";",
+              "try { finalMessage = fs.readFileSync(\"/tmp/codex-final.txt\", \"utf8\"); } catch (e) {}",
+              "const isError = exitCode !== \"0\" || !finalMessage.trim();",
+              "fs.writeFileSync(\"/tmp/result.json\", JSON.stringify({ result: finalMessage, is_error: isError }, null, 2));",
+            ];
+            fs.writeFileSync("/tmp/normalize-codex-result.js", lines.join("\n"));
+          '
+
           id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
-          chown -R dev:dev . /home/dev /tmp/prompt.txt 2>/dev/null || true
+          chown -R dev:dev . /home/dev /tmp/prompt.txt /tmp/normalize-codex-result.js 2>/dev/null || true
           su dev -c '
             export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"
             export TG_BOT_TOKEN="$TG_BOT_TOKEN"
@@ -147,12 +194,29 @@ jobs:
             export REPLY_TO_MESSAGE_ID="$REPLY_TO_MESSAGE_ID"
             export GH_TOKEN="$GH_TOKEN"
             export GITHUB_TOKEN="$GITHUB_TOKEN"
+            export BACKEND="$BACKEND"
             export HOME="/home/dev"
             cd "$(pwd)"
-            
+
             PROMPT="$(cat /tmp/prompt.txt)"
-            claude -p "$PROMPT" --output-format json --dangerously-skip-permissions 2>&1 | tee result.json || true
+            if [ "$BACKEND" = "codex" ]; then
+              codex exec --dangerously-bypass-approvals-and-sandbox --json --output-last-message /tmp/codex-final.txt "$PROMPT" > /tmp/codex-events.jsonl 2>&1
+              CODEX_EXIT=$?
+              node /tmp/normalize-codex-result.js "$CODEX_EXIT" || true
+              cp /tmp/result.json result.json 2>/dev/null || true
+            else
+              claude -p "$PROMPT" --output-format json --dangerously-skip-permissions 2>&1 | tee result.json || true
+            fi
           '
+
+      # Runs even if the step above failed — see dispatcher.yml's matching step for
+      # why a mid-run failure can still leave a rotated, single-use refresh token
+      # on disk that needs writing back regardless of outcome.
+      - name: Persist refreshed Codex auth.json to secret
+        if: always() && steps.parse.outputs.backend == 'codex'
+        run: node scripts/rotate-codex-auth.js persist
+        env:
+          REPO_ADMIN_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
 
       - name: Commit updated convo.md to telegram branch
         working-directory: tg-state
