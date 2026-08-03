@@ -165,9 +165,7 @@ describe('manage-summaries', () => {
       const saver = newWorkDir('work-save-latest-backend');
       process.chdir(saver);
       process.env.GITHUB_TOKEN = 'fake-token-for-push';
-      const now = vi.spyOn(Date, 'now')
-        .mockReturnValueOnce(1000)
-        .mockReturnValueOnce(2000);
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1000);
 
       try {
         saveSummary('acme/widgets', '14', 'first prompt', 'first result', 'codex');

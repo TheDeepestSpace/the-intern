@@ -57,16 +57,16 @@ function fetchLatestSummary(targetRepo, issueNumber) {
   // Fetch branch from origin if available (it may legitimately not exist yet)
   runGit(`fetch origin ${branchName}:${branchName}`, { allowFailure: true });
 
-  const summaryDir = path.join(process.cwd(), '.summaries', sanitizeSlug(targetRepo), String(issueNumber));
-
-  // Checkout summary files from branch into temporary path if branch exists
-  const files = runGit(`ls-tree -r --name-only ${branchName}`, { allowFailure: true });
+  // Each save adds one summary in its own commit. Read the file added by the
+  // branch tip so same-millisecond filenames remain ordered by persistence,
+  // not by their random UUID suffixes.
+  const files = runGit(`diff-tree --root --no-commit-id --name-only -r ${branchName}`, { allowFailure: true });
   if (!files) {
     console.log(`No prior summary branch found for ${branchName}`);
     return { content: '', filename: '' };
   }
 
-  const fileList = files.split('\n').filter(f => f.endsWith('.md')).sort();
+  const fileList = files.split('\n').filter(f => f.endsWith('.md'));
   if (fileList.length === 0) return { content: '', filename: '' };
 
   const filename = fileList[fileList.length - 1];
