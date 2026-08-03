@@ -14,6 +14,28 @@ export default {
   },
 };
 
+// Shared dispatch POST used by the generic flow, handleCheckSuite, and
+// handleCodeRabbitReview: resolves the configured owner/repo, sets the
+// common headers, and sends eventType + rawPayload.
+async function dispatchRepoEvent(env, token, eventType, rawPayload) {
+  const owner = env.AGENT_INFRA_OWNER || 'TheDeepestSpace';
+  const repo = env.AGENT_INFRA_REPO || 'the-intern';
+
+  return fetch(
+    `https://api.github.com/repos/${owner}/${repo}/dispatches`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'the-intern-bot-relay',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ event_type: eventType, client_payload: { raw: rawPayload } }),
+    }
+  );
+}
+
 async function handleGitHub(request, env) {
   const body = await request.text();
   const signature = request.headers.get('X-Hub-Signature-256') || '';
@@ -110,25 +132,7 @@ async function handleGitHub(request, env) {
   try {
     const token = await getInstallationToken(env, installationId);
 
-    const owner = env.AGENT_INFRA_OWNER || 'TheDeepestSpace';
-    const repo = env.AGENT_INFRA_REPO || 'the-intern';
-
-    const dispatchRes = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/dispatches`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/vnd.github+json',
-          'User-Agent': 'the-intern-bot-relay',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          event_type: eventType,
-          client_payload: { raw: payload },
-        }),
-      }
-    );
+    const dispatchRes = await dispatchRepoEvent(env, token, eventType, payload);
 
     if (!dispatchRes.ok) {
       const errorText = await dispatchRes.text();
@@ -169,9 +173,6 @@ async function handleCheckSuite(payload, env) {
   try {
     const token = await getInstallationToken(env, installationId);
 
-    const owner = env.AGENT_INFRA_OWNER || 'TheDeepestSpace';
-    const repo = env.AGENT_INFRA_REPO || 'the-intern';
-
     let dispatched = 0;
     for (const { number } of pullRequests) {
       const prRes = await fetch(
@@ -189,29 +190,12 @@ async function handleCheckSuite(payload, env) {
 
       if ((pullRequest.user?.login || '').toLowerCase() !== botLogin) continue;
 
-      const dispatchRes = await fetch(
-        `https://api.github.com/repos/${owner}/${repo}/dispatches`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: 'application/vnd.github+json',
-            'User-Agent': 'the-intern-bot-relay',
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            event_type: 'ci_failure',
-            client_payload: {
-              raw: {
-                repository: payload.repository,
-                pull_request: pullRequest,
-                check_suite: checkSuite,
-                installation: payload.installation,
-              },
-            },
-          }),
-        }
-      );
+      const dispatchRes = await dispatchRepoEvent(env, token, 'ci_failure', {
+        repository: payload.repository,
+        pull_request: pullRequest,
+        check_suite: checkSuite,
+        installation: payload.installation,
+      });
 
       if (!dispatchRes.ok) {
         const errorText = await dispatchRes.text();
@@ -256,32 +240,12 @@ async function handleCodeRabbitReview(payload, env) {
   try {
     const token = await getInstallationToken(env, installationId);
 
-    const owner = env.AGENT_INFRA_OWNER || 'TheDeepestSpace';
-    const repo = env.AGENT_INFRA_REPO || 'the-intern';
-
-    const dispatchRes = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/dispatches`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/vnd.github+json',
-          'User-Agent': 'the-intern-bot-relay',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          event_type: 'coderabbit_review',
-          client_payload: {
-            raw: {
-              repository: payload.repository,
-              pull_request: { number: payload.pull_request?.number },
-              coderabbit_review: { html_url: payload.review?.html_url },
-              installation: payload.installation,
-            },
-          },
-        }),
-      }
-    );
+    const dispatchRes = await dispatchRepoEvent(env, token, 'coderabbit_review', {
+      repository: { full_name: payload.repository?.full_name },
+      pull_request: { number: payload.pull_request?.number },
+      coderabbit_review: { html_url: payload.review?.html_url },
+      installation: { id: installationId },
+    });
 
     if (!dispatchRes.ok) {
       const errorText = await dispatchRes.text();
