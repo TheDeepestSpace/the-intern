@@ -218,8 +218,12 @@ jobs:
           # See dispatcher.yml's matching step: detects a Claude usage-limit stall
           # (issue #100) and queues a pending-retries.json entry instead of leaving
           # this conversation silently stuck, or clears/pings on resume.
-          RESULT_FILE=result.json RETRY_KEY="telegram:${CHAT_ID}" RETRY_CHAT_ID="$CHAT_ID" \
-            node "$GITHUB_WORKSPACE/scripts/handle-agent-outcome.js"
+          if [ -z "$CHAT_ID" ]; then
+            echo "::warning::CHAT_ID is empty; skipping usage-limit retry handling to avoid a shared RETRY_KEY."
+          else
+            RESULT_FILE=result.json RETRY_KEY="telegram:${CHAT_ID}" RETRY_CHAT_ID="$CHAT_ID" \
+              node "$GITHUB_WORKSPACE/scripts/handle-agent-outcome.js"
+          fi
 
       # Runs even if the step above failed — see dispatcher.yml's matching step for
       # why a mid-run failure can still leave a rotated, single-use refresh token

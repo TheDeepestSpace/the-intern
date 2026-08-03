@@ -36,6 +36,7 @@ function sendTelegram(chatId, text) {
   try {
     execFileSync(process.execPath, [path.join(__dirname, 'send-telegram.js'), text], {
       stdio: 'inherit',
+      timeout: 30_000,
       env: { ...process.env, CHAT_ID: chatId },
     });
   } catch (err) {
@@ -43,16 +44,34 @@ function sendTelegram(chatId, text) {
   }
 }
 
-function main() {
-  const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
-  const retryKey = process.env.RETRY_KEY;
-  const retrySource = process.env.RETRY_SOURCE || 'dispatcher';
-  const targetRepo = process.env.TARGET_REPO || '';
-  const issueNumber = process.env.ISSUE_NUMBER || '';
-  const retryChatId = process.env.RETRY_CHAT_ID || '';
-  const adminChatId = process.env.TG_ADMIN_CHAT_ID || '';
-  const maxRetries = Number(process.env.MAX_RETRIES || 3);
-  const runUrl = process.env.RUN_URL || '';
+function resolveMaxRetries(rawValue) {
+  const parsed = Number(rawValue || 3);
+  if (Number.isInteger(parsed) && parsed >= 0) return parsed;
+  console.warn(`::warning::Ignoring invalid MAX_RETRIES="${rawValue}"; using 3.`);
+  return 3;
+}
+
+// Orchestration entry point. `deps` lets tests inject fakes for the
+// git-backed/network pieces (updateEntries, sendTelegram, buildDispatchPayload,
+// detectUsageLimit, readResultText) while exercising the real branch logic.
+function main(env = process.env, deps = {}) {
+  const {
+    updateEntries: updateEntriesFn = updateEntries,
+    sendTelegram: sendTelegramFn = sendTelegram,
+    buildDispatchPayload: buildDispatchPayloadFn = buildDispatchPayload,
+    detectUsageLimit: detectUsageLimitFn = detectUsageLimit,
+    readResultText: readResultTextFn = readResultText,
+  } = deps;
+
+  const workspace = env.GITHUB_WORKSPACE || process.cwd();
+  const retryKey = env.RETRY_KEY;
+  const retrySource = env.RETRY_SOURCE || 'dispatcher';
+  const targetRepo = env.TARGET_REPO || '';
+  const issueNumber = env.ISSUE_NUMBER || '';
+  const retryChatId = env.RETRY_CHAT_ID || '';
+  const adminChatId = env.TG_ADMIN_CHAT_ID || '';
+  const maxRetries = resolveMaxRetries(env.MAX_RETRIES);
+  const runUrl = env.RUN_URL || '';
 
   if (!retryKey) {
     console.error('handle-agent-outcome: RETRY_KEY is required');
@@ -66,7 +85,7 @@ function main() {
       ? `telegram chat ${retryChatId}`
       : retryKey;
 
-  const { isError, text } = readResultText(process.env.RESULT_FILE);
+  const { isError, text } = readResultTextFn(env.RESULT_FILE);
 
   // Pending-retries.json lives on a branch of this repo (agent-infra), not
   // whatever arbitrary repo TARGET_REPO points at — git ops below must run
@@ -76,10 +95,18 @@ function main() {
 
   if (!isError) {
     console.log('Agent session completed.');
-    const { removed } = updateEntries((entries) => resolveEntry(entries, retryKey));
+    let removed = null;
+    try {
+      ({ removed } = updateEntriesFn((entries) => resolveEntry(entries, retryKey)));
+    } catch (err) {
+      // A pending-retries git failure here must not turn a successful agent
+      // session into a failed workflow step.
+      console.error(`::error::Could not clear the queued usage-limit retry: ${err.message}`);
+      return;
+    }
     if (removed) {
       console.log(`Resolved queued retry for ${retryKey} (had used ${removed.retryCount}/${removed.maxRetries} retries).`);
-      sendTelegram(
+      sendTelegramFn(
         adminChatId,
         `✅ the-intern-bot resumed ${label} after a Claude usage-limit stall (${removed.retryCount} retr${removed.retryCount === 1 ? 'y' : 'ies'} used).`
       );
@@ -89,13 +116,13 @@ function main() {
 
   console.log('::warning::Agent produced no usable output or reported an error');
 
-  const stall = detectUsageLimit(text);
+  const stall = detectUsageLimitFn(text);
   const dispatch = stall
-    ? buildDispatchPayload({
-        eventName: process.env.GITHUB_EVENT_NAME,
-        eventPath: process.env.GITHUB_EVENT_PATH,
-        workflowFile: process.env.WORKFLOW_FILE,
-        ref: process.env.DISPATCH_REF,
+    ? buildDispatchPayloadFn({
+        eventName: env.GITHUB_EVENT_NAME,
+        eventPath: env.GITHUB_EVENT_PATH,
+        workflowFile: env.WORKFLOW_FILE,
+        ref: env.DISPATCH_REF,
       })
     : null;
 
@@ -104,29 +131,41 @@ function main() {
   }
 
   if (stall && dispatch) {
-    const { entry, exhausted } = updateEntries((entries) =>
-      upsertStall(entries, {
-        key: retryKey,
-        source: retrySource,
-        targetRepo,
-        issueNumber,
-        chatId: retryChatId,
-        matchedText: stall.matchedText,
-        retryAfter: stall.retryAfter,
-        maxRetries,
-        dispatch,
-      })
-    );
+    let queued;
+    try {
+      queued = updateEntriesFn((entries) =>
+        upsertStall(entries, {
+          key: retryKey,
+          source: retrySource,
+          targetRepo,
+          issueNumber,
+          chatId: retryChatId,
+          matchedText: stall.matchedText,
+          retryAfter: stall.retryAfter,
+          maxRetries,
+          dispatch,
+        })
+      );
+    } catch (err) {
+      // Never let a pending-retries git failure swallow the failure report.
+      console.error(`::error::Could not queue the usage-limit retry: ${err.message}`);
+      sendTelegramFn(
+        adminChatId,
+        `⚠️ the-intern-bot: ${label} hit a Claude usage limit, but queuing the auto-retry failed. Manual re-trigger needed. Run: ${runUrl}`
+      );
+      return;
+    }
 
+    const { entry, exhausted } = queued;
     if (exhausted) {
       console.log(`Retry budget exhausted for ${retryKey}.`);
-      sendTelegram(
+      sendTelegramFn(
         adminChatId,
         `🛑 the-intern-bot: ${label} hit a Claude usage limit and used up all ${entry.retryCount}/${entry.maxRetries} auto-retries without resuming. Manual re-trigger needed. Run: ${runUrl}`
       );
     } else {
       console.log(`Queued retry for ${retryKey} (attempt ${entry.retryCount + 1}/${entry.maxRetries}, retry after ${entry.retryAfter}).`);
-      sendTelegram(
+      sendTelegramFn(
         adminChatId,
         `⏸️ the-intern-bot: ${label} hit a Claude usage limit ("${stall.matchedText}") — queued to auto-resume after ${entry.retryAfter} (retry ${entry.retryCount + 1}/${entry.maxRetries}). Run: ${runUrl}`
       );
@@ -135,11 +174,11 @@ function main() {
   }
 
   // Not a usage-limit stall — the original generic failure notification.
-  sendTelegram(adminChatId, `⚠️ the-intern-bot ran into an error and could not complete a request on ${label}. Run: ${runUrl}`);
+  sendTelegramFn(adminChatId, `⚠️ the-intern-bot ran into an error and could not complete a request on ${label}. Run: ${runUrl}`);
 }
 
 if (require.main === module) {
   main();
 }
 
-module.exports = { readResultText };
+module.exports = { readResultText, main };

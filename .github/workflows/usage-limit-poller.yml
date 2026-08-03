@@ -7,13 +7,14 @@ on:
     - cron: '*/15 * * * *'
   workflow_dispatch: {}
 
-permissions:
-  contents: write
-  actions: write
-
 jobs:
   poll:
     runs-on: ubuntu-latest
+    permissions:
+      # contents: write pushes pending-retries.json to the pending-retries branch.
+      # actions: write creates the workflow_dispatch/repository_dispatch re-fire.
+      contents: write
+      actions: write
     # Serialized so two overlapping runs (a slow run plus the next schedule
     # tick) can't both read the same due entry and double-fire it before
     # either has a chance to push the post-fire lock (see markFired in
@@ -39,6 +40,7 @@ jobs:
     needs: poll
     if: always() && needs.poll.result == 'failure'
     runs-on: ubuntu-latest
+    permissions: {}
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

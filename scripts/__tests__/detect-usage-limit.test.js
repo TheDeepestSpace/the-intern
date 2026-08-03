@@ -68,7 +68,11 @@ describe('detectUsageLimit', () => {
     const ms = parseRetryAfterMs('usage limit reached, resets at 3pm', now);
     const resolved = new Date(ms);
     expect(resolved.getHours()).toBe(15);
-    expect(resolved.getDate()).toBe(new Date(now).getDate());
+    // Same-day when 15:00 local is still ahead of `now`; rolls to tomorrow
+    // otherwise — either way it's never more than a day out. Asserting the
+    // calendar date directly is timezone-dependent (breaks at local offsets
+    // where 15:00 has already passed for this `now`).
+    expect(ms - now).toBeLessThan(24 * 60 * 60 * 1000);
   });
 
   it('parses explicit retry-after seconds', () => {

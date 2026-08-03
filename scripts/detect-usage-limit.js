@@ -35,6 +35,7 @@ const USAGE_LIMIT_PATTERNS = [
 ];
 
 const DEFAULT_RETRY_DELAY_MS = 60 * 60 * 1000; // 1 hour fallback when no reset time can be parsed.
+const MIN_RETRY_DELAY_MS = 5 * 60 * 1000; // never schedule a retry in the past or immediately.
 
 function detectUsageLimit(text, now = Date.now()) {
   if (!text) return null;
@@ -51,6 +52,14 @@ function detectUsageLimit(text, now = Date.now()) {
 }
 
 function parseRetryAfterMs(text, now) {
+  // Guarded so a stale epoch, an already-elapsed reset timestamp, or "retry
+  // after 0" can never resolve to now (or the past) — findDue in
+  // pending-retries-store.js would treat that as immediately due and the
+  // poller would re-fire while the usage limit is still active.
+  return Math.max(parseRetryAfterMsRaw(text, now), now + MIN_RETRY_DELAY_MS);
+}
+
+function parseRetryAfterMsRaw(text, now) {
   // 1. Explicit epoch, e.g. "reached|1735689600" (possible future CLI shape,
   // modeled after the community-documented "Claude AI usage limit
   // reached|<epoch>" pattern seen in other Claude Code tooling).

@@ -136,16 +136,55 @@ describe('manage-pending-retries', () => {
     expect(branches).not.toContain(BRANCH_NAME);
   });
 
-  it('retries and succeeds when a concurrent writer already pushed first (mirrors manage-summaries #49 regression)', () => {
-    const workA = newWorkDir('work-race-a');
-    const workB = newWorkDir('work-race-b');
-
-    process.chdir(workA);
+  it('leaves the caller checkout on its original branch with its files intact', () => {
+    const work = newWorkDir('work-branch-preserved');
+    process.chdir(work);
     process.env.GITHUB_TOKEN = 'fake-token-for-push';
+
+    updateEntries((entries) =>
+      upsertStall(entries, { key: 'k', source: 'dispatcher', retryAfter: 'A', maxRetries: 3, dispatch: DISPATCH })
+    );
+
+    expect(sh('git rev-parse --abbrev-ref HEAD', work)).toBe('main');
+    expect(fs.existsSync(path.join(work, 'README.md'))).toBe(true);
+  });
+
+  it('retries and succeeds when the local pending-retries branch has diverged from the remote (mirrors manage-summaries #49 regression)', () => {
+    process.env.GITHUB_TOKEN = 'fake-token-for-push';
+
+    // Seed the remote with an initial entry.
+    const seeder = newWorkDir('work-race-seed');
+    process.chdir(seeder);
     updateEntries((entries) =>
       upsertStall(entries, { key: 'a', source: 'dispatcher', retryAfter: 'A', maxRetries: 3, dispatch: DISPATCH })
     );
 
+    // workB fetches that state, then makes an unpushed local commit on
+    // pending-retries directly (bypassing updateEntries) so its local branch
+    // diverges from whatever the remote does next. A plain "writer B writes,
+    // then writer A writes" race is always a fast-forward for B's subsequent
+    // fetch and never actually rejects the push (verified against real git);
+    // only a genuinely diverged local branch forces the rejection this test
+    // means to exercise.
+    const workB = newWorkDir('work-race-b');
+    process.chdir(workB);
+    sh(`git fetch origin ${BRANCH_NAME}:${BRANCH_NAME}`, workB);
+    sh(`git checkout ${BRANCH_NAME}`, workB);
+    fs.writeFileSync(path.join(workB, 'pending-retries.json'), '[{"key":"a"},{"key":"stale-local"}]\n');
+    sh('git add pending-retries.json', workB);
+    sh('git commit -m "stale local commit, never pushed"', workB);
+    sh('git checkout main', workB);
+
+    // Another writer advances the remote past what workB's local branch knows.
+    const workC = newWorkDir('work-race-c');
+    process.chdir(workC);
+    updateEntries((entries) =>
+      upsertStall(entries, { key: 'c', source: 'dispatcher', retryAfter: 'C', maxRetries: 3, dispatch: DISPATCH })
+    );
+
+    // workB's write is rejected on attempt 1 (its local branch has diverged)
+    // and must succeed after the retry logic discards it and rebuilds on top
+    // of the current remote tip.
     process.chdir(workB);
     updateEntries((entries) =>
       upsertStall(entries, { key: 'b', source: 'dispatcher', retryAfter: 'B', maxRetries: 3, dispatch: DISPATCH })
@@ -154,7 +193,46 @@ describe('manage-pending-retries', () => {
     const reader = newWorkDir('work-race-read');
     process.chdir(reader);
     const entries = readEntries();
-    expect(entries.map((e) => e.key).sort()).toEqual(['a', 'b']);
+    expect(entries.map((e) => e.key).sort()).toEqual(['a', 'b', 'c']);
+  });
+
+  function pushCorruptBranch(work) {
+    sh(`git checkout -q --orphan ${BRANCH_NAME}`, work);
+    sh('git rm -rf -q .', work);
+    fs.writeFileSync(path.join(work, 'pending-retries.json'), 'not valid json');
+    sh('git add pending-retries.json', work);
+    sh('git commit -qm corrupt', work);
+    sh(`git push -q origin ${BRANCH_NAME}`, work);
+    sh('git checkout -q main', work);
+  }
+
+  it('readEntries logs and returns [] instead of throwing on a corrupt branch', () => {
+    const writer = newWorkDir('work-corrupt-write');
+    pushCorruptBranch(writer);
+
+    const reader = newWorkDir('work-corrupt-read');
+    process.chdir(reader);
+    expect(readEntries()).toEqual([]);
+  });
+
+  it('updateEntries throws instead of silently wiping a corrupt branch', () => {
+    const writer = newWorkDir('work-corrupt-write2');
+    pushCorruptBranch(writer);
+
+    const work = newWorkDir('work-corrupt-update');
+    process.chdir(work);
+    process.env.GITHUB_TOKEN = 'fake-token-for-push';
+
+    expect(() =>
+      updateEntries((entries) =>
+        upsertStall(entries, { key: 'k', source: 'dispatcher', retryAfter: 'A', maxRetries: 3, dispatch: DISPATCH })
+      )
+    ).toThrow(/not valid JSON/);
+
+    const reader = newWorkDir('work-corrupt-verify');
+    process.chdir(reader);
+    sh(`git fetch -q origin ${BRANCH_NAME}:${BRANCH_NAME}`, reader);
+    expect(sh(`git show ${BRANCH_NAME}:pending-retries.json`, reader)).toBe('not valid json');
   });
 });
 
@@ -210,5 +288,23 @@ describe('buildDispatchPayload', () => {
 
   it('returns null for an unrecognized event name', () => {
     expect(buildDispatchPayload({ eventName: 'push', eventPath: '' })).toBeNull();
+  });
+
+  it('returns null instead of throwing when the event file is malformed', () => {
+    const eventPath = path.join(tmpRoot, 'event.json');
+    fs.writeFileSync(eventPath, 'not json at all');
+    expect(buildDispatchPayload({ eventName: 'workflow_dispatch', eventPath, workflowFile: 'dispatcher.yml' })).toBeNull();
+  });
+
+  it('returns null for a repository_dispatch with no action or event_type', () => {
+    const eventPath = path.join(tmpRoot, 'event.json');
+    fs.writeFileSync(eventPath, JSON.stringify({ client_payload: { chat_id: 123 } }));
+    expect(buildDispatchPayload({ eventName: 'repository_dispatch', eventPath })).toBeNull();
+  });
+
+  it('returns null for a workflow_dispatch with no workflowFile', () => {
+    const eventPath = path.join(tmpRoot, 'event.json');
+    fs.writeFileSync(eventPath, JSON.stringify({ inputs: {} }));
+    expect(buildDispatchPayload({ eventName: 'workflow_dispatch', eventPath, workflowFile: '' })).toBeNull();
   });
 });

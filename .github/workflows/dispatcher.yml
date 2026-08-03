@@ -313,7 +313,7 @@ jobs:
           SUMMARY_CONTEXT: ${{ steps.summary_context.outputs.summary }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
-          RETRY_KEY: dispatcher:${{ needs.detect-image.outputs.target_repo }}#${{ needs.detect-image.outputs.issue_number }}
+          RETRY_KEY: dispatcher:${{ needs.detect-image.outputs.target_repo }}${{ needs.detect-image.outputs.issue_number != '' && format('#{0}', needs.detect-image.outputs.issue_number) || '' }}
           RETRY_SOURCE: dispatcher
           WORKFLOW_FILE: dispatcher.yml
           DISPATCH_REF: ${{ github.ref_name }}
