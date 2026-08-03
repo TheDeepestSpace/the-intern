@@ -14,6 +14,28 @@ export default {
   },
 };
 
+// Shared dispatch POST used by the generic flow, handleCheckSuite, and
+// handleCodeRabbitReview: resolves the configured owner/repo, sets the
+// common headers, and sends eventType + rawPayload.
+async function dispatchRepoEvent(env, token, eventType, rawPayload) {
+  const owner = env.AGENT_INFRA_OWNER || 'TheDeepestSpace';
+  const repo = env.AGENT_INFRA_REPO || 'the-intern';
+
+  return fetch(
+    `https://api.github.com/repos/${owner}/${repo}/dispatches`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'the-intern-bot-relay',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ event_type: eventType, client_payload: { raw: rawPayload } }),
+    }
+  );
+}
+
 async function handleGitHub(request, env) {
   const body = await request.text();
   const signature = request.headers.get('X-Hub-Signature-256') || '';
@@ -33,6 +55,13 @@ async function handleGitHub(request, env) {
   // mention gating below entirely and is handled as its own flow.
   if (eventType === 'check_suite') {
     return handleCheckSuite(payload, env);
+  }
+
+  // Likewise, a CodeRabbit review is never authored by an allowlisted human
+  // and never mentions the bot, so it needs its own bypass flow too.
+  const reviewerLogin = (payload.review?.user?.login || '').toLowerCase();
+  if (eventType === 'pull_request_review' && reviewerLogin === 'coderabbitai[bot]') {
+    return handleCodeRabbitReview(payload, env);
   }
 
   // Extract comment / review / event author
@@ -103,25 +132,7 @@ async function handleGitHub(request, env) {
   try {
     const token = await getInstallationToken(env, installationId);
 
-    const owner = env.AGENT_INFRA_OWNER || 'TheDeepestSpace';
-    const repo = env.AGENT_INFRA_REPO || 'the-intern';
-
-    const dispatchRes = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/dispatches`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/vnd.github+json',
-          'User-Agent': 'the-intern-bot-relay',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          event_type: eventType,
-          client_payload: { raw: payload },
-        }),
-      }
-    );
+    const dispatchRes = await dispatchRepoEvent(env, token, eventType, payload);
 
     if (!dispatchRes.ok) {
       const errorText = await dispatchRes.text();
@@ -162,9 +173,6 @@ async function handleCheckSuite(payload, env) {
   try {
     const token = await getInstallationToken(env, installationId);
 
-    const owner = env.AGENT_INFRA_OWNER || 'TheDeepestSpace';
-    const repo = env.AGENT_INFRA_REPO || 'the-intern';
-
     let dispatched = 0;
     for (const { number } of pullRequests) {
       const prRes = await fetch(
@@ -182,29 +190,12 @@ async function handleCheckSuite(payload, env) {
 
       if ((pullRequest.user?.login || '').toLowerCase() !== botLogin) continue;
 
-      const dispatchRes = await fetch(
-        `https://api.github.com/repos/${owner}/${repo}/dispatches`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: 'application/vnd.github+json',
-            'User-Agent': 'the-intern-bot-relay',
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            event_type: 'ci_failure',
-            client_payload: {
-              raw: {
-                repository: payload.repository,
-                pull_request: pullRequest,
-                check_suite: checkSuite,
-                installation: payload.installation,
-              },
-            },
-          }),
-        }
-      );
+      const dispatchRes = await dispatchRepoEvent(env, token, 'ci_failure', {
+        repository: payload.repository,
+        pull_request: pullRequest,
+        check_suite: checkSuite,
+        installation: payload.installation,
+      });
 
       if (!dispatchRes.ok) {
         const errorText = await dispatchRes.text();
@@ -217,6 +208,51 @@ async function handleCheckSuite(payload, env) {
       dispatched > 0 ? 'ok' : 'ignored: no bot-authored pull requests',
       { status: 200 }
     );
+  } catch (err) {
+    return new Response(`internal error: ${err.message}`, { status: 500 });
+  }
+}
+
+// Auto-queues a coderabbit_review dispatch when CodeRabbit reviews a PR the
+// bot itself opened, so unaddressed feedback gets picked up without a human
+// having to manually re-trigger the bot. Bypasses ALLOWED_USERS/mention
+// gating entirely, like handleCheckSuite. Tier-2 injection-safe: only
+// structural fields (repo, PR number, review URL) are ever forwarded here —
+// the review body itself is never read by the worker. The dispatched session
+// reads the actual review content itself via its own gh/api tool call later,
+// the same trust boundary ci_failure already operates under.
+async function handleCodeRabbitReview(payload, env) {
+  if (payload.action !== 'submitted') {
+    return new Response('ignored: coderabbit review not submitted', { status: 200 });
+  }
+
+  const botLogin = (env.BOT_LOGIN || 'the-intern-bot[bot]').toLowerCase();
+  const prAuthor = (payload.pull_request?.user?.login || '').toLowerCase();
+  if (prAuthor !== botLogin) {
+    return new Response('ignored: coderabbit review not on a bot-authored PR', { status: 200 });
+  }
+
+  const installationId = payload.installation?.id;
+  if (!installationId) {
+    return new Response('missing installation id', { status: 400 });
+  }
+
+  try {
+    const token = await getInstallationToken(env, installationId);
+
+    const dispatchRes = await dispatchRepoEvent(env, token, 'coderabbit_review', {
+      repository: { full_name: payload.repository?.full_name },
+      pull_request: { number: payload.pull_request?.number },
+      coderabbit_review: { html_url: payload.review?.html_url },
+      installation: { id: installationId },
+    });
+
+    if (!dispatchRes.ok) {
+      const errorText = await dispatchRes.text();
+      return new Response(`dispatch failed: ${errorText}`, { status: 502 });
+    }
+
+    return new Response('ok', { status: 200 });
   } catch (err) {
     return new Response(`internal error: ${err.message}`, { status: 500 });
   }

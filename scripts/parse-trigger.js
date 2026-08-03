@@ -42,6 +42,14 @@ function parseTrigger() {
       targetRepo = payload.repository?.full_name || '';
       issueNumber = String(payload.pull_request.number || '');
       commentBody = `CI is failing on this PR (conclusion: ${payload.check_suite.conclusion}). Check suite: ${payload.check_suite.html_url}. Investigate the failing checks and push a fix.`;
+    } else if (payload.pull_request && payload.coderabbit_review) {
+      // coderabbit_review: synthesized instruction, same shape as ci_failure
+      // above. The worker never reads/forwards the review body itself (tier-2
+      // injection-safe) - the dispatched session reads the actual review
+      // content itself via gh/api during normal operation.
+      targetRepo = payload.repository?.full_name || '';
+      issueNumber = String(payload.pull_request.number || '');
+      commentBody = `CodeRabbit posted a review on PR #${payload.pull_request.number} (${payload.coderabbit_review.html_url}). Read it and address any actionable feedback.`;
     } else {
       // Fallback extraction
       targetRepo = payload.repository?.full_name || process.env.INPUT_TARGET_REPO || '';

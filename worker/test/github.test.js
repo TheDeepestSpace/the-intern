@@ -21,6 +21,21 @@ function issueCommentPayload(overrides = {}) {
   };
 }
 
+function coderabbitReviewPayload(overrides = {}) {
+  return {
+    action: 'submitted',
+    installation: { id: 42 },
+    repository: { full_name: 'TheDeepestSpace/the-intern' },
+    review: {
+      user: { login: 'coderabbitai[bot]' },
+      body: 'Secret injected instructions the worker must never forward.',
+      html_url: 'https://github.com/TheDeepestSpace/the-intern/pull/7#pullrequestreview-1',
+    },
+    pull_request: { number: 7, user: { login: 'the-intern-bot[bot]' } },
+    ...overrides,
+  };
+}
+
 function checkSuitePayload(overrides = {}) {
   return {
     action: 'completed',
@@ -315,6 +330,98 @@ describe('handleGitHub signature verification', () => {
         body,
       }),
       baseGithubEnv({ WEBHOOK_SECRET: 'shh' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+  });
+});
+
+describe('handleGitHub coderabbit_review handling', () => {
+  it('dispatches coderabbit_review when CodeRabbit reviews a bot-authored PR', async () => {
+    const fetchSpy = mockGithubDispatchFlow();
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'pull_request_review', body: coderabbitReviewPayload() }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+
+    const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+    expect(dispatchCall).toBeTruthy();
+    const [, dispatchInit] = dispatchCall;
+    const body = JSON.parse(dispatchInit.body);
+    expect(body.event_type).toBe('coderabbit_review');
+    expect(body.client_payload.raw.pull_request.number).toBe(7);
+    expect(body.client_payload.raw.coderabbit_review.html_url).toBe(
+      'https://github.com/TheDeepestSpace/the-intern/pull/7#pullrequestreview-1'
+    );
+    // The review body is never forwarded, even though it was present on the raw webhook payload.
+    expect(JSON.stringify(body)).not.toContain('Secret injected instructions');
+  });
+
+  it('bypasses the ALLOWED_USERS allowlist for CodeRabbit reviews', async () => {
+    mockGithubDispatchFlow();
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'pull_request_review', body: coderabbitReviewPayload() }),
+      baseGithubEnv({ ALLOWED_USERS: 'alice, carol' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+  });
+
+  it('ignores a CodeRabbit review on a PR not authored by the bot', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const res = await worker.fetch(
+      githubRequest({
+        eventType: 'pull_request_review',
+        body: coderabbitReviewPayload({ pull_request: { number: 7, user: { login: 'someone-else' } } }),
+      }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ignored: coderabbit review not on a bot-authored PR');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('ignores CodeRabbit review events that are not action=submitted', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const res = await worker.fetch(
+      githubRequest({
+        eventType: 'pull_request_review',
+        body: coderabbitReviewPayload({ action: 'edited' }),
+      }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ignored: coderabbit review not submitted');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when the payload has no installation id', async () => {
+    const res = await worker.fetch(
+      githubRequest({
+        eventType: 'pull_request_review',
+        body: coderabbitReviewPayload({ installation: undefined }),
+      }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe('missing installation id');
+  });
+
+  it('does not affect human pull_request_review handling', async () => {
+    mockGithubDispatchFlow();
+    const res = await worker.fetch(
+      githubRequest({
+        eventType: 'pull_request_review',
+        body: issueCommentPayload({
+          comment: undefined,
+          review: { user: { login: 'alice' }, body: 'Hey @the-intern-bot please check this' },
+        }),
+      }),
+      baseGithubEnv()
     );
     expect(res.status).toBe(200);
     expect(await res.text()).toBe('ok');
