@@ -49,6 +49,10 @@ describe('readResultText', () => {
 describe('main', () => {
   const baseEnv = { RETRY_KEY: 'dispatcher:owner/repo#1', TG_ADMIN_CHAT_ID: '123', RUN_URL: 'https://example.test/run' };
 
+  afterEach(() => {
+    process.exitCode = 0;
+  });
+
   // Mirrors real updateEntries's contract (fetch -> mutate -> push) without any
   // git I/O: applies `mutate` to a fixed `entries` snapshot and drops the
   // `entries` key from its return value, just like manage-pending-retries.js does.
@@ -178,8 +182,8 @@ describe('main', () => {
 
     main({ ...baseEnv, RETRY_KEY: '' }, d);
 
+    expect(process.exitCode).toBe(1);
     expect(d.readResultText).not.toHaveBeenCalled();
     expect(d.sendTelegram).not.toHaveBeenCalled();
-    process.exitCode = 0;
   });
 });

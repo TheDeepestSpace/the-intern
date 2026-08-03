@@ -159,6 +159,16 @@ async function main(deps = {}) {
       continue;
     }
 
+    // Lease the entry before firing: if the dispatch is accepted but the lock
+    // push then fails (or the job is cancelled), the entry must not stay due
+    // and re-fire the same session on the next tick.
+    try {
+      updateEntriesFn((current) => markFired(current, entry.key, { lockMs: LOCK_MS }));
+    } catch (err) {
+      console.error(`Could not lock ${describeEntryFn(entry)} before re-firing; skipping this tick: ${err.message}`);
+      continue;
+    }
+
     const result = await processEntry(entry, token, { owner, repo }, { fireDispatch: fireDispatchFn, describeEntry: describeEntryFn });
 
     if (result.outcome === 'invalid') {
@@ -170,15 +180,11 @@ async function main(deps = {}) {
     }
 
     if (result.outcome === 'failed') {
-      // Bound a persistently-failing delivery the same way a fired attempt is
-      // bounded, instead of leaving the entry due forever: bump retryCount and
-      // push retryAfter forward as backoff. The exhausted-entry guard above
-      // removes it and alerts once the budget runs out.
-      updateEntriesFn((current) => markFired(current, entry.key, { lockMs: LOCK_MS }));
+      // The lease above already consumed one retry and pushed retryAfter
+      // forward, so a persistently-failing delivery is bounded too.
       continue;
     }
 
-    updateEntriesFn((current) => markFired(current, entry.key, { lockMs: LOCK_MS }));
     console.log(`Re-fired ${result.label} (attempt ${entry.retryCount + 1}/${entry.maxRetries}).`);
   }
 }

@@ -90,6 +90,37 @@ describe('main (poll loop)', () => {
     expect(notifyAdmin).not.toHaveBeenCalled();
   });
 
+  it('persists the retry lock before dispatching, not after', async () => {
+    const store = fakeStore([dueEntry()]);
+    const order = [];
+    const updateEntries = vi.fn((mutate) => {
+      order.push('update');
+      return store.updateEntries(mutate);
+    });
+    const fireDispatchFn = vi.fn(async () => {
+      order.push('dispatch');
+      return { ok: true };
+    });
+
+    await main({ env: baseEnv, readEntries: () => store.getEntries(), updateEntries, fireDispatch: fireDispatchFn, notifyAdmin: vi.fn() });
+
+    expect(order).toEqual(['update', 'dispatch']);
+  });
+
+  it('skips dispatching when persisting the pre-dispatch lock fails', async () => {
+    const store = fakeStore([dueEntry()]);
+    const updateEntries = vi.fn(() => {
+      throw new Error('git push failed');
+    });
+    const fireDispatchFn = vi.fn(async () => ({ ok: true }));
+    const notifyAdmin = vi.fn();
+
+    await main({ env: baseEnv, readEntries: () => store.getEntries(), updateEntries, fireDispatch: fireDispatchFn, notifyAdmin });
+
+    expect(fireDispatchFn).not.toHaveBeenCalled();
+    expect(store.getEntries()).toHaveLength(1);
+  });
+
   it('removes an already-exhausted due entry and alerts without dispatching', async () => {
     const store = fakeStore([dueEntry({ retryCount: 3 })]);
     const fireDispatchFn = vi.fn(async () => ({ ok: true }));
