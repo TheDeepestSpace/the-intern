@@ -81,3 +81,6 @@ User asked the bot's name and creator. Answered: The Intern (`@the-intern-bot`),
 
 ## 2026-08-03: explained bot reply to CodeRabbit on the-intern PR #98
 Confirmed it was not triggered by CodeRabbit and did not bypass the `ALLOWED_USERS` webhook gate. Dispatcher run 30783005096 was triggered at 03:55:22Z by the bot's explicit `@the-intern-bot backend=codex` comment on issue #97. That same Codex session opened PR #98 at 04:03, remained active until 04:11, noticed CodeRabbit's inline finding at 04:05 during its normal PR follow-through, committed fix 71416b7 at 04:08:17, and replied at 04:08:23. PR #96's dedicated CodeRabbit-review dispatch was still unmerged and therefore uninvolved.
+
+## 2026-08-03: svsch#118 filed — configurable fan-out auto-cut threshold
+Filed **svsch#118** (https://github.com/TheDeepestSpace/svsch/issues/118): add `svsch.fanout-auto-cut-threshold`, default `5`, automatically cut nets with at least N unique sinks during initial and updated/recomputed layout, persist through existing net-cut storage, and use `0` to disable. Linked it as the fan-out follow-up to #94. Included tests and protection for explicit manual reconnects. Not dispatched.
