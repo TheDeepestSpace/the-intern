@@ -35,6 +35,13 @@ function parseTrigger() {
       targetRepo = payload.repository?.full_name || '';
       issueNumber = String(payload.pull_request.number || '');
       commentBody = payload.comment.body || '';
+    } else if (payload.pull_request && payload.check_suite) {
+      // ci_failure: synthesized instruction, no @the-intern-bot mention needed
+      // since this bypasses the mention gate entirely (the stripping regex
+      // below is a no-op on text that doesn't contain the mention).
+      targetRepo = payload.repository?.full_name || '';
+      issueNumber = String(payload.pull_request.number || '');
+      commentBody = `CI is failing on this PR (conclusion: ${payload.check_suite.conclusion}). Check suite: ${payload.check_suite.html_url}. Investigate the failing checks and push a fix.`;
     } else {
       // Fallback extraction
       targetRepo = payload.repository?.full_name || process.env.INPUT_TARGET_REPO || '';

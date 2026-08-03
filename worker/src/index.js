@@ -29,6 +29,12 @@ async function handleGitHub(request, env) {
   const eventType = request.headers.get('X-GitHub-Event');
   const payload = JSON.parse(body);
 
+  // check_suite has no comment author, so it bypasses the ALLOWED_USERS /
+  // mention gating below entirely and is handled as its own flow.
+  if (eventType === 'check_suite') {
+    return handleCheckSuite(payload, env);
+  }
+
   // Extract comment / review / event author
   const author =
     payload.comment?.user?.login ||
@@ -123,6 +129,94 @@ async function handleGitHub(request, env) {
     }
 
     return new Response('ok', { status: 200 });
+  } catch (err) {
+    return new Response(`internal error: ${err.message}`, { status: 500 });
+  }
+}
+
+// Auto-queues a fix-CI dispatch when a check suite fails on a PR the bot
+// itself opened, so it can fix its own broken PRs without a human comment.
+// No dedup/KV: a re-failing run on the same PR just re-dispatches, which is
+// the desired retry-until-fixed behavior.
+async function handleCheckSuite(payload, env) {
+  const checkSuite = payload.check_suite;
+  const pullRequests = checkSuite?.pull_requests || [];
+
+  if (
+    payload.action !== 'completed' ||
+    !['failure', 'timed_out'].includes(checkSuite?.conclusion) ||
+    pullRequests.length === 0
+  ) {
+    return new Response('ignored: check_suite not a relevant failure', { status: 200 });
+  }
+
+  const installationId = payload.installation?.id;
+  if (!installationId) {
+    return new Response('missing installation id', { status: 400 });
+  }
+
+  const botLogin = (env.BOT_LOGIN || 'the-intern-bot[bot]').toLowerCase();
+  const sourceOwner = payload.repository?.owner?.login;
+  const sourceRepo = payload.repository?.name;
+
+  try {
+    const token = await getInstallationToken(env, installationId);
+
+    const owner = env.AGENT_INFRA_OWNER || 'TheDeepestSpace';
+    const repo = env.AGENT_INFRA_REPO || 'the-intern';
+
+    let dispatched = 0;
+    for (const { number } of pullRequests) {
+      const prRes = await fetch(
+        `https://api.github.com/repos/${sourceOwner}/${sourceRepo}/pulls/${number}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/vnd.github+json',
+            'User-Agent': 'the-intern-bot-relay',
+          },
+        }
+      );
+      if (!prRes.ok) continue;
+      const pullRequest = await prRes.json();
+
+      if ((pullRequest.user?.login || '').toLowerCase() !== botLogin) continue;
+
+      const dispatchRes = await fetch(
+        `https://api.github.com/repos/${owner}/${repo}/dispatches`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/vnd.github+json',
+            'User-Agent': 'the-intern-bot-relay',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            event_type: 'ci_failure',
+            client_payload: {
+              raw: {
+                repository: payload.repository,
+                pull_request: pullRequest,
+                check_suite: checkSuite,
+                installation: payload.installation,
+              },
+            },
+          }),
+        }
+      );
+
+      if (!dispatchRes.ok) {
+        const errorText = await dispatchRes.text();
+        return new Response(`dispatch failed: ${errorText}`, { status: 502 });
+      }
+      dispatched++;
+    }
+
+    return new Response(
+      dispatched > 0 ? 'ok' : 'ignored: no bot-authored pull requests',
+      { status: 200 }
+    );
   } catch (err) {
     return new Response(`internal error: ${err.message}`, { status: 500 });
   }

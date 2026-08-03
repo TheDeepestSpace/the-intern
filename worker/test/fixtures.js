@@ -76,7 +76,7 @@ export function telegramRequest({ update, headers = {} } = {}) {
 // mockGithubDispatchFlow and mockInstallationLookupAndDispatchFlow below.
 // When installationId is set, also serves the installation-id lookup
 // (GET /repos/:owner/:repo/installation), used on the Telegram-triggered path.
-function githubApiFetchHandler({ installationId, dispatchOk = true } = {}) {
+function githubApiFetchHandler({ installationId, dispatchOk = true, pullRequestAuthor } = {}) {
   return async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
@@ -87,6 +87,18 @@ function githubApiFetchHandler({ installationId, dispatchOk = true } = {}) {
       url.pathname.match(/^\/repos\/.+\/.+\/installation$/)
     ) {
       return new Response(JSON.stringify({ id: installationId }), { status: 200 });
+    }
+
+    if (
+      pullRequestAuthor !== undefined &&
+      request.method === 'GET' &&
+      url.pathname.match(/^\/repos\/.+\/.+\/pulls\/\d+$/)
+    ) {
+      const number = Number(url.pathname.split('/').pop());
+      return new Response(
+        JSON.stringify({ number, user: { login: pullRequestAuthor } }),
+        { status: 200 }
+      );
     }
 
     if (
@@ -120,4 +132,12 @@ export function mockInstallationLookupAndDispatchFlow({ installationId = 999, di
   return vi
     .spyOn(globalThis, 'fetch')
     .mockImplementation(githubApiFetchHandler({ installationId, dispatchOk }));
+}
+
+// Mocks the check_suite flow's three outbound calls: installation-token mint,
+// PR lookup (GET /repos/:owner/:repo/pulls/:number), then repository_dispatch.
+export function mockCheckSuiteDispatchFlow({ pullRequestAuthor = 'the-intern-bot[bot]', dispatchOk = true } = {}) {
+  return vi
+    .spyOn(globalThis, 'fetch')
+    .mockImplementation(githubApiFetchHandler({ pullRequestAuthor, dispatchOk }));
 }

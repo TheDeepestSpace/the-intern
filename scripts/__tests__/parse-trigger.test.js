@@ -101,6 +101,37 @@ describe('parse-trigger', () => {
     });
   });
 
+  describe('repository_dispatch: check_suite (ci_failure) shape', () => {
+    it('synthesizes a comment body from the check_suite conclusion and URL', () => {
+      process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
+      process.env.GITHUB_EVENT_PATH = writeEventPayload({
+        action: 'ci_failure',
+        client_payload: {
+          raw: {
+            installation: { id: 4242 },
+            repository: { full_name: 'acme/widgets' },
+            pull_request: { number: 9 },
+            check_suite: {
+              conclusion: 'failure',
+              html_url: 'https://github.com/acme/widgets/pull/9/checks',
+            },
+          },
+        },
+      });
+
+      const result = parseTrigger();
+
+      expect(result.target_repo).toBe('acme/widgets');
+      expect(result.issue_number).toBe('9');
+      expect(result.installation_id).toBe('4242');
+      expect(result.event_type).toBe('ci_failure');
+      expect(result.comment_body).toBe(
+        'CI is failing on this PR (conclusion: failure). Check suite: https://github.com/acme/widgets/pull/9/checks. Investigate the failing checks and push a fix.'
+      );
+      expect(result.clean_prompt).toBe(result.comment_body);
+    });
+  });
+
   describe('repository_dispatch: fallback extraction', () => {
     it('falls back to INPUT_* env vars when payload has no recognizable shape', () => {
       process.env.GITHUB_EVENT_NAME = 'repository_dispatch';

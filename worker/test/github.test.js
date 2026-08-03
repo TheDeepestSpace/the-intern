@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
-import { baseGithubEnv, githubRequest, mockGithubDispatchFlow } from './fixtures.js';
+import {
+  baseGithubEnv,
+  githubRequest,
+  mockCheckSuiteDispatchFlow,
+  mockGithubDispatchFlow,
+} from './fixtures.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -12,6 +17,24 @@ function issueCommentPayload(overrides = {}) {
     installation: { id: 42 },
     comment: { user: { login: 'alice' }, body: 'hey @the-intern-bot please help' },
     issue: { user: { login: 'someone-else' } },
+    ...overrides,
+  };
+}
+
+function checkSuitePayload(overrides = {}) {
+  return {
+    action: 'completed',
+    installation: { id: 42 },
+    repository: {
+      full_name: 'TheDeepestSpace/the-intern',
+      owner: { login: 'TheDeepestSpace' },
+      name: 'the-intern',
+    },
+    check_suite: {
+      conclusion: 'failure',
+      html_url: 'https://github.com/TheDeepestSpace/the-intern/pull/7/checks',
+      pull_requests: [{ number: 7 }],
+    },
     ...overrides,
   };
 }
@@ -295,5 +318,78 @@ describe('handleGitHub signature verification', () => {
     );
     expect(res.status).toBe(200);
     expect(await res.text()).toBe('ok');
+  });
+});
+
+describe('handleGitHub check_suite handling', () => {
+  it('dispatches ci_failure when CI fails on a bot-authored PR', async () => {
+    const fetchSpy = mockCheckSuiteDispatchFlow();
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+
+    const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+    expect(dispatchCall).toBeTruthy();
+    const [, dispatchInit] = dispatchCall;
+    const body = JSON.parse(dispatchInit.body);
+    expect(body.event_type).toBe('ci_failure');
+    expect(body.client_payload.raw.pull_request.number).toBe(7);
+    expect(body.client_payload.raw.check_suite.conclusion).toBe('failure');
+  });
+
+  it('ignores a check_suite failure on a PR not authored by the bot', async () => {
+    const fetchSpy = mockCheckSuiteDispatchFlow({ pullRequestAuthor: 'someone-else' });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ignored: no bot-authored pull requests');
+
+    const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+    expect(dispatchCall).toBeUndefined();
+  });
+
+  it('ignores check_suite with conclusion=success', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const res = await worker.fetch(
+      githubRequest({
+        eventType: 'check_suite',
+        body: checkSuitePayload({ check_suite: { ...checkSuitePayload().check_suite, conclusion: 'success' } }),
+      }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it.each(['requested', 'in_progress'])('ignores check_suite action=%s', async action => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload({ action }) }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('ignores check_suite with no associated pull requests', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const res = await worker.fetch(
+      githubRequest({
+        eventType: 'check_suite',
+        body: checkSuitePayload({ check_suite: { ...checkSuitePayload().check_suite, pull_requests: [] } }),
+      }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
