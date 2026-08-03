@@ -2,8 +2,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
-import { fetchSummary, saveSummary } from '../manage-summaries.js';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { fetchBackend, fetchSummary, resolveBackend, saveSummary } from '../manage-summaries.js';
 
 // These tests run real git against scratch repos in a tmpdir rather than mocking
 // git, per the issue: the bugs this module has actually had (dubious-ownership,
@@ -75,6 +75,21 @@ describe('manage-summaries', () => {
     return dir;
   }
 
+  describe('resolveBackend', () => {
+    it('prefers an explicit backend over a persisted backend', () => {
+      expect(resolveBackend('codex', true, 'claude')).toBe('codex');
+    });
+
+    it('uses the persisted backend when the trigger is implicit', () => {
+      expect(resolveBackend('claude', false, 'codex')).toBe('codex');
+    });
+
+    it('defaults unsupported or missing choices to claude', () => {
+      expect(resolveBackend('unsupported', true, 'codex')).toBe('claude');
+      expect(resolveBackend('claude', false, '')).toBe('claude');
+    });
+  });
+
   describe('fetchSummary', () => {
     it('returns an empty string and does not throw when no summary branch exists', () => {
       const work = newWorkDir('work-fetch-empty');
@@ -97,7 +112,7 @@ describe('manage-summaries', () => {
       const saver = newWorkDir('work-save');
       process.chdir(saver);
       process.env.GITHUB_TOKEN = 'fake-token-for-push';
-      saveSummary('acme/widgets', '7', 'the original prompt', 'the execution result');
+      saveSummary('acme/widgets', '7', 'the original prompt', 'the execution result', 'codex');
       expect(process.exitCode).toBe(0);
 
       const fetcher = newWorkDir('work-fetch');
@@ -108,6 +123,8 @@ describe('manage-summaries', () => {
       expect(result).toContain('the execution result');
       expect(result).toContain('acme/widgets');
       expect(result).toContain('#7');
+      expect(result).toContain('**Backend**: codex');
+      expect(fetchBackend('acme/widgets', '7')).toBe('codex');
     });
 
     it('writes the summary to GITHUB_OUTPUT using a heredoc delimiter', () => {
@@ -126,6 +143,54 @@ describe('manage-summaries', () => {
 
       const contents = fs.readFileSync(outputFile, 'utf8');
       expect(contents).toMatch(/summary<<EOF_\w+\n[\s\S]*result[\s\S]*\nEOF_\w+\n/);
+    });
+
+    it('writes the persisted backend to GITHUB_OUTPUT', () => {
+      const saver = newWorkDir('work-save-backend-out');
+      process.chdir(saver);
+      process.env.GITHUB_TOKEN = 'fake-token-for-push';
+      saveSummary('acme/widgets', '10', 'prompt', 'result', 'codex');
+
+      const fetcher = newWorkDir('work-fetch-backend-out');
+      process.chdir(fetcher);
+      const outputFile = path.join(tmpRoot, 'backend-output');
+      fs.writeFileSync(outputFile, '');
+      process.env.GITHUB_OUTPUT = outputFile;
+
+      expect(fetchBackend('acme/widgets', '10')).toBe('codex');
+      expect(fs.readFileSync(outputFile, 'utf8')).toContain('backend=codex\n');
+    });
+
+    it('returns the backend from the most recent summary', () => {
+      const saver = newWorkDir('work-save-latest-backend');
+      process.chdir(saver);
+      process.env.GITHUB_TOKEN = 'fake-token-for-push';
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1000);
+
+      try {
+        saveSummary('acme/widgets', '14', 'first prompt', 'first result', 'codex');
+        saveSummary('acme/widgets', '14', 'second prompt', 'second result', 'claude');
+      } finally {
+        now.mockRestore();
+      }
+
+      const fetcher = newWorkDir('work-fetch-latest-backend');
+      process.chdir(fetcher);
+
+      expect(fetchBackend('acme/widgets', '14')).toBe('claude');
+    });
+
+    it('records the effective fallback for an unsupported backend', () => {
+      const saver = newWorkDir('work-save-invalid-backend');
+      process.chdir(saver);
+      process.env.GITHUB_TOKEN = 'fake-token-for-push';
+      saveSummary('acme/widgets', '12', 'prompt', 'result', 'unsupported');
+
+      const fetcher = newWorkDir('work-fetch-invalid-backend');
+      process.chdir(fetcher);
+
+      // saveSummary records the actual fallback backend, never an unusable value.
+      expect(fetchBackend('acme/widgets', '12')).toBe('claude');
     });
 
     it('sanitizes non-alphanumeric characters in the repo name into the branch/dir slug', () => {
