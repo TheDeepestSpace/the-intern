@@ -24,7 +24,13 @@
 // Deliberately excludes generic `rate_limit_error` / 429 text: the Anthropic
 // SDK already retries those with backoff, so if one still surfaces here it's
 // more likely a genuine transient failure than a multi-hour quota stall.
-
+//
+// The "you've hit your ... limit" pattern below is the literal, live-captured
+// `result` text (job run 30848127490, two separate stalls on the same PR:
+// "You've hit your session limit · resets 6:20pm (UTC)" and "... resets
+// 11:20pm (UTC)") — none of the speculative binary-derived patterns above it
+// match this phrasing (no "reached" verb), so real stalls fell through to
+// the generic failure path instead of queuing a retry.
 const USAGE_LIMIT_PATTERNS = [
   /\busage[\s-]?(?:limit|credit limit|cap)s?\s+(?:reached|exceeded)\b/i,
   /reached\s+(?:your\s+)?(?:specified[\w\s-]*?)?usage\s+limits?\b/i,
@@ -32,6 +38,7 @@ const USAGE_LIMIT_PATTERNS = [
   /\busage_cap_reached\b/i,
   /org'?s monthly usage limit/i,
   /group'?s usage limit is set to \$0/i,
+  /you'?ve hit your (?:5-hour|five-hour|session|weekly|monthly) limit\b/i,
 ];
 
 const DEFAULT_RETRY_DELAY_MS = 60 * 60 * 1000; // 1 hour fallback when no reset time can be parsed.

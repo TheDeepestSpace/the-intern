@@ -32,6 +32,16 @@ describe('detectUsageLimit', () => {
     expect(detectUsageLimit('code: usage_cap_reached')).not.toBeNull();
   });
 
+  it('matches the live CLI phrasing "You\'ve hit your session limit · resets ..." (job 30848127490)', () => {
+    const result = detectUsageLimit("You've hit your session limit · resets 11:20pm (UTC)");
+    expect(result).not.toBeNull();
+    expect(result.matchedText.toLowerCase()).toContain("hit your session limit");
+  });
+
+  it('matches the live CLI weekly-limit phrasing', () => {
+    expect(detectUsageLimit("You've hit your weekly limit · resets Monday 9am (UTC)")).not.toBeNull();
+  });
+
   it('does not match a plain rate_limit_error (already retried by the SDK)', () => {
     expect(detectUsageLimit('API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}')).toBeNull();
   });

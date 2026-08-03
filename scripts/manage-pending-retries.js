@@ -19,7 +19,14 @@ const FILE_NAME = 'pending-retries.json';
 function runGit(cmd, options = {}) {
   const { allowFailure = false, ...execOptions } = options;
   try {
-    return execSync(`git ${cmd}`, { encoding: 'utf8', ...execOptions }).trim();
+    // stdio defaults to inheriting stderr straight to the job log even when
+    // execSync's own error is caught — without this, an expected failure
+    // (e.g. `show pending-retries:...` before the branch has ever been
+    // created) prints a raw `fatal: ...` line that reads as an unhandled
+    // error during incident triage, even though allowFailure below handles
+    // it correctly.
+    const stdio = allowFailure ? ['pipe', 'pipe', 'pipe'] : undefined;
+    return execSync(`git ${cmd}`, { encoding: 'utf8', stdio, ...execOptions }).trim();
   } catch (err) {
     if (allowFailure) return '';
     throw new Error(`git ${cmd} failed: ${(err.stderr || err.message || '').toString().trim()}`);
