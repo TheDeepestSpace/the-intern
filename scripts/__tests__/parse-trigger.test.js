@@ -132,6 +132,36 @@ describe('parse-trigger', () => {
     });
   });
 
+  describe('repository_dispatch: coderabbit_review shape', () => {
+    it('synthesizes a comment body from the review URL, without reading the review body', () => {
+      process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
+      process.env.GITHUB_EVENT_PATH = writeEventPayload({
+        action: 'coderabbit_review',
+        client_payload: {
+          raw: {
+            installation: { id: 4242 },
+            repository: { full_name: 'acme/widgets' },
+            pull_request: { number: 9 },
+            coderabbit_review: {
+              html_url: 'https://github.com/acme/widgets/pull/9#pullrequestreview-1',
+            },
+          },
+        },
+      });
+
+      const result = parseTrigger();
+
+      expect(result.target_repo).toBe('acme/widgets');
+      expect(result.issue_number).toBe('9');
+      expect(result.installation_id).toBe('4242');
+      expect(result.event_type).toBe('coderabbit_review');
+      expect(result.comment_body).toBe(
+        'CodeRabbit posted a review on PR #9 (https://github.com/acme/widgets/pull/9#pullrequestreview-1). Read it and address any actionable feedback.'
+      );
+      expect(result.clean_prompt).toBe(result.comment_body);
+    });
+  });
+
   describe('repository_dispatch: fallback extraction', () => {
     it('falls back to INPUT_* env vars when payload has no recognizable shape', () => {
       process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
