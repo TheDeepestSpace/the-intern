@@ -32,14 +32,19 @@ describe('detectUsageLimit', () => {
     expect(detectUsageLimit('code: usage_cap_reached')).not.toBeNull();
   });
 
-  it('matches the live CLI phrasing "You\'ve hit your session limit · resets ..." (job 30848127490)', () => {
-    const result = detectUsageLimit("You've hit your session limit · resets 11:20pm (UTC)");
+  it('matches the live CLI phrasing "You\'ve hit your session limit · resets ..." (job 30848127490) and parses the UTC reset time', () => {
+    const now = Date.parse('2026-08-03T18:00:00Z'); // 2026-08-03 is a Monday.
+    const result = detectUsageLimit("You've hit your session limit · resets 11:20pm (UTC)", now);
     expect(result).not.toBeNull();
     expect(result.matchedText.toLowerCase()).toContain("hit your session limit");
+    expect(result.retryAfter).toBe('2026-08-03T23:20:00.000Z');
   });
 
-  it('matches the live CLI weekly-limit phrasing', () => {
-    expect(detectUsageLimit("You've hit your weekly limit · resets Monday 9am (UTC)")).not.toBeNull();
+  it('matches the live CLI weekly-limit phrasing and parses the weekday + UTC reset time', () => {
+    const now = Date.parse('2026-08-05T12:00:00Z'); // Wednesday; next Monday is 2026-08-10.
+    const result = detectUsageLimit("You've hit your weekly limit · resets Monday 9am (UTC)", now);
+    expect(result).not.toBeNull();
+    expect(result.retryAfter).toBe('2026-08-10T09:00:00.000Z');
   });
 
   it('does not match a plain rate_limit_error (already retried by the SDK)', () => {
