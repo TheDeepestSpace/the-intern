@@ -615,12 +615,12 @@
         "text": "yes lets file"
       }
     },
-    "retryCount": 0,
+    "retryCount": 1,
     "maxRetries": 3,
-    "retryAfter": "2026-08-04T23:20:00.000Z",
+    "retryAfter": "2026-08-05T00:06:05.819Z",
     "matchedText": "You've hit your session limit",
     "createdAt": "2026-08-04T21:12:52.911Z",
-    "updatedAt": "2026-08-04T21:12:52.911Z"
+    "updatedAt": "2026-08-04T23:41:05.819Z"
   },
   {
     "key": "dispatcher:TheDeepestSpace/svsch#102",
