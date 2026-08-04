@@ -1404,11 +1404,11 @@
         }
       }
     },
-    "retryCount": 0,
+    "retryCount": 1,
     "maxRetries": 3,
-    "retryAfter": "2026-08-04T17:40:00.000Z",
+    "retryAfter": "2026-08-04T18:46:09.917Z",
     "matchedText": "You've hit your session limit",
     "createdAt": "2026-08-04T13:15:54.504Z",
-    "updatedAt": "2026-08-04T13:15:54.504Z"
+    "updatedAt": "2026-08-04T18:21:09.917Z"
   }
 ]
