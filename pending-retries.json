@@ -14,29 +14,29 @@
           "comment": {
             "_links": {
               "html": {
-                "href": "https://github.com/TheDeepestSpace/svsch/pull/100#discussion_r3716654189"
+                "href": "https://github.com/TheDeepestSpace/svsch/pull/100#discussion_r3716606701"
               },
               "pull_request": {
                 "href": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/100"
               },
               "self": {
-                "href": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716654189"
+                "href": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716606701"
               }
             },
             "author_association": "OWNER",
-            "body": "might be different issue material, but the cut net end for the disabled path should have the same dimmer color (same as the disabled route); \n\non top of this -- for the two cut net ends connected to \"y\" output port here -- i would make them collapse into one since there is no extra semntic meaning to having them separate since its still the same net at the end of the date -- just multiple potential drivers; \n\nlets cover this in follow up work through, this PR is plenty big already",
+            "body": "the \"b\"-labelled cut-net-end thats connected to u2.a is for some reason not highlighted even though the bounding box appears to contain it. how come?",
             "commit_id": "7eccdee0bdad4ce1e388c23a15fe91577ab99a0d",
-            "created_at": "2026-08-04T22:35:23Z",
+            "created_at": "2026-08-04T22:24:57Z",
             "diff_hunk": "",
-            "html_url": "https://github.com/TheDeepestSpace/svsch/pull/100#discussion_r3716654189",
-            "id": 3716654189,
+            "html_url": "https://github.com/TheDeepestSpace/svsch/pull/100#discussion_r3716606701",
+            "id": 3716606701,
             "line": 1,
-            "node_id": "PRRC_kwDOSMvif87dh6Rt",
+            "node_id": "PRRC_kwDOSMvif87dhurt",
             "original_commit_id": "7eccdee0bdad4ce1e388c23a15fe91577ab99a0d",
             "original_line": 1,
             "original_position": 1,
             "original_start_line": null,
-            "path": "test/features/snapshots/navigating-to-generate-case-arms-and-their-generate-block--01--viewing-module-top.png",
+            "path": "test/features/snapshots/auto-laying-out-one-connection-s-blocks-anchors-the-result--leaves-the-other-connection-untouched--and-carries-cut-net-ends-along--09--selected-b--u2--y.png",
             "position": 1,
             "pull_request_review_id": 4859458851,
             "pull_request_url": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/100",
@@ -50,14 +50,14 @@
               "laugh": 0,
               "rocket": 0,
               "total_count": 0,
-              "url": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716654189/reactions"
+              "url": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716606701/reactions"
             },
             "side": "RIGHT",
             "start_line": null,
             "start_side": null,
             "subject_type": "file",
             "updated_at": "2026-08-04T22:45:24Z",
-            "url": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716654189",
+            "url": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716606701",
             "user": {
               "avatar_url": "https://avatars.githubusercontent.com/u/11333378?v=4",
               "events_url": "https://api.github.com/users/TheDeepestSpace/events{/privacy}",
@@ -595,7 +595,7 @@
     "retryAfter": "2026-08-04T23:20:00.000Z",
     "matchedText": "You've hit your session limit",
     "createdAt": "2026-08-04T20:33:21.277Z",
-    "updatedAt": "2026-08-04T22:46:42.842Z"
+    "updatedAt": "2026-08-04T22:47:41.156Z"
   },
   {
     "key": "telegram:5645471830",
