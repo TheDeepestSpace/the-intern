@@ -14,30 +14,30 @@
           "comment": {
             "_links": {
               "html": {
-                "href": "https://github.com/TheDeepestSpace/svsch/pull/100#discussion_r3716687684"
+                "href": "https://github.com/TheDeepestSpace/svsch/pull/100#discussion_r3716616192"
               },
               "pull_request": {
                 "href": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/100"
               },
               "self": {
-                "href": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716687684"
+                "href": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716616192"
               }
             },
             "author_association": "OWNER",
-            "body": "do you really need to tie these back for these scenarios here? unless im missing something",
+            "body": "feels like the diagram got zoomed in here? i'll try to run the test myself to see whats going on , but let me know if something is up",
             "commit_id": "7eccdee0bdad4ce1e388c23a15fe91577ab99a0d",
-            "created_at": "2026-08-04T22:43:00Z",
-            "diff_hunk": "@@ -113,6 +191,7 @@ Feature: Diagram Interaction\n       endmodule\n       \"\"\"\n     When I open the \"top\" module in SVSCH\n+    And I tie back the cut net \"chip_select\"",
-            "html_url": "https://github.com/TheDeepestSpace/svsch/pull/100#discussion_r3716687684",
-            "id": 3716687684,
-            "line": 194,
-            "node_id": "PRRC_kwDOSMvif87diCdE",
+            "created_at": "2026-08-04T22:27:07Z",
+            "diff_hunk": "",
+            "html_url": "https://github.com/TheDeepestSpace/svsch/pull/100#discussion_r3716616192",
+            "id": 3716616192,
+            "line": 1,
+            "node_id": "PRRC_kwDOSMvif87dhxAA",
             "original_commit_id": "7eccdee0bdad4ce1e388c23a15fe91577ab99a0d",
-            "original_line": 194,
-            "original_position": 89,
+            "original_line": 1,
+            "original_position": 1,
             "original_start_line": null,
-            "path": "test/features/diagram_interaction.feature",
-            "position": 89,
+            "path": "test/features/snapshots/cutting-and-tying-back-a-fanout-net-whose-source-name-is-declared-in-the-sv-source--02--after-tie-net.png",
+            "position": 1,
             "pull_request_review_id": 4859458851,
             "pull_request_url": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/100",
             "reactions": {
@@ -50,14 +50,14 @@
               "laugh": 0,
               "rocket": 0,
               "total_count": 0,
-              "url": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716687684/reactions"
+              "url": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716616192/reactions"
             },
             "side": "RIGHT",
             "start_line": null,
             "start_side": null,
-            "subject_type": "line",
+            "subject_type": "file",
             "updated_at": "2026-08-04T22:45:24Z",
-            "url": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716687684",
+            "url": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716616192",
             "user": {
               "avatar_url": "https://avatars.githubusercontent.com/u/11333378?v=4",
               "events_url": "https://api.github.com/users/TheDeepestSpace/events{/privacy}",
@@ -595,7 +595,7 @@
     "retryAfter": "2026-08-04T23:20:00.000Z",
     "matchedText": "You've hit your session limit",
     "createdAt": "2026-08-04T20:33:21.277Z",
-    "updatedAt": "2026-08-04T22:56:08.709Z"
+    "updatedAt": "2026-08-04T22:57:22.142Z"
   },
   {
     "key": "telegram:5645471830",
