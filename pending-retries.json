@@ -14,29 +14,29 @@
           "comment": {
             "_links": {
               "html": {
-                "href": "https://github.com/TheDeepestSpace/svsch/pull/100#discussion_r3716663426"
+                "href": "https://github.com/TheDeepestSpace/svsch/pull/100#discussion_r3716662123"
               },
               "pull_request": {
                 "href": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/100"
               },
               "self": {
-                "href": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716663426"
+                "href": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716662123"
               }
             },
             "author_association": "OWNER",
-            "body": "another case of potential zoom-in?",
+            "body": "is this how the diagram got auto-layedout on first open? should not have an inflection (unless it was cut as part of the scenario)",
             "commit_id": "7eccdee0bdad4ce1e388c23a15fe91577ab99a0d",
-            "created_at": "2026-08-04T22:37:31Z",
+            "created_at": "2026-08-04T22:37:14Z",
             "diff_hunk": "",
-            "html_url": "https://github.com/TheDeepestSpace/svsch/pull/100#discussion_r3716663426",
-            "id": 3716663426,
+            "html_url": "https://github.com/TheDeepestSpace/svsch/pull/100#discussion_r3716662123",
+            "id": 3716662123,
             "line": 1,
-            "node_id": "PRRC_kwDOSMvif87dh8iC",
+            "node_id": "PRRC_kwDOSMvif87dh8Nr",
             "original_commit_id": "7eccdee0bdad4ce1e388c23a15fe91577ab99a0d",
             "original_line": 1,
             "original_position": 1,
             "original_start_line": null,
-            "path": "test/features/snapshots/observing-a-chain-of-wire-to-wire-assigns-as-a-single-connection--02--tooltip-visible-on-hover.png",
+            "path": "test/features/snapshots/navigating-to-type-definitions--01--viewing-module-top.png",
             "position": 1,
             "pull_request_review_id": 4859458851,
             "pull_request_url": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/100",
@@ -50,14 +50,14 @@
               "laugh": 0,
               "rocket": 0,
               "total_count": 0,
-              "url": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716663426/reactions"
+              "url": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716662123/reactions"
             },
             "side": "RIGHT",
             "start_line": null,
             "start_side": null,
             "subject_type": "file",
             "updated_at": "2026-08-04T22:45:24Z",
-            "url": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716663426",
+            "url": "https://api.github.com/repos/TheDeepestSpace/svsch/pulls/comments/3716662123",
             "user": {
               "avatar_url": "https://avatars.githubusercontent.com/u/11333378?v=4",
               "events_url": "https://api.github.com/users/TheDeepestSpace/events{/privacy}",
@@ -595,7 +595,7 @@
     "retryAfter": "2026-08-04T23:20:00.000Z",
     "matchedText": "You've hit your session limit",
     "createdAt": "2026-08-04T20:33:21.277Z",
-    "updatedAt": "2026-08-04T22:50:50.581Z"
+    "updatedAt": "2026-08-04T22:52:11.312Z"
   },
   {
     "key": "telegram:5645471830",
