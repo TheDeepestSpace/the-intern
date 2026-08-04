@@ -934,28 +934,5 @@
     "matchedText": "You've hit your session limit",
     "createdAt": "2026-08-04T02:09:41.450Z",
     "updatedAt": "2026-08-04T02:09:41.450Z"
-  },
-  {
-    "key": "telegram:5645471830",
-    "source": "telegram",
-    "targetRepo": null,
-    "issueNumber": null,
-    "chatId": "5645471830",
-    "dispatch": {
-      "type": "repository_dispatch",
-      "eventType": "telegram_message",
-      "clientPayload": {
-        "chat_id": 5645471830,
-        "message_id": 340,
-        "sender_id": 5645471830,
-        "text": "got an error on master https://github.com/TheDeepestSpace/svsch/actions/runs/30871581227/job/91874962123 — investigate"
-      }
-    },
-    "retryCount": 0,
-    "maxRetries": 3,
-    "retryAfter": "2026-08-04T04:50:00.000Z",
-    "matchedText": "You've hit your session limit",
-    "createdAt": "2026-08-04T02:53:23.238Z",
-    "updatedAt": "2026-08-04T02:53:23.238Z"
   }
 ]
