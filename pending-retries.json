@@ -590,12 +590,12 @@
         }
       }
     },
-    "retryCount": 0,
+    "retryCount": 1,
     "maxRetries": 3,
-    "retryAfter": "2026-08-04T23:20:00.000Z",
+    "retryAfter": "2026-08-05T00:06:03.920Z",
     "matchedText": "You've hit your session limit",
     "createdAt": "2026-08-04T20:33:21.277Z",
-    "updatedAt": "2026-08-04T22:59:18.821Z"
+    "updatedAt": "2026-08-04T23:41:03.920Z"
   },
   {
     "key": "telegram:5645471830",
