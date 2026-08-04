@@ -598,31 +598,6 @@
     "updatedAt": "2026-08-04T23:41:03.920Z"
   },
   {
-    "key": "telegram:5645471830",
-    "source": "telegram",
-    "targetRepo": null,
-    "issueNumber": null,
-    "chatId": "5645471830",
-    "dispatch": {
-      "type": "repository_dispatch",
-      "eventType": "telegram_message",
-      "clientPayload": {
-        "chat_id": 5645471830,
-        "message_id": 371,
-        "reply_to_message_id": 361,
-        "reply_to_text": "Researched this in the actual svsch code (cloned + read the parser/IR/renderer). Findings:\n\n**Today:** `(a|b)&c` and `a&b&c&d` already collapse into ONE opaque `comb` box (textExtractor.ts / expressions.inc `getOrPromoteExpr`) — no gate structure at all, just a box listing every leaf signal as an input. So you're not choosing between \"gate node\" and \"nothing,\" it's \"gate node\" vs \"undifferentiated blob.\"\n\n**Adding real AND/OR/XOR/NAND/NOR/XNOR/NOT gate nodes is a clean, localized change:**\n- IR: `DiagramNodeKind` already has `alu`/`inverter`/`comb` — adding `gate` w/ n-ary ports is one more union member, no new concept (ir/types.ts).\n- Rendering precedent already exists 3x over: NOT is a literal hand-drawn triangle+bubble glyph (InverterNodeSvg.tsx) using the same pattern mux/alu use (trapezoid via nodeSizing.ts). Gate shapes (AND D-shape, OR curved-back, XOR double-curve) slot into the same `HdlNode.tsx` kind-dispatch.\n- Width is already tracked per-operand, so flattening can be verified lossless before collapsing.\n\n**Your associativity worry — verdict: doesn't apply to logic gates, DOES apply to arithmetic, and the codebase already half-knows this:**\n- `&`/`|`/`^` are genuinely one library cell in real synthesis up to fan-in limits — no carry chain, no cascade-vs-tree tradeoff exists for a pure bitwise gate. Collapsing `a&b&c&d` → one 4-input AND is honest, not an aggressive assumption.\n- `+`/`-` are the opposite: real adders ARE carry chains, cascade-vs-balanced-tree is a genuine timing/area tradeoff. The code's own `promoteAluExpr` already refuses to chain nested `+`/`-` into one ALU node for exactly this reason — it just currently gives up and shows an undifferentiated blob instead of a real cascade/tree. If gate work happens, arithmetic should go the OPPOSITE direction: show real 2-input adder chains matching source structure, not flatten.\n- Hard rule either way: never flatten ACROSS operator types. `(a|b)&c` must stay OR-feeding-AND, never merged — the existing `isAluOperation` operand-type check already has the right instinct for this.\n- No existing fan-in cap or gate-library convention anywhere in the repo — that's a fresh design call (e.g. cap visual gates at 4-6 inputs and cascade beyond that for realism, or always show true count).\n- Bonus finding: reduction ops (`&expr`, `|expr`, `^expr`) aren't handled as a distinct kind anywhere yet — same flattening logic could cover them (inputs = bit-slices of one bus instead of distinct signals), worth folding into the same design.\n\nWant me to file this as a scoping issue (gate nodes: AND/OR/XOR/NAND/NOR/XNOR/NOT + n-ary flattening, explicitly scoped to bitwise/logical ops only, arithmetic left alone or improved separately)?",
-        "sender_id": 5645471830,
-        "text": "yes lets file"
-      }
-    },
-    "retryCount": 1,
-    "maxRetries": 3,
-    "retryAfter": "2026-08-05T00:06:05.819Z",
-    "matchedText": "You've hit your session limit",
-    "createdAt": "2026-08-04T21:12:52.911Z",
-    "updatedAt": "2026-08-04T23:41:05.819Z"
-  },
-  {
     "key": "dispatcher:TheDeepestSpace/svsch#102",
     "source": "dispatcher",
     "targetRepo": "TheDeepestSpace/svsch",
