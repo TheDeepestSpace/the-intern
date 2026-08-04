@@ -24,7 +24,13 @@
 // Deliberately excludes generic `rate_limit_error` / 429 text: the Anthropic
 // SDK already retries those with backoff, so if one still surfaces here it's
 // more likely a genuine transient failure than a multi-hour quota stall.
-
+//
+// The "you've hit your ... limit" pattern below is the literal, live-captured
+// `result` text (job run 30848127490, two separate stalls on the same PR:
+// "You've hit your session limit · resets 6:20pm (UTC)" and "... resets
+// 11:20pm (UTC)") — none of the speculative binary-derived patterns above it
+// match this phrasing (no "reached" verb), so real stalls fell through to
+// the generic failure path instead of queuing a retry.
 const USAGE_LIMIT_PATTERNS = [
   /\busage[\s-]?(?:limit|credit limit|cap)s?\s+(?:reached|exceeded)\b/i,
   /reached\s+(?:your\s+)?(?:specified[\w\s-]*?)?usage\s+limits?\b/i,
@@ -32,6 +38,7 @@ const USAGE_LIMIT_PATTERNS = [
   /\busage_cap_reached\b/i,
   /org'?s monthly usage limit/i,
   /group'?s usage limit is set to \$0/i,
+  /you'?ve hit your (?:5-hour|five-hour|session|weekly|monthly) limit\b/i,
 ];
 
 const DEFAULT_RETRY_DELAY_MS = 60 * 60 * 1000; // 1 hour fallback when no reset time can be parsed.
@@ -76,11 +83,15 @@ function parseRetryAfterMsRaw(text, now) {
     if (!Number.isNaN(parsed)) return parsed;
   }
 
-  // 3. Human clock time, e.g. "resets at 3pm" / "resets 3:00 PM" — the shape
-  // the interactive CLI actually renders (see module docstring).
-  m = text.match(/resets?\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm))/i);
+  // 3. Human clock time, e.g. "resets at 3pm" / "resets 3:00 PM", optionally
+  // qualified with a weekday (weekly-limit resets, e.g. "resets Monday 9am")
+  // and/or an explicit "(UTC)" marker — the shapes the live CLI actually
+  // renders (see module docstring).
+  m = text.match(
+    /resets?\s+(?:at\s+)?(?:(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s*\((UTC)\))?/i
+  );
   if (m) {
-    const parsed = parseClockTime(m[1], now);
+    const parsed = parseClockTime(m[2], now, { weekday: m[1], utc: !!m[3] });
     if (parsed !== null) return parsed;
   }
 
@@ -91,19 +102,42 @@ function parseRetryAfterMsRaw(text, now) {
   return now + DEFAULT_RETRY_DELAY_MS;
 }
 
-function parseClockTime(clock, now) {
+const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+function parseClockTime(clock, now, { weekday, utc = false } = {}) {
   const m = clock.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i);
   if (!m) return null;
   let hour = Number(m[1]) % 12;
   if (/pm/i.test(m[3])) hour += 12;
   const minute = m[2] ? Number(m[2]) : 0;
 
+  // An explicit "(UTC)" marker (as the live CLI renders for session/weekly
+  // resets) must be honored with UTC-based getters/setters throughout —
+  // interpreting it as local time would silently mis-schedule the retry on
+  // any runner not in the UTC timezone.
   const candidate = new Date(now);
-  candidate.setHours(hour, minute, 0, 0);
+  if (utc) candidate.setUTCHours(hour, minute, 0, 0);
+  else candidate.setHours(hour, minute, 0, 0);
+
+  if (weekday) {
+    const targetDay = WEEKDAYS.indexOf(weekday.toLowerCase());
+    const currentDay = utc ? candidate.getUTCDay() : candidate.getDay();
+    let dayDelta = (targetDay - currentDay + 7) % 7;
+    // Same weekday but the clock time has already passed today — a weekly
+    // reset is always in the future, so roll a full week.
+    if (dayDelta === 0 && candidate.getTime() <= now) dayDelta = 7;
+    if (utc) candidate.setUTCDate(candidate.getUTCDate() + dayDelta);
+    else candidate.setDate(candidate.getDate() + dayDelta);
+    return candidate.getTime();
+  }
+
   // The parsed clock time may already be in the past today (e.g. "resets
   // 3pm" read at 5pm) — a stall's reset is always in the future, so roll to
   // tomorrow.
-  if (candidate.getTime() <= now) candidate.setDate(candidate.getDate() + 1);
+  if (candidate.getTime() <= now) {
+    if (utc) candidate.setUTCDate(candidate.getUTCDate() + 1);
+    else candidate.setDate(candidate.getDate() + 1);
+  }
   return candidate.getTime();
 }
 
