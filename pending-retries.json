@@ -635,12 +635,12 @@
         }
       }
     },
-    "retryCount": 0,
+    "retryCount": 1,
     "maxRetries": 3,
-    "retryAfter": "2026-08-05T01:18:56.742Z",
+    "retryAfter": "2026-08-05T04:51:27.257Z",
     "matchedText": "You've hit your weekly limit",
     "createdAt": "2026-08-05T00:18:57.160Z",
-    "updatedAt": "2026-08-05T00:18:57.160Z"
+    "updatedAt": "2026-08-05T04:26:27.257Z"
   },
   {
     "key": "dispatcher:TheDeepestSpace/svsch#136",
