@@ -1269,9 +1269,9 @@
     },
     "retryCount": 2,
     "maxRetries": 3,
-    "retryAfter": "2026-08-05T07:34:35.817Z",
+    "retryAfter": "2026-08-05T08:10:59.423Z",
     "matchedText": "You've hit your weekly limit",
     "createdAt": "2026-08-05T00:48:01.723Z",
-    "updatedAt": "2026-08-05T07:09:35.817Z"
+    "updatedAt": "2026-08-05T07:10:59.816Z"
   }
 ]
