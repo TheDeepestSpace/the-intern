@@ -1267,11 +1267,11 @@
         }
       }
     },
-    "retryCount": 1,
+    "retryCount": 2,
     "maxRetries": 3,
-    "retryAfter": "2026-08-05T05:28:12.000Z",
+    "retryAfter": "2026-08-05T07:34:35.817Z",
     "matchedText": "You've hit your weekly limit",
     "createdAt": "2026-08-05T00:48:01.723Z",
-    "updatedAt": "2026-08-05T04:28:13.188Z"
+    "updatedAt": "2026-08-05T07:09:35.817Z"
   }
 ]
