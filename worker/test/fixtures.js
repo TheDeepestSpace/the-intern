@@ -76,7 +76,19 @@ export function telegramRequest({ update, headers = {} } = {}) {
 // mockGithubDispatchFlow and mockInstallationLookupAndDispatchFlow below.
 // When installationId is set, also serves the installation-id lookup
 // (GET /repos/:owner/:repo/installation), used on the Telegram-triggered path.
-function githubApiFetchHandler({ installationId, dispatchOk = true, pullRequestAuthor } = {}) {
+//
+// checkRunsByRef maps a ref (sha) to an array of check-run objects, used to
+// serve GET /repos/:owner/:repo/commits/:ref/check-runs for the
+// pre-existing-failure guardrail in handleCheckSuite. A ref missing from the
+// map serves a 404 (simulating an API hiccup / unknown ref), so the
+// guardrail fails open.
+function githubApiFetchHandler({
+  installationId,
+  dispatchOk = true,
+  pullRequestAuthor,
+  pullRequestBaseSha,
+  checkRunsByRef,
+} = {}) {
   return async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
@@ -96,9 +108,26 @@ function githubApiFetchHandler({ installationId, dispatchOk = true, pullRequestA
     ) {
       const number = Number(url.pathname.split('/').pop());
       return new Response(
-        JSON.stringify({ number, user: { login: pullRequestAuthor } }),
+        JSON.stringify({
+          number,
+          user: { login: pullRequestAuthor },
+          base: pullRequestBaseSha !== undefined ? { sha: pullRequestBaseSha } : undefined,
+        }),
         { status: 200 }
       );
+    }
+
+    if (
+      checkRunsByRef !== undefined &&
+      request.method === 'GET' &&
+      url.pathname.match(/^\/repos\/.+\/.+\/commits\/.+\/check-runs$/)
+    ) {
+      const ref = decodeURIComponent(url.pathname.split('/').slice(-2, -1)[0]);
+      const checkRuns = checkRunsByRef[ref];
+      if (checkRuns === undefined) {
+        return new Response('not found', { status: 404 });
+      }
+      return new Response(JSON.stringify({ check_runs: checkRuns }), { status: 200 });
     }
 
     if (
@@ -134,10 +163,22 @@ export function mockInstallationLookupAndDispatchFlow({ installationId = 999, di
     .mockImplementation(githubApiFetchHandler({ installationId, dispatchOk }));
 }
 
-// Mocks the check_suite flow's three outbound calls: installation-token mint,
-// PR lookup (GET /repos/:owner/:repo/pulls/:number), then repository_dispatch.
-export function mockCheckSuiteDispatchFlow({ pullRequestAuthor = 'the-intern-bot[bot]', dispatchOk = true } = {}) {
+// Mocks the check_suite flow's outbound calls: installation-token mint,
+// PR lookup (GET /repos/:owner/:repo/pulls/:number), the pre-existing-failure
+// check-runs lookups (GET /repos/:owner/:repo/commits/:ref/check-runs), then
+// repository_dispatch. By default the check-runs map is empty for both the
+// head and base refs used in checkSuitePayload()'s fixture, i.e. "no failing
+// checks" on either side, so the guardrail never blocks the dispatch unless a
+// test overrides checkRunsByRef.
+export function mockCheckSuiteDispatchFlow({
+  pullRequestAuthor = 'the-intern-bot[bot]',
+  pullRequestBaseSha = 'base-sha',
+  dispatchOk = true,
+  checkRunsByRef = { 'head-sha': [], 'base-sha': [] },
+} = {}) {
   return vi
     .spyOn(globalThis, 'fetch')
-    .mockImplementation(githubApiFetchHandler({ pullRequestAuthor, dispatchOk }));
+    .mockImplementation(
+      githubApiFetchHandler({ pullRequestAuthor, pullRequestBaseSha, dispatchOk, checkRunsByRef })
+    );
 }
