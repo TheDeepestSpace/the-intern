@@ -928,11 +928,11 @@
         }
       }
     },
-    "retryCount": 0,
+    "retryCount": 1,
     "maxRetries": 3,
-    "retryAfter": "2026-08-07T23:20:00.000Z",
+    "retryAfter": "2026-08-07T23:47:51.329Z",
     "matchedText": "You've hit your session limit",
     "createdAt": "2026-08-07T22:19:03.263Z",
-    "updatedAt": "2026-08-07T22:19:03.263Z"
+    "updatedAt": "2026-08-07T23:22:51.329Z"
   }
 ]
