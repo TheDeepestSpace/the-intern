@@ -82,16 +82,30 @@ export function telegramRequest({ update, headers = {} } = {}) {
 // pre-existing-failure guardrail in handleCheckSuite. A ref missing from the
 // map serves a 404 (simulating an API hiccup / unknown ref), so the
 // guardrail fails open.
+//
+// checkRunsThrowRefs lists refs whose check-runs lookup should reject the
+// fetch() call outright (simulating a network error), rather than resolve
+// with a non-2xx response, so the guardrail's try/catch is exercised too.
 function githubApiFetchHandler({
   installationId,
   dispatchOk = true,
   pullRequestAuthor,
   pullRequestBaseSha,
   checkRunsByRef,
+  checkRunsThrowRefs = [],
 } = {}) {
   return async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
+
+    if (
+      checkRunsByRef !== undefined &&
+      request.method === 'GET' &&
+      url.pathname.match(/^\/repos\/.+\/.+\/commits\/.+\/check-runs$/) &&
+      checkRunsThrowRefs.includes(decodeURIComponent(url.pathname.split('/').slice(-2, -1)[0]))
+    ) {
+      throw new TypeError('network error');
+    }
 
     if (
       installationId !== undefined &&
@@ -175,10 +189,17 @@ export function mockCheckSuiteDispatchFlow({
   pullRequestBaseSha = 'base-sha',
   dispatchOk = true,
   checkRunsByRef = { 'head-sha': [], 'base-sha': [] },
+  checkRunsThrowRefs = [],
 } = {}) {
   return vi
     .spyOn(globalThis, 'fetch')
     .mockImplementation(
-      githubApiFetchHandler({ pullRequestAuthor, pullRequestBaseSha, dispatchOk, checkRunsByRef })
+      githubApiFetchHandler({
+        pullRequestAuthor,
+        pullRequestBaseSha,
+        dispatchOk,
+        checkRunsByRef,
+        checkRunsThrowRefs,
+      })
     );
 }

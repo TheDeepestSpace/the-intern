@@ -561,4 +561,37 @@ describe('handleGitHub check_suite handling', () => {
     );
     expect(dispatchCall).toBeTruthy();
   });
+
+  it('fails open and dispatches when the head check-runs fetch rejects', async () => {
+    const fetchSpy = mockCheckSuiteDispatchFlow({ checkRunsThrowRefs: ['head-sha'] });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+
+    const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+    expect(dispatchCall).toBeTruthy();
+  });
+
+  it('fails open and dispatches when the base check-runs fetch rejects', async () => {
+    const fetchSpy = mockCheckSuiteDispatchFlow({
+      checkRunsByRef: { 'head-sha': [{ name: 'lint', status: 'completed', conclusion: 'failure' }] },
+      checkRunsThrowRefs: ['base-sha'],
+    });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+
+    const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+    expect(dispatchCall).toBeTruthy();
+  });
 });

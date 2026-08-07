@@ -150,24 +150,28 @@ async function handleGitHub(request, env) {
 // treat null as "unknown" and fail open (dispatch) rather than assume no
 // failures.
 async function getFailingCheckNames(owner, repo, ref, token) {
-  const res = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/commits/${ref}/check-runs?per_page=100`,
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/vnd.github+json',
-        'User-Agent': 'the-intern-bot-relay',
-      },
-    }
-  );
-  if (!res.ok) return null;
-  const data = await res.json();
-  const runs = data.check_runs || [];
-  return new Set(
-    runs
-      .filter(r => r.status === 'completed' && ['failure', 'timed_out'].includes(r.conclusion))
-      .map(r => r.name)
-  );
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/commits/${ref}/check-runs?per_page=100`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'the-intern-bot-relay',
+        },
+      }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    const runs = data.check_runs || [];
+    return new Set(
+      runs
+        .filter(r => r.status === 'completed' && ['failure', 'timed_out'].includes(r.conclusion))
+        .map(r => r.name)
+    );
+  } catch {
+    return null;
+  }
 }
 
 // Auto-queues a fix-CI dispatch when a check suite fails on a PR the bot
