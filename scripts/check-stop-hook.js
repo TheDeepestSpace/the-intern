@@ -25,6 +25,10 @@ const SUSPICIOUS_PATTERNS = [
   /once (it|this|that) (finishes|completes|is done)/i,
   /keep(ing)? (an eye on|monitoring)/i,
   /i('ll| will) (monitor|follow up|check (in|back))/i,
+  /pause (here|now)\b/i,
+  /resume automatically/i,
+  /once the monitor/i,
+  /the monitor (reports|will report|notifies)/i,
 ];
 
 function readStdin() {
@@ -131,4 +135,8 @@ function main() {
   process.exit(0);
 }
 
-main();
+module.exports = { SUSPICIOUS_PATTERNS, getLastAssistantMessage, hasLandedWork };
+
+if (require.main === module) {
+  main();
+}
