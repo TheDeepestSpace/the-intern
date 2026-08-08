@@ -668,11 +668,11 @@
         }
       }
     },
-    "retryCount": 0,
+    "retryCount": 1,
     "maxRetries": 3,
-    "retryAfter": "2026-08-08T09:30:00.000Z",
+    "retryAfter": "2026-08-08T09:55:13.103Z",
     "matchedText": "You've hit your session limit",
     "createdAt": "2026-08-08T05:27:45.322Z",
-    "updatedAt": "2026-08-08T05:27:45.322Z"
+    "updatedAt": "2026-08-08T09:30:13.103Z"
   }
 ]
