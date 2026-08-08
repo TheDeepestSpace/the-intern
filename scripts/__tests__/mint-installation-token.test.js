@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { MockAgent, setGlobalDispatcher, getGlobalDispatcher } from 'undici';
 import { getInstallationToken, mintAppJwt, getPrivateKey } from '../mint-installation-token.js';
 
@@ -117,11 +117,90 @@ describe('mint-installation-token', () => {
       const client = agent.get('https://api.github.com');
       client
         .intercept({ method: 'GET', path: '/repos/acme/missing/installation' })
-        .reply(404, 'Not Found');
+        .reply(404, 'Not Found')
+        .times(1);
 
       await expect(
-        getInstallationToken({ appId: '123', privateKey: TEST_PRIVATE_KEY_PEM, targetRepo: 'acme/missing' })
+        getInstallationToken({
+          appId: '123',
+          privateKey: TEST_PRIVATE_KEY_PEM,
+          targetRepo: 'acme/missing',
+          retries: 1,
+        })
       ).rejects.toThrow('Could not determine installationId for repo: acme/missing');
+    });
+
+    it('retries the installation lookup on a transient failure and succeeds', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+        .reply(404, 'remote: Repository not found.')
+        .times(2);
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+        .reply(200, { id: 555 });
+      client
+        .intercept({ method: 'POST', path: '/app/installations/555/access_tokens' })
+        .reply(201, { token: 'ghs_retriedtoken' });
+
+      const token = await getInstallationToken({
+        appId: '123',
+        privateKey: TEST_PRIVATE_KEY_PEM,
+        targetRepo: 'acme/widgets',
+        retries: 3,
+        retryDelayMs: 0,
+      });
+
+      expect(token).toBe('ghs_retriedtoken');
+    });
+
+    it('retries the installation lookup when fetch itself rejects and succeeds', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+        .replyWithError(new Error('getaddrinfo ENOTFOUND api.github.com'));
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+        .reply(200, { id: 555 });
+      client
+        .intercept({ method: 'POST', path: '/app/installations/555/access_tokens' })
+        .reply(201, { token: 'ghs_retriedtoken' });
+
+      const token = await getInstallationToken({
+        appId: '123',
+        privateKey: TEST_PRIVATE_KEY_PEM,
+        targetRepo: 'acme/widgets',
+        retries: 3,
+        retryDelayMs: 0,
+      });
+
+      expect(token).toBe('ghs_retriedtoken');
+    });
+
+    it('gives up after exhausting all retries on persistent lookup failure', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/missing/installation' })
+        .reply(404, 'Not Found')
+        .times(3);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      try {
+        await expect(
+          getInstallationToken({
+            appId: '123',
+            privateKey: TEST_PRIVATE_KEY_PEM,
+            targetRepo: 'acme/missing',
+            retries: 3,
+            retryDelayMs: 0,
+          })
+        ).rejects.toThrow('Could not determine installationId for repo: acme/missing');
+
+        expect(fetchSpy).toHaveBeenCalledTimes(3);
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
 
     it('throws with the response body when token minting fails', async () => {
