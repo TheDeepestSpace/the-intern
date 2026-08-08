@@ -334,13 +334,17 @@ async function saveSummaryToDataRepo(targetRepo, issueNumber, summaryContent) {
 
       let cloned = true;
       try {
-        runGit(`clone --branch ${DATA_REPO_SUMMARIES_BRANCH} --single-branch ${remoteUrl} .`, { cwd: workDir });
+        runGit(`clone --filter=blob:none --no-checkout --branch ${DATA_REPO_SUMMARIES_BRANCH} --single-branch ${remoteUrl} .`, { cwd: workDir });
+        // --no-checkout leaves the index empty; read-tree repopulates it from
+        // HEAD's tree (objects only, no blob content) so the new file below
+        // is added on top of the existing tree instead of replacing it.
+        runGit('read-tree HEAD', { cwd: workDir });
       } catch (err) {
         cloned = false;
       }
       if (!cloned) {
         resetWorkDir();
-        runGit(`clone ${remoteUrl} .`, { cwd: workDir });
+        runGit(`clone --filter=blob:none --no-checkout ${remoteUrl} .`, { cwd: workDir });
         runGit(`checkout --orphan ${DATA_REPO_SUMMARIES_BRANCH}`, { cwd: workDir });
         runGit('rm -rf .', { cwd: workDir, allowFailure: true });
       }

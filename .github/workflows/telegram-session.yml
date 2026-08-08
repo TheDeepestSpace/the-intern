@@ -88,6 +88,7 @@ jobs:
       # branch instead of an orphan branch on this repo (see manage-summaries.js
       # for the equivalent split for session summaries).
       - name: Checkout telegram branch on the-intern-data (create if missing)
+        id: data_checkout
         if: steps.data_token.outputs.token != ''
         continue-on-error: true
         env:
@@ -218,6 +219,15 @@ jobs:
               ? dataRepoConvo.content
               : primaryConvo.content;
 
+            // Write the selected (newer) source back to tg-state/convo.md so the
+            // on-disk file the agent reads/updates and the prompt context agree —
+            // otherwise the agent could append to a stale primaryConvo while the
+            // prompt above it shows the newer dataRepoConvo, and the later mirror
+            // step would push that stale file back over the newer copy.
+            if (convo) {
+              fs.writeFileSync("convo.md", convo);
+            }
+
             const msg = process.env.MESSAGE || "";
             const photoPath = process.env.PHOTO_PATH || "";
             const photoNote = photoPath ? `\n\nAn image was attached: ${photoPath}` : "";
@@ -313,7 +323,7 @@ jobs:
       # here never fails the job — the-intern's own telegram branch above
       # remains the source of truth during the transition.
       - name: Commit updated convo.md to telegram branch on the-intern-data
-        if: steps.data_token.outputs.token != ''
+        if: steps.data_token.outputs.token != '' && steps.data_checkout.outcome == 'success'
         continue-on-error: true
         working-directory: tg-data-state
         env:

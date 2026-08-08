@@ -345,8 +345,8 @@ describe('manage-summaries', () => {
       process.chdir(workB);
       await saveSummary('acme/other', '5', 'prompt two', 'result two');
 
-      const branches = sh('git branch --list summaries', dataRemoteDir);
-      expect(branches.split('\n').filter(Boolean)).toHaveLength(1);
+      const branches = sh("git branch --format='%(refname:short)'", dataRemoteDir);
+      expect(branches.split('\n').filter(Boolean)).toEqual(['summaries']);
 
       const files = sh('git ls-tree -r --name-only summaries', dataRemoteDir);
       expect(files).toContain('summaries/acme-widgets/21/');
@@ -369,9 +369,15 @@ describe('manage-summaries', () => {
       process.env.DATA_REPO_REMOTE_URL = dataRemoteDir;
       const newer = newWorkDir('work-dual-newer');
       process.chdir(newer);
-      const later = vi.spyOn(Date, 'now').mockReturnValue(2_000_000);
+      // Leave GITHUB_TOKEN unset so this save's origin push is skipped entirely
+      // (see the "No GITHUB_TOKEN/GH_TOKEN set" early return in
+      // saveSummaryToOrigin) and only the-intern-data receives it — otherwise
+      // both sources would share the same mocked Date.now() timestamp and the
+      // assertions below couldn't tell which source fetchLatestSummary picked.
+      delete process.env.GITHUB_TOKEN;
+      const later = vi.spyOn(Date, 'now').mockReturnValue(3_000_000);
       try {
-        await saveSummary('acme/widgets', '22', 'dual-write prompt', 'dual-write result');
+        await saveSummary('acme/widgets', '22', 'dual-write-only prompt', 'dual-write-only result');
       } finally {
         later.mockRestore();
       }
@@ -381,7 +387,7 @@ describe('manage-summaries', () => {
       process.chdir(fetcher);
       const { content } = await fetchLatestSummary('acme/widgets', '22');
 
-      expect(content).toContain('dual-write result');
+      expect(content).toContain('dual-write-only result');
       expect(content).not.toContain('origin-only result');
     });
 
