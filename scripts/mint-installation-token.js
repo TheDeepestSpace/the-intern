@@ -67,24 +67,26 @@ async function getInstallationIdForRepo(
   if (!targetRepo || !targetRepo.includes('/')) return null;
 
   for (let attempt = 1; attempt <= retries; attempt++) {
-    const res = await fetch(`https://api.github.com/repos/${targetRepo}/installation`, {
-      headers: {
-        Authorization: `Bearer ${appJwt}`,
-        Accept: 'application/vnd.github+json',
-        'User-Agent': 'the-intern-bot',
-      },
-    });
-    if (res.ok) {
-      const data = await res.json();
-      return data.id;
+    let failure;
+    try {
+      const res = await fetch(`https://api.github.com/repos/${targetRepo}/installation`, {
+        headers: {
+          Authorization: `Bearer ${appJwt}`,
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'the-intern-bot',
+        },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return data.id;
+      }
+      failure = `Lookup installation failed for ${targetRepo} (${res.status}): ${await res.text()}`;
+    } catch (error) {
+      failure = `Lookup installation failed for ${targetRepo}: ${error.message}`;
     }
 
     const isLastAttempt = attempt === retries;
-    const errorText = await res.text();
-    console.error(
-      `Lookup installation failed for ${targetRepo} (${res.status}): ${errorText}` +
-        (isLastAttempt ? '' : ` — retrying (attempt ${attempt}/${retries})...`)
-    );
+    console.error(failure + (isLastAttempt ? '' : ` — retrying (attempt ${attempt}/${retries})...`));
     if (!isLastAttempt) await sleep(retryDelayMs);
   }
   return null;

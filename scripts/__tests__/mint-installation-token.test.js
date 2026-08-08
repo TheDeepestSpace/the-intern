@@ -154,6 +154,29 @@ describe('mint-installation-token', () => {
       expect(token).toBe('ghs_retriedtoken');
     });
 
+    it('retries the installation lookup when fetch itself rejects and succeeds', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+        .replyWithError(new Error('getaddrinfo ENOTFOUND api.github.com'));
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+        .reply(200, { id: 555 });
+      client
+        .intercept({ method: 'POST', path: '/app/installations/555/access_tokens' })
+        .reply(201, { token: 'ghs_retriedtoken' });
+
+      const token = await getInstallationToken({
+        appId: '123',
+        privateKey: TEST_PRIVATE_KEY_PEM,
+        targetRepo: 'acme/widgets',
+        retries: 3,
+        retryDelayMs: 0,
+      });
+
+      expect(token).toBe('ghs_retriedtoken');
+    });
+
     it('gives up after exhausting all retries on persistent lookup failure', async () => {
       const client = agent.get('https://api.github.com');
       client
