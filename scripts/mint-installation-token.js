@@ -48,24 +48,56 @@ function mintAppJwt(appId, privateKeyPem) {
   return `${dataToSign}.${signature}`;
 }
 
-async function getInstallationIdForRepo(appJwt, targetRepo) {
-  if (!targetRepo || !targetRepo.includes('/')) return null;
-  const res = await fetch(`https://api.github.com/repos/${targetRepo}/installation`, {
-    headers: {
-      Authorization: `Bearer ${appJwt}`,
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'the-intern-bot',
-    },
-  });
-  if (!res.ok) {
-    console.error(`Lookup installation failed for ${targetRepo} (${res.status}): ${await res.text()}`);
-    return null;
-  }
-  const data = await res.json();
-  return data.id;
+const INSTALLATION_LOOKUP_RETRIES = 3;
+const INSTALLATION_LOOKUP_RETRY_DELAY_MS = 3000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function getInstallationToken({ appId, privateKey, installationId, targetRepo }) {
+// GitHub's installation-lookup endpoint intermittently blips with a transient
+// "Repository not found" even though access is correctly configured (issue
+// #117) — a same-token retry seconds later succeeds. Retry a few times before
+// giving up so a passing API glitch doesn't red-flag the whole dispatcher job.
+async function getInstallationIdForRepo(
+  appJwt,
+  targetRepo,
+  { retries = INSTALLATION_LOOKUP_RETRIES, retryDelayMs = INSTALLATION_LOOKUP_RETRY_DELAY_MS } = {}
+) {
+  if (!targetRepo || !targetRepo.includes('/')) return null;
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const res = await fetch(`https://api.github.com/repos/${targetRepo}/installation`, {
+      headers: {
+        Authorization: `Bearer ${appJwt}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'the-intern-bot',
+      },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return data.id;
+    }
+
+    const isLastAttempt = attempt === retries;
+    const errorText = await res.text();
+    console.error(
+      `Lookup installation failed for ${targetRepo} (${res.status}): ${errorText}` +
+        (isLastAttempt ? '' : ` — retrying (attempt ${attempt}/${retries})...`)
+    );
+    if (!isLastAttempt) await sleep(retryDelayMs);
+  }
+  return null;
+}
+
+async function getInstallationToken({
+  appId,
+  privateKey,
+  installationId,
+  targetRepo,
+  retries,
+  retryDelayMs,
+}) {
   if (!appId) throw new Error('Missing APP_ID secret');
   if (!privateKey) throw new Error('Missing APP_PRIVATE_KEY secret');
 
@@ -74,7 +106,7 @@ async function getInstallationToken({ appId, privateKey, installationId, targetR
   let targetInstallationId = installationId;
   if (!targetInstallationId && targetRepo) {
     console.log(`No installationId provided, fetching installation for repo ${targetRepo}...`);
-    targetInstallationId = await getInstallationIdForRepo(appJwt, targetRepo);
+    targetInstallationId = await getInstallationIdForRepo(appJwt, targetRepo, { retries, retryDelayMs });
   }
 
   if (!targetInstallationId) {
