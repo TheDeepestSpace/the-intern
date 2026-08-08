@@ -2,7 +2,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
 const path = require('path');
-const { resolveDataRepoRemoteUrl } = require('./data-repo-remote.js');
+const { resolveDataRepoRemoteUrl, redactUrl } = require('./data-repo-remote.js');
 
 const SUPPORTED_BACKENDS = new Set(['claude', 'codex']);
 
@@ -28,7 +28,8 @@ function runGit(cmd, options = {}) {
     return execSync(`git ${cmd}`, { encoding: 'utf8', ...execOptions }).trim();
   } catch (err) {
     if (allowFailure) return '';
-    throw new Error(`git ${cmd} failed: ${(err.stderr || err.message || '').toString().trim()}`);
+    const detail = (err.stderr || err.message || '').toString().trim();
+    throw new Error(`git ${redactUrl(cmd)} failed: ${redactUrl(detail)}`);
   }
 }
 
@@ -58,7 +59,20 @@ function fetchLatestSummaryFromDataRepo(targetRepo, issueNumber, remoteUrl) {
   const branchName = getBranchName(targetRepo, issueNumber);
 
   // Fetch branch from the-intern-data if available (it may legitimately not exist yet)
-  runGit(`fetch ${remoteUrl} ${branchName}:${branchName}`, { allowFailure: true });
+  try {
+    runGit(`fetch ${remoteUrl} ${branchName}:${branchName}`);
+  } catch (err) {
+    // "couldn't find remote ref" means no prior summary was ever saved for
+    // this issue — that's expected and silent. Any other fetch error (auth,
+    // network, ref-update) must not read a possibly-stale/absent local
+    // branch below, so both cases return here, but only the latter warns.
+    if (!/couldn't find remote ref/i.test(err.message)) {
+      console.warn(`::warning::Could not fetch prior summary branch ${branchName}: ${err.message}`);
+    } else {
+      console.log(`No prior summary branch found for ${branchName}`);
+    }
+    return { content: '', filename: '' };
+  }
 
   // Each save adds one summary in its own commit. Read the file added by the
   // branch tip so same-millisecond filenames remain ordered by persistence,

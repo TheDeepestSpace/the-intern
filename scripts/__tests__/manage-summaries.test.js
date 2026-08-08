@@ -35,6 +35,8 @@ function initWorkRepo(dir) {
 describe('manage-summaries', () => {
   let originalHome;
   let originalCwd;
+  let originalAppId;
+  let originalAppPrivateKey;
   let tmpRoot;
   let fakeHome;
   let dataRemoteDir;
@@ -54,6 +56,8 @@ describe('manage-summaries', () => {
 
   beforeEach(() => {
     originalCwd = process.cwd();
+    originalAppId = process.env.APP_ID;
+    originalAppPrivateKey = process.env.APP_PRIVATE_KEY;
     tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'manage-summaries-'));
     dataRemoteDir = path.join(tmpRoot, 'data-remote.git');
     initBareRemote(dataRemoteDir);
@@ -67,8 +71,10 @@ describe('manage-summaries', () => {
     delete process.env.GH_TOKEN;
     delete process.env.GITHUB_OUTPUT;
     delete process.env.DATA_REPO_REMOTE_URL;
-    delete process.env.APP_ID;
-    delete process.env.APP_PRIVATE_KEY;
+    if (originalAppId === undefined) delete process.env.APP_ID;
+    else process.env.APP_ID = originalAppId;
+    if (originalAppPrivateKey === undefined) delete process.env.APP_PRIVATE_KEY;
+    else process.env.APP_PRIVATE_KEY = originalAppPrivateKey;
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   });
 

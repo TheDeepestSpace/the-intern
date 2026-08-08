@@ -80,6 +80,19 @@ describe('manage-pending-retries', () => {
     expect(await readEntries()).toEqual([]);
   });
 
+  it('readEntries returns [] and does not read a stale local branch when the fetch itself fails', async () => {
+    // Simulate a prior successful readEntries/updateEntries in this same
+    // checkout (leaving a local pending-retries ref behind), then a later
+    // call whose fetch fails for a real reason (here: remote now unreachable)
+    // rather than because the branch is missing.
+    const work = newWorkDir('work-read-fetch-failure');
+    process.chdir(work);
+    await updateEntries((entries) => upsertStall(entries, { key: 'stale-key', source: 'dispatcher', targetRepo: 'acme/widgets', retryAfter: '2026-08-03T00:00:00.000Z', dispatch: DISPATCH }));
+
+    process.env.DATA_REPO_REMOTE_URL = '/nonexistent/path/to/the-intern-data.git';
+    expect(await readEntries()).toEqual([]);
+  });
+
   it('readEntries returns [] when the-intern-data remote cannot be resolved', async () => {
     delete process.env.DATA_REPO_REMOTE_URL;
     delete process.env.APP_ID;

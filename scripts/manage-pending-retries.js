@@ -12,7 +12,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
-const { resolveDataRepoRemoteUrl } = require('./data-repo-remote.js');
+const { resolveDataRepoRemoteUrl, redactUrl } = require('./data-repo-remote.js');
 
 const BRANCH_NAME = 'pending-retries';
 const FILE_NAME = 'pending-retries.json';
@@ -31,7 +31,8 @@ function runGit(cmd, options = {}) {
     return execSync(`git ${cmd}`, { encoding: 'utf8', ...execOptions, stdio }).trim();
   } catch (err) {
     if (allowFailure) return '';
-    throw new Error(`git ${cmd} failed: ${(err.stderr || err.message || '').toString().trim()}`);
+    const detail = (err.stderr || err.message || '').toString().trim();
+    throw new Error(`git ${redactUrl(cmd)} failed: ${redactUrl(detail)}`);
   }
 }
 
@@ -78,7 +79,19 @@ async function readEntries() {
     return [];
   }
 
-  runGit(`fetch ${remoteUrl} ${BRANCH_NAME}:${BRANCH_NAME}`, { allowFailure: true });
+  try {
+    runGit(`fetch ${remoteUrl} ${BRANCH_NAME}:${BRANCH_NAME}`);
+  } catch (err) {
+    // "couldn't find remote ref" means the branch legitimately doesn't exist
+    // yet (e.g. no retry has ever been queued) — that's an empty queue, not a
+    // failure worth logging. Any other fetch error (auth, network,
+    // ref-update) must not fall through to reading a possibly-stale/absent
+    // local branch below, so both cases return [] here.
+    if (!/couldn't find remote ref/i.test(err.message)) {
+      console.error(`::error::${err.message}`);
+    }
+    return [];
+  }
   const raw = runGit(`show ${BRANCH_NAME}:${FILE_NAME}`, { allowFailure: true });
   try {
     return parseEntries(raw);

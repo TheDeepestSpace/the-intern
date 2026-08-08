@@ -19,8 +19,13 @@ jobs:
     # would race and strand each other on a stale token. `steps.*` outputs aren't
     # available yet when this group is resolved, so the backend keyword is matched
     # straight out of the raw event text.
+    #
+    # Non-codex runs also need global (not per-chat) serialization: every chat
+    # clones and pushes the same shared `telegram` branch on the-intern-data, so
+    # two different chats running concurrently can race to push convo.md and
+    # lose one chat's update to a non-fast-forward rejection.
     concurrency:
-      group: ${{ contains(github.event.client_payload.text, 'backend=codex') && 'the-intern-codex-auth' || format('telegram-{0}', github.event.client_payload.chat_id) }}
+      group: ${{ contains(github.event.client_payload.text, 'backend=codex') && 'the-intern-codex-auth' || 'telegram-state' }}
       cancel-in-progress: false
       queue: max
     container:
@@ -216,7 +221,7 @@ jobs:
 
           id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
           chown -R dev:dev . /home/dev /tmp/prompt.txt /tmp/normalize-codex-result.js 2>/dev/null || true
-          su dev -c '
+          env -u APP_ID -u APP_PRIVATE_KEY su dev -c '
             export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"
             export TG_BOT_TOKEN="$TG_BOT_TOKEN"
             export CHAT_ID="$CHAT_ID"
@@ -257,10 +262,21 @@ jobs:
         env:
           REPO_ADMIN_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
 
+      # The agent can run long enough for steps.data_token (minted before "Run
+      # agent") to have crossed its one-hour expiry, so a fresh token is minted
+      # right before the push that actually needs it.
+      - name: Mint fresh installation token for the-intern-data
+        id: push_token
+        run: node scripts/mint-installation-token.js
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          TARGET_REPO: TheDeepestSpace/the-intern-data
+
       - name: Commit updated convo.md to telegram branch on the-intern-data
         working-directory: tg-state
         env:
-          GH_TOKEN: ${{ steps.data_token.outputs.token }}
+          GH_TOKEN: ${{ steps.push_token.outputs.token }}
         run: |
           git config user.name "the-intern-bot[bot]"
           git config user.email "the-intern-bot[bot]@users.noreply.github.com"
