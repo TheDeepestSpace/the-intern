@@ -295,12 +295,17 @@ jobs:
       # this same target repo/issue that ended without committing/pushing
       # everything — crash, timeout, killed runner, or a silent stall (issue
       # #115). Applies backed-up commits first (git am), then any remaining
-      # uncommitted diff on top, and clears the backup branch immediately after
-      # so a third stalled run doesn't reapply the same stale patch on newer
-      # work. No-ops (restored=false) when there is nothing to restore.
+      # uncommitted diff on top, and clears the backup branch once everything
+      # present replayed/applied cleanly (leaving it in place on failure, for
+      # manual recovery) so a third stalled run doesn't reapply the same stale
+      # patch on newer work. No-ops (restored=false) when there is nothing to
+      # restore. Non-fatal like the Codex auth restore below it — a backup
+      # problem shouldn't block the run from reaching "Run agent", and the
+      # backup step further down (always()) recaptures whatever state exists.
       - name: Restore prior workspace backup
         id: workspace_restore
         if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
+        continue-on-error: true
         working-directory: target
         run: node "$GITHUB_WORKSPACE/scripts/manage-workspace-backup.js" restore
         env:
@@ -373,7 +378,7 @@ jobs:
 
             let prompt = `You are @the-intern-bot working on repository ${repo}, issue/PR #${issue}.\nYou have access to the GitHub CLI (\x27gh\x27) and full git tools. Use \x27gh\x27 to post comments, inspect code, run tests, or open PRs as needed.\n\n`;
             if (workspaceRestored) {
-              prompt += `Uncommitted changes from a previous incomplete run were restored below — review and commit or discard as appropriate.\n\n`;
+              prompt += `Work from a previous incomplete run on this issue was restored into this checkout. It may be local commits that were never pushed, uncommitted working-tree changes, or both. Run \x27git status\x27 and \x27git log\x27 first, then continue, commit, or discard as appropriate.\n\n`;
             }
             if (style) {
               prompt += `${style}\n\n`;

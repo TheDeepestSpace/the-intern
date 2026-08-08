@@ -39,6 +39,19 @@ function initWorkRepo(dir) {
   sh('git commit -m "initial commit"', dir);
 }
 
+// No user.name/user.email configured on the repo itself — mirrors the target
+// checkout the dispatcher's restore step runs against in production, which
+// hasn't had `git config user.name`/`user.email` applied yet (that happens
+// later, inside "Run agent"). The seed commit still needs an identity, so
+// that one is passed inline via -c rather than persisted to repo config.
+function initWorkRepoNoIdentity(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  sh('git init -b main .', dir);
+  fs.writeFileSync(path.join(dir, 'README.md'), '# scratch repo\n');
+  sh('git -c user.name=seed -c user.email=seed@example.com add README.md', dir);
+  sh('git -c user.name=seed -c user.email=seed@example.com commit -m "initial commit"', dir);
+}
+
 describe('manage-workspace-backup', () => {
   let originalHome;
   let originalCwd;
@@ -53,12 +66,18 @@ describe('manage-workspace-backup', () => {
   });
 
   afterAll(() => {
-    process.env.HOME = originalHome;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
     fs.rmSync(fakeHome, { recursive: true, force: true });
   });
 
   beforeEach(() => {
     originalCwd = process.cwd();
+    // Ambient GITHUB_OUTPUT (set when this suite runs inside GitHub Actions
+    // itself) must not leak into tests that don't opt in via
+    // withOutputFile() — otherwise runRestoreStep would append to the real
+    // step output file.
+    delete process.env.GITHUB_OUTPUT;
     tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-backup-'));
     dataRemoteDir = path.join(tmpRoot, 'data-remote.git');
     initBareRemote(dataRemoteDir);
@@ -202,6 +221,56 @@ describe('manage-workspace-backup', () => {
       expect(fs.readFileSync(path.join(fresh, 'uncommitted.txt'), 'utf8')).toBe('never even committed\n');
       expect(sh('git log --oneline -1', fresh)).toContain('unpushed commit');
       expect(sh('git status --porcelain', fresh)).toContain('uncommitted.txt');
+    });
+
+    it('replays unpushed commits via git am even when the destination checkout has no committer identity configured', async () => {
+      const work = newWorkDir('no-identity-save');
+      const baselineFile = path.join(tmpRoot, 'baseline-sha-no-identity.txt');
+      fs.writeFileSync(baselineFile, sh('git rev-parse HEAD', work) + '\n');
+
+      process.chdir(work);
+      fs.writeFileSync(path.join(work, 'committed-but-unpushed.txt'), 'agent committed this then the runner died\n');
+      sh('git add committed-but-unpushed.txt', work);
+      sh('git commit -m "agent work that never got pushed"', work);
+
+      await runBackupStep({ TARGET_REPO: 'acme/widgets', ISSUE_NUMBER: '10', BASELINE_SHA_FILE: baselineFile });
+      expect(process.exitCode).toBe(0);
+
+      const fresh = path.join(tmpRoot, 'no-identity-restore');
+      initWorkRepoNoIdentity(fresh);
+      process.chdir(fresh);
+
+      await runRestoreStep({ TARGET_REPO: 'acme/widgets', ISSUE_NUMBER: '10' });
+
+      expect(fs.readFileSync(path.join(fresh, 'committed-but-unpushed.txt'), 'utf8')).toBe(
+        'agent committed this then the runner died\n'
+      );
+      expect(sh('git log --oneline -1', fresh)).toContain('agent work that never got pushed');
+    });
+
+    it('leaves the backup branch in place when the restore fails to apply cleanly', async () => {
+      const work = newWorkDir('conflict-save');
+      process.chdir(work);
+      fs.appendFileSync(path.join(work, 'README.md'), 'agent edit from the crashed run\n');
+
+      await runBackupStep({ TARGET_REPO: 'acme/widgets', ISSUE_NUMBER: '11' });
+      expect(process.exitCode).toBe(0);
+
+      // A newer, conflicting change lands in the same file before restore runs.
+      const fresh = newWorkDir('conflict-restore');
+      process.chdir(fresh);
+      fs.writeFileSync(path.join(fresh, 'README.md'), 'a completely different rewrite of this file\n');
+      sh('git commit -am "conflicting newer commit"', fresh);
+      const outputFile = withOutputFile();
+
+      await runRestoreStep({ TARGET_REPO: 'acme/widgets', ISSUE_NUMBER: '11' });
+
+      expect(fs.readFileSync(outputFile, 'utf8')).toContain('restored=false\n');
+
+      // The backup must survive a failed apply so a human can recover it manually.
+      const after = await fetchBackup('acme/widgets', '11');
+      expect(after.found).toBe(true);
+      expect(after.diffPatch).toContain('agent edit from the crashed run');
     });
   });
 

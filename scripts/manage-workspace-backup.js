@@ -21,13 +21,23 @@ const DIFF_FILE = 'diff.patch';
 const COMMITS_FILE = 'commits.patch';
 const TRANSCRIPT_DIR = 'transcript';
 const LARGE_BUFFER = 1024 * 1024 * 50;
+// Agent-infra bookkeeping that must never enter the backup: it's written into
+// the target checkout by the dispatcher's "Run agent" step, not by the agent,
+// and restoring it on the next dispatch would dump it back as an uncommitted
+// change for the agent to (wrongly) review and commit.
+const EXCLUDED_PATHS = ['session_result.txt'];
+// Debugging aid only (see collectTranscriptFiles below) — capped so a crash
+// mid-session doesn't push an unbounded, possibly secret-containing
+// transcript into the-intern-data. The tail is what matters for debugging a
+// stall anyway.
+const TRANSCRIPT_MAX_LINES = 500;
 
-function sanitizeSlug(repo) {
-  return repo.replace(/[^a-zA-Z0-9_-]/g, '-');
+function sanitizeSlug(value) {
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, '-');
 }
 
 function getBranchName(targetRepo, issueNumber) {
-  return `workspace/${sanitizeSlug(targetRepo)}/${issueNumber}`;
+  return `workspace/${sanitizeSlug(targetRepo)}/${sanitizeSlug(issueNumber)}`;
 }
 
 // Mirrors manage-pending-retries.js's runGit: stdio is suppressed on an
@@ -86,14 +96,20 @@ function resolveAheadBase(baselineShaFile) {
 
 // Runs against whatever git repo is cwd (the target-repo checkout in
 // production). Stages everything so the diff below also picks up untracked
-// files, same as the design in issue #115.
+// files, same as the design in issue #115. Neither git call here is allowed
+// to fail silently: `git diff`/`git format-patch` without --exit-code exit 0
+// even when there's nothing to show, so a real failure (e.g. ENOBUFS on a
+// huge diff) is a genuine error, not "nothing to back up" — swallowing it
+// would make the caller believe the tree is clean and delete any existing
+// backup instead of preserving it.
 function collectWorkspaceState({ baselineShaFile } = {}) {
-  runGit('add -A');
-  const diffPatch = runGit(`diff --cached HEAD --binary`, { allowFailure: true, trim: false });
+  const pathspec = ['.', ...EXCLUDED_PATHS.map(p => `":(exclude)${p}"`)].join(' ');
+  runGit(`add -A -- ${pathspec}`);
+  const diffPatch = runGit(`diff --cached HEAD --binary`, { trim: false });
 
   const base = resolveAheadBase(baselineShaFile);
   const commitsPatch = base
-    ? runGit(`format-patch ${base}..HEAD --binary --stdout`, { allowFailure: true, trim: false })
+    ? runGit(`format-patch ${base}..HEAD --binary --stdout`, { trim: false })
     : '';
 
   return { diffPatch, commitsPatch };
@@ -129,6 +145,42 @@ function collectTranscriptFiles({ homeDir = '/home/dev', codexEventsFile = '/tmp
   }
 
   return files;
+}
+
+// Copies only the last TRANSCRIPT_MAX_LINES lines of a transcript file rather
+// than the whole thing — see TRANSCRIPT_MAX_LINES above.
+function copyTranscriptTruncated(srcPath, destPath, maxLines = TRANSCRIPT_MAX_LINES) {
+  const lines = fs.readFileSync(srcPath, 'utf8').split('\n');
+  const tail = lines.length > maxLines ? lines.slice(-maxLines) : lines;
+  fs.writeFileSync(destPath, tail.join('\n'));
+}
+
+// Fetches the backup branch, runs `prepare()` to build its new content, and
+// pushes with retry on non-fast-forward — the same race
+// manage-summaries.js/manage-pending-retries.js guard against: another run
+// can push to this backup branch between our fetch and our push. Always
+// fetches first (even on attempt 1), so a push against an already-existing
+// remote branch doesn't waste a guaranteed-to-be-rejected round trip.
+function pushWithRetry(remoteUrl, branchName, gitOpts, prepare, { maxAttempts = 3 } = {}) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    runGit('checkout --detach', { ...gitOpts, allowFailure: true });
+    runGit(`branch -D ${branchName}`, { ...gitOpts, allowFailure: true });
+    runGit(`fetch ${remoteUrl} ${branchName}:${branchName}`, { ...gitOpts, allowFailure: true });
+
+    prepare();
+
+    try {
+      runGit(`push ${remoteUrl} ${branchName}`, gitOpts);
+      return;
+    } catch (err) {
+      const isRejected = /non-fast-forward|fetch first/i.test(err.message);
+      if (isRejected && attempt < maxAttempts) {
+        console.warn(`Push to ${branchName} was rejected (attempt ${attempt}/${maxAttempts}), retrying: ${err.message}`);
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 // Pushes an empty tree to the backup branch (or does nothing if it's already
@@ -175,14 +227,24 @@ async function clearBackup(targetRepo, issueNumber) {
       return;
     }
 
-    runGit('rm -rf .', gitOpts);
-    runGit(`commit --allow-empty -m "workspace-backup: cleared ${new Date().toISOString()}"`, gitOpts);
-    runGit(`push ${remoteUrl} ${branchName}`, gitOpts);
+    pushWithRetry(remoteUrl, branchName, gitOpts, () => {
+      runGit(`checkout ${branchName}`, gitOpts);
+      runGit('rm -rf --ignore-unmatch .', gitOpts);
+      runGit(`commit --allow-empty -m "workspace-backup: cleared ${new Date().toISOString()}"`, gitOpts);
+    });
     console.log(`Cleared backup branch ${branchName}.`);
   } catch (err) {
     console.error(`::error::Failed to clear backup branch ${branchName}: ${err.message}`);
     process.exitCode = 1;
   } finally {
+    // Deletes only the local ref inside the worktree's shared object store
+    // (the target-repo checkout in production) — the backup branch itself
+    // lives on the-intern-data's remote and is untouched. A linked worktree
+    // shares refs with the repo it was created from, so leaving this ref
+    // around would make the backup content (including transcripts) fetchable
+    // from within the target checkout, and thus pushable by a subsequent
+    // `git push --all`/`--mirror`.
+    runGit(`branch -D ${branchName}`, { ...gitOpts, allowFailure: true });
     runGit(`worktree remove --force "${worktreeDir}"`, { allowFailure: true });
     fs.rmSync(worktreeDir, { recursive: true, force: true });
   }
@@ -210,7 +272,6 @@ async function saveBackup(targetRepo, issueNumber, { diffPatch, commitsPatch, tr
   }
 
   const branchName = getBranchName(targetRepo, issueNumber);
-  const maxAttempts = 3;
   const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-backup-save-'));
   const gitOpts = { cwd: worktreeDir };
 
@@ -220,20 +281,16 @@ async function saveBackup(targetRepo, issueNumber, { diffPatch, commitsPatch, tr
     runGit('config user.name "the-intern-bot[bot]"', { ...gitOpts, allowFailure: true });
     runGit('config user.email "the-intern-bot[bot]@users.noreply.github.com"', { ...gitOpts, allowFailure: true });
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      if (attempt > 1) {
-        runGit('checkout --detach', { ...gitOpts, allowFailure: true });
-        runGit(`branch -D ${branchName}`, { ...gitOpts, allowFailure: true });
-        runGit(`fetch ${remoteUrl} ${branchName}:${branchName}`, { ...gitOpts, allowFailure: true });
-      }
-
+    pushWithRetry(remoteUrl, branchName, gitOpts, () => {
       try {
         runGit(`checkout --orphan ${branchName}`, gitOpts);
-        runGit('rm -rf .', { ...gitOpts, allowFailure: true });
       } catch {
         runGit(`checkout ${branchName}`, gitOpts);
-        runGit('rm -rf .', { ...gitOpts, allowFailure: true });
       }
+      // --ignore-unmatch (not allowFailure) so a brand-new orphan with
+      // nothing tracked yet is fine, but any other rm failure still throws
+      // instead of silently leaving the target repo's own tree staged below.
+      runGit('rm -rf --ignore-unmatch .', gitOpts);
 
       if (diffPatch) fs.writeFileSync(path.join(worktreeDir, DIFF_FILE), diffPatch, 'utf8');
       if (commitsPatch) fs.writeFileSync(path.join(worktreeDir, COMMITS_FILE), commitsPatch, 'utf8');
@@ -242,7 +299,7 @@ async function saveBackup(targetRepo, issueNumber, { diffPatch, commitsPatch, tr
         fs.mkdirSync(transcriptDir, { recursive: true });
         for (const file of transcriptFiles) {
           try {
-            fs.copyFileSync(file.path, path.join(transcriptDir, file.name));
+            copyTranscriptTruncated(file.path, path.join(transcriptDir, file.name));
           } catch (err) {
             console.warn(`::warning::Could not copy transcript ${file.path}: ${err.message}`);
           }
@@ -251,24 +308,15 @@ async function saveBackup(targetRepo, issueNumber, { diffPatch, commitsPatch, tr
 
       runGit('add -A', gitOpts);
       runGit(`commit -m "workspace-backup: ${targetRepo} #${issueNumber} at ${new Date().toISOString()}"`, gitOpts);
-
-      try {
-        runGit(`push ${remoteUrl} ${branchName}`, gitOpts);
-        console.log(`Pushed workspace backup to the-intern-data:${branchName}`);
-        return;
-      } catch (err) {
-        const isRejected = /non-fast-forward|fetch first/i.test(err.message);
-        if (isRejected && attempt < maxAttempts) {
-          console.warn(`Push to ${branchName} was rejected (attempt ${attempt}/${maxAttempts}), retrying: ${err.message}`);
-          continue;
-        }
-        throw err;
-      }
-    }
+    });
+    console.log(`Pushed workspace backup to the-intern-data:${branchName}`);
   } catch (err) {
     console.error(`::error::Failed to save workspace backup for ${targetRepo} #${issueNumber}: ${err.message}`);
     process.exitCode = 1;
   } finally {
+    // See the matching comment in clearBackup: don't leave the backup branch
+    // fetchable from inside the worktree's (target checkout's) object store.
+    runGit(`branch -D ${branchName}`, { ...gitOpts, allowFailure: true });
     runGit(`worktree remove --force "${worktreeDir}"`, { allowFailure: true });
     fs.rmSync(worktreeDir, { recursive: true, force: true });
   }
@@ -290,9 +338,16 @@ async function fetchBackup(targetRepo, issueNumber) {
   }
   if (!remoteUrl) return { found: false, diffPatch: '', commitsPatch: '' };
 
+  // Fetched into a scratch ref outside refs/heads rather than a same-named
+  // local branch: this runs directly in cwd, the target-repo checkout, right
+  // before the agent runs with a push token for that repo. A normal branch
+  // ref would sit in target/.git and be reachable — and pushable (`git push
+  // --all`/`--mirror`) — by the agent for the rest of the run. The ref is
+  // deleted again once we're done reading from it, below.
   const branchName = getBranchName(targetRepo, issueNumber);
+  const scratchRef = `refs/workspace-backup-fetch/${sanitizeSlug(issueNumber)}`;
   try {
-    runGit(`fetch ${remoteUrl} ${branchName}:${branchName}`);
+    runGit(`fetch ${remoteUrl} ${branchName}:${scratchRef}`);
   } catch (err) {
     if (!/couldn't find remote ref/i.test(err.message)) {
       console.warn(`::warning::Could not fetch workspace backup branch ${branchName}: ${err.message}`);
@@ -302,13 +357,17 @@ async function fetchBackup(targetRepo, issueNumber) {
     return { found: false, diffPatch: '', commitsPatch: '' };
   }
 
-  const diffPatch = runGit(`show ${branchName}:${DIFF_FILE}`, { allowFailure: true, trim: false });
-  const commitsPatch = runGit(`show ${branchName}:${COMMITS_FILE}`, { allowFailure: true, trim: false });
-  const found = Boolean(diffPatch || commitsPatch);
-  if (found) console.log(`Retrieved workspace backup from the-intern-data: ${branchName}`);
-  else console.log(`Workspace backup branch ${branchName} exists but has nothing to restore.`);
+  try {
+    const diffPatch = runGit(`show ${scratchRef}:${DIFF_FILE}`, { allowFailure: true, trim: false });
+    const commitsPatch = runGit(`show ${scratchRef}:${COMMITS_FILE}`, { allowFailure: true, trim: false });
+    const found = Boolean(diffPatch || commitsPatch);
+    if (found) console.log(`Retrieved workspace backup from the-intern-data: ${branchName}`);
+    else console.log(`Workspace backup branch ${branchName} exists but has nothing to restore.`);
 
-  return { found, diffPatch, commitsPatch, branchName };
+    return { found, diffPatch, commitsPatch, branchName };
+  } finally {
+    runGit(`update-ref -d ${scratchRef}`, { allowFailure: true });
+  }
 }
 
 // Orchestrates the `always()` post-agent workflow step: decide what (if
@@ -339,10 +398,12 @@ async function runBackupStep(env = process.env) {
 }
 
 // Orchestrates the pre-agent restore step: fetch, replay commits then apply
-// the uncommitted diff onto cwd (the fresh target-repo checkout), and clear
-// the backup branch once done — regardless of whether the replay/apply
-// applied cleanly — so a third stalled run never reapplies the same stale
-// patch on top of newer work (issue #115).
+// the uncommitted diff onto cwd (the fresh target-repo checkout). Clears the
+// backup branch only once everything that was present replayed/applied
+// cleanly — so a third stalled run never reapplies the same stale patch on
+// top of newer work (issue #115) — but leaves it in place on any failure, so
+// a conflicting apply doesn't silently discard the only copy of the agent's
+// prior work; a human can recover it from the backup branch manually.
 async function runRestoreStep(env = process.env) {
   const targetRepo = env.TARGET_REPO || '';
   const issueNumber = env.ISSUE_NUMBER || '';
@@ -359,16 +420,22 @@ async function runRestoreStep(env = process.env) {
   }
 
   let restoredSomething = false;
+  let restoreFailed = false;
 
   if (backup.commitsPatch) {
     const patchFile = path.join(os.tmpdir(), 'workspace-backup-commits.patch');
     fs.writeFileSync(patchFile, backup.commitsPatch, 'utf8');
     try {
-      runGit(`am --3way "${patchFile}"`);
+      // `git am` needs a committer identity even though the patch carries
+      // its own author, and this restore step runs before the dispatcher
+      // configures one in the target checkout (that happens later, inside
+      // "Run agent") — set it inline for just this command instead.
+      runGit(`-c user.name="the-intern-bot[bot]" -c user.email="the-intern-bot[bot]@users.noreply.github.com" am --3way "${patchFile}"`);
       restoredSomething = true;
       console.log('Restored previously unpushed commits from backup.');
     } catch (err) {
       runGit('am --abort', { allowFailure: true });
+      restoreFailed = true;
       console.warn(`::warning::Could not replay backed-up commits cleanly, they were left on the backup branch's history but not applied: ${err.message}`);
     }
   }
@@ -381,11 +448,18 @@ async function runRestoreStep(env = process.env) {
       restoredSomething = true;
       console.log('Restored previously uncommitted changes from backup.');
     } catch (err) {
+      restoreFailed = true;
       console.warn(`::warning::Could not apply backed-up uncommitted diff cleanly: ${err.message}`);
     }
   }
 
   writeOutput('restored', restoredSomething ? 'true' : 'false');
+
+  if (restoreFailed) {
+    console.warn(`::warning::Leaving backup branch ${backup.branchName} in place — part of the restore failed, so it needs manual recovery instead of being auto-cleared.`);
+    return;
+  }
+
   await clearBackup(targetRepo, issueNumber);
 }
 
