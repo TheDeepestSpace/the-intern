@@ -148,9 +148,27 @@ function collectTranscriptFiles({ homeDir = '/home/dev', codexEventsFile = '/tmp
 }
 
 // Copies only the last TRANSCRIPT_MAX_LINES lines of a transcript file rather
-// than the whole thing — see TRANSCRIPT_MAX_LINES above.
+// than the whole thing — see TRANSCRIPT_MAX_LINES above. Reads only a bounded
+// tail of the file itself first: a stalled session is exactly the case that
+// produces a huge transcript, and reading the whole thing into a string risks
+// high memory use or ERR_STRING_TOO_LONG just to throw most of it away.
+const TRANSCRIPT_TAIL_BYTES = 8 * 1024 * 1024;
+
 function copyTranscriptTruncated(srcPath, destPath, maxLines = TRANSCRIPT_MAX_LINES) {
-  const lines = fs.readFileSync(srcPath, 'utf8').split('\n');
+  const { size } = fs.statSync(srcPath);
+  const start = Math.max(0, size - TRANSCRIPT_TAIL_BYTES);
+  const fd = fs.openSync(srcPath, 'r');
+  let chunk;
+  try {
+    const length = size - start;
+    const buf = Buffer.allocUnsafe(length);
+    fs.readSync(fd, buf, 0, length, start);
+    chunk = buf.toString('utf8');
+  } finally {
+    fs.closeSync(fd);
+  }
+  const lines = chunk.split('\n');
+  if (start > 0) lines.shift();
   const tail = lines.length > maxLines ? lines.slice(-maxLines) : lines;
   fs.writeFileSync(destPath, tail.join('\n'));
 }
@@ -307,7 +325,12 @@ async function saveBackup(targetRepo, issueNumber, { diffPatch, commitsPatch, tr
       }
 
       runGit('add -A', gitOpts);
-      runGit(`commit -m "workspace-backup: ${targetRepo} #${issueNumber} at ${new Date().toISOString()}"`, gitOpts);
+      // --allow-empty: re-backing up an identical stalled state (e.g. a
+      // retained backup after a failed restore, then a run that changes
+      // nothing) would otherwise fail with "nothing to commit" and
+      // red-flag a backup that's already correctly stored. clearBackup
+      // already does the same.
+      runGit(`commit --allow-empty -m "workspace-backup: ${targetRepo} #${issueNumber} at ${new Date().toISOString()}"`, gitOpts);
     });
     console.log(`Pushed workspace backup to the-intern-data:${branchName}`);
   } catch (err) {

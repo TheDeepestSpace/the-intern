@@ -272,6 +272,39 @@ describe('manage-workspace-backup', () => {
       expect(after.found).toBe(true);
       expect(after.diffPatch).toContain('agent edit from the crashed run');
     });
+
+    it('leaves the checkout clean and the backup intact when git am fails to replay a conflicting commit', async () => {
+      const work = newWorkDir('am-conflict-save');
+      const baselineFile = path.join(tmpRoot, 'baseline-sha-am-conflict.txt');
+      fs.writeFileSync(baselineFile, sh('git rev-parse HEAD', work) + '\n');
+
+      process.chdir(work);
+      fs.writeFileSync(path.join(work, 'README.md'), 'agent changed line 1\n');
+      sh('git commit -am "agent commit that will conflict on restore"', work);
+
+      await runBackupStep({ TARGET_REPO: 'acme/widgets', ISSUE_NUMBER: '12', BASELINE_SHA_FILE: baselineFile });
+      expect(process.exitCode).toBe(0);
+
+      // A newer, conflicting commit to the same file lands before restore runs.
+      const fresh = newWorkDir('am-conflict-restore');
+      process.chdir(fresh);
+      fs.writeFileSync(path.join(fresh, 'README.md'), 'someone else changed line 1\n');
+      sh('git commit -am "conflicting newer commit"', fresh);
+      const outputFile = withOutputFile();
+
+      await runRestoreStep({ TARGET_REPO: 'acme/widgets', ISSUE_NUMBER: '12' });
+
+      expect(fs.readFileSync(outputFile, 'utf8')).toContain('restored=false\n');
+
+      // The backup must survive a failed am so a human can recover it manually.
+      const after = await fetchBackup('acme/widgets', '12');
+      expect(after.found).toBe(true);
+      expect(after.commitsPatch).toContain('agent commit that will conflict on restore');
+
+      // `am --abort` must leave the checkout usable, not mid-am.
+      expect(fs.existsSync(path.join(fresh, '.git', 'rebase-apply'))).toBe(false);
+      expect(sh('git status --porcelain', fresh)).toBe('');
+    });
   });
 
   describe('runBackupStep clearing behavior', () => {
