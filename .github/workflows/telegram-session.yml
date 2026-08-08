@@ -135,6 +135,7 @@ jobs:
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          DATA_CHECKOUT_OUTCOME: ${{ steps.data_checkout.outcome }}
           CLEAN_TEXT: ${{ steps.parse.outputs.clean_text }}
           RETRY_SOURCE: telegram
           WORKFLOW_FILE: telegram-session.yml
@@ -180,28 +181,16 @@ jobs:
               if (err.code !== "ENOENT") throw err;
             }
 
-            // Reads convo.md from a clone dir plus its last-touched commit time, so
-            // the two sources below (the telegram branch on this repo, and on
-            // the-intern-data, see issue #112) can be compared and the more
+            // Reads the full convo.md from a clone dir plus its last-touched commit
+            // time, so the two sources below (the telegram branch on this repo, and
+            // on the-intern-data, see issue #112) can be compared and the more
             // recently updated one used — context should never look "lost" mid cutover.
             function readConvo(dir) {
               const { execSync } = require("child_process");
               let content = "";
               let mtime = 0;
               try {
-                const buffer = fs.readFileSync(`${dir}/convo.md`);
-                const MAX_CONVO_BYTES = 20 * 1024;
-                if (buffer.length > MAX_CONVO_BYTES) {
-                  const start = buffer.length - MAX_CONVO_BYTES;
-                  let contentStart = start;
-                  if (start > 0 && buffer[start - 1] !== 0x0a) {
-                    const firstNewline = buffer.indexOf(0x0a, start);
-                    contentStart = firstNewline === -1 ? buffer.length : firstNewline + 1;
-                  }
-                  content = buffer.subarray(contentStart).toString("utf8");
-                } else {
-                  content = buffer.toString("utf8");
-                }
+                content = fs.readFileSync(`${dir}/convo.md`, "utf8");
                 try {
                   mtime = Number(execSync(`git -C ${dir} log -1 --format=%ct -- convo.md`, { encoding: "utf8" }).trim()) || 0;
                 } catch (err) {
@@ -213,17 +202,39 @@ jobs:
               return { content, mtime };
             }
 
+            // Truncates to the last N bytes on a line boundary, for prompt context
+            // only — the full content is what gets persisted (see below).
+            function truncateForPrompt(content) {
+              const buffer = Buffer.from(content, "utf8");
+              const MAX_CONVO_BYTES = 20 * 1024;
+              if (buffer.length <= MAX_CONVO_BYTES) return content;
+              const start = buffer.length - MAX_CONVO_BYTES;
+              let contentStart = start;
+              if (start > 0 && buffer[start - 1] !== 0x0a) {
+                const firstNewline = buffer.indexOf(0x0a, start);
+                contentStart = firstNewline === -1 ? buffer.length : firstNewline + 1;
+              }
+              return buffer.subarray(contentStart).toString("utf8");
+            }
+
             const primaryConvo = readConvo(".");
-            const dataRepoConvo = readConvo("../tg-data-state");
+            // Only trust tg-data-state if its checkout step actually succeeded —
+            // a failed checkout can still leave a local orphan-branch placeholder
+            // on disk whose commit looks newer than the real conversation.
+            const dataRepoConvo = process.env.DATA_CHECKOUT_OUTCOME === "success"
+              ? readConvo("../tg-data-state")
+              : { content: "", mtime: 0 };
             const convo = dataRepoConvo.mtime > primaryConvo.mtime && dataRepoConvo.content
               ? dataRepoConvo.content
               : primaryConvo.content;
 
-            // Write the selected (newer) source back to tg-state/convo.md so the
-            // on-disk file the agent reads/updates and the prompt context agree —
-            // otherwise the agent could append to a stale primaryConvo while the
+            // Write the full selected (newer) source back to tg-state/convo.md so
+            // the on-disk file the agent reads/updates and the prompt context agree
+            // — otherwise the agent could append to a stale primaryConvo while the
             // prompt above it shows the newer dataRepoConvo, and the later mirror
-            // step would push that stale file back over the newer copy.
+            // step would push that stale file back over the newer copy. Unlike the
+            // prompt below, this is never truncated, so conversations over 20 KB
+            // don't lose their earlier history on disk.
             if (convo) {
               fs.writeFileSync("convo.md", convo);
             }
@@ -240,7 +251,8 @@ jobs:
               const photoPart = replyPhotoPath ? ` (photo attached: ${replyPhotoPath})` : "";
               replyNote = `\n\nThis message is a reply to Telegram message ${replyToMessageId}${textPart}${photoPart}`;
             }
-            const prompt = `${instructions}\n\n${style}\n\nPrior Conversation Summary (from convo.md):\n${convo}\n\nNew Telegram Message:\n${msg}${replyNote}${photoNote}`;
+            const promptConvo = truncateForPrompt(convo);
+            const prompt = `${instructions}\n\n${style}\n\nPrior Conversation Summary (from convo.md):\n${promptConvo}\n\nNew Telegram Message:\n${msg}${replyNote}${photoNote}`;
             fs.writeFileSync("/tmp/prompt.txt", prompt);
           '
 
