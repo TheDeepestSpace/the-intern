@@ -7,4 +7,9 @@ compatibility_flags = ["nodejs_compat"]
 AGENT_INFRA_OWNER = "TheDeepestSpace"
 AGENT_INFRA_REPO = "the-intern"
 
-# no-op change to trigger deploy-worker.yml after Node 22 fix (#27)
+[triggers]
+# Heartbeats usage-limit-poller.yml via repository_dispatch (poller_tick) —
+# more reliable than GitHub Actions' own `schedule` trigger, which can lag
+# under load (see #105). The GH-side schedule/workflow_dispatch triggers stay
+# in place as a fallback.
+crons = ["*/5 * * * *"]
