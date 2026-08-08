@@ -12,20 +12,23 @@ permissions:
 jobs:
   respond:
     runs-on: ubuntu-latest
+    # All runs — codex-backend or not — share a single global concurrency group:
+    #
     # codex-backend runs need global serialization across the whole repo (not just
     # per-chat): codex proactively rotates its own refresh token in place, and
     # rotated refresh tokens are typically single-use, so an overlapping codex run
     # from here and from dispatcher.yml restoring/persisting CODEX_AUTH_JSON at once
-    # would race and strand each other on a stale token. `steps.*` outputs aren't
-    # available yet when this group is resolved, so the backend keyword is matched
-    # straight out of the raw event text.
+    # would race and strand each other on a stale token.
     #
-    # Non-codex runs also need global (not per-chat) serialization: every chat
-    # clones and pushes the same shared `telegram` branch on the-intern-data, so
-    # two different chats running concurrently can race to push convo.md and
-    # lose one chat's update to a non-fast-forward rejection.
+    # Non-codex runs also need global (not just per-chat) serialization: every chat
+    # clones and pushes the same shared `telegram` branch on the-intern-data, so two
+    # different chats — or a codex and a non-codex run — running concurrently can
+    # race to push convo.md. The push step below retries on rejection by fetching
+    # and rebasing, but that can't recover from a genuine rebase conflict, so
+    # sharing one group with dispatcher.yml's codex-auth serialization avoids the
+    # race outright instead of relying on retries.
     concurrency:
-      group: ${{ contains(github.event.client_payload.text, 'backend=codex') && 'the-intern-codex-auth' || 'telegram-state' }}
+      group: the-intern-codex-auth
       cancel-in-progress: false
       queue: max
     container:
@@ -280,17 +283,17 @@ jobs:
         run: |
           git config user.name "the-intern-bot[bot]"
           git config user.email "the-intern-bot[bot]@users.noreply.github.com"
-          git add convo.md || true
-          if ! git commit -m "telegram: update convo.md $(date -u +%FT%TZ)"; then
+          git add convo.md
+          if git diff --cached --quiet; then
             echo "nothing to commit"
             exit 0
           fi
+          git commit -m "telegram: update convo.md $(date -u +%FT%TZ)"
 
-          # The 'the-intern-codex-auth' vs 'telegram-state' concurrency groups above
-          # only serialize runs within the same group, so a codex-backend run and a
-          # non-codex run can still push this shared branch concurrently. Fetch,
-          # rebase onto the latest tip, and retry instead of losing this update to a
-          # non-fast-forward rejection.
+          # The concurrency group above serializes all runs of this job, but the
+          # shared `telegram` branch can still be pushed to from elsewhere (e.g. a
+          # manual push). Fetch, rebase onto the latest tip, and retry instead of
+          # losing this update to a non-fast-forward rejection.
           for attempt in 1 2 3 4 5; do
             if git push origin telegram; then
               exit 0
