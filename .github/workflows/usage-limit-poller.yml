@@ -11,9 +11,10 @@ jobs:
   poll:
     runs-on: ubuntu-latest
     permissions:
-      # contents: write pushes pending-retries.json to the pending-retries branch.
+      # pending-retries.json now persists to the-intern-data via a separately
+      # minted installation token (issue #112), not this job's own GITHUB_TOKEN.
       # actions: write creates the workflow_dispatch/repository_dispatch re-fire.
-      contents: write
+      contents: read
       actions: write
     # Serialized so two overlapping runs (a slow run plus the next schedule
     # tick) can't both read the same due entry and double-fire it before
@@ -35,6 +36,10 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
           RETRY_LOCK_MINUTES: 25
+          # Lets manage-pending-retries.js mint its own the-intern-data token
+          # (issue #112) — pending-retries.json now lives solely on the-intern-data.
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
 
   notify-failure:
     needs: poll

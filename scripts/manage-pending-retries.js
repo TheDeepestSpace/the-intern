@@ -1,7 +1,7 @@
-// Persists pending-retries.json on a dedicated orphan branch, the same
-// git-branch-as-datastore approach manage-summaries.js uses for session
-// summaries (and telegram-session.yml uses for convo.md) — except this
-// branch is global (one file, one array) rather than per-issue, since the
+// Persists pending-retries.json on a dedicated branch of the-intern-data (issue
+// #112), the same git-branch-as-datastore approach manage-summaries.js uses
+// for session summaries (and telegram-session.yml uses for convo.md) — except
+// this branch is global (one file, one array) rather than per-issue, since the
 // scheduled poller needs to see every pending entry across all
 // issues/PRs/chats in a single read.
 //
@@ -12,6 +12,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
+const { resolveDataRepoRemoteUrl, redactUrl } = require('./data-repo-remote.js');
 
 const BRANCH_NAME = 'pending-retries';
 const FILE_NAME = 'pending-retries.json';
@@ -30,7 +31,8 @@ function runGit(cmd, options = {}) {
     return execSync(`git ${cmd}`, { encoding: 'utf8', ...execOptions, stdio }).trim();
   } catch (err) {
     if (allowFailure) return '';
-    throw new Error(`git ${cmd} failed: ${(err.stderr || err.message || '').toString().trim()}`);
+    const detail = (err.stderr || err.message || '').toString().trim();
+    throw new Error(`git ${redactUrl(cmd)} failed: ${redactUrl(detail)}`);
   }
 }
 
@@ -54,9 +56,42 @@ function parseEntries(raw) {
   return parsed;
 }
 
-function readEntries() {
+// resolveDataRepoRemoteUrl never throws (mint failures are swallowed and
+// logged internally) — it only ever returns a URL or null — so callers just
+// need to turn a null into the one real error case they care about.
+async function resolveRemoteUrl() {
+  const remoteUrl = await resolveDataRepoRemoteUrl();
+  if (!remoteUrl) {
+    throw new Error('the-intern-data remote is not configured (APP_ID/APP_PRIVATE_KEY or DATA_REPO_REMOTE_URL)');
+  }
+  return remoteUrl;
+}
+
+async function readEntries() {
   ensureSafeDirectory();
-  runGit(`fetch origin ${BRANCH_NAME}:${BRANCH_NAME}`, { allowFailure: true });
+  let remoteUrl;
+  try {
+    remoteUrl = await resolveRemoteUrl();
+  } catch (err) {
+    // The poller must keep running even if the-intern-data is unreachable;
+    // updateEntries (which persists a mutation) still throws on this.
+    console.error(`::error::${err.message}`);
+    return [];
+  }
+
+  try {
+    runGit(`fetch ${remoteUrl} ${BRANCH_NAME}:${BRANCH_NAME}`);
+  } catch (err) {
+    // "couldn't find remote ref" means the branch legitimately doesn't exist
+    // yet (e.g. no retry has ever been queued) — that's an empty queue, not a
+    // failure worth logging. Any other fetch error (auth, network,
+    // ref-update) must not fall through to reading a possibly-stale/absent
+    // local branch below, so both cases return [] here.
+    if (!/couldn't find remote ref/i.test(err.message)) {
+      console.error(`::error::${err.message}`);
+    }
+    return [];
+  }
   const raw = runGit(`show ${BRANCH_NAME}:${FILE_NAME}`, { allowFailure: true });
   try {
     return parseEntries(raw);
@@ -80,9 +115,9 @@ function readEntries() {
 // and switching that checkout onto the orphan pending-retries branch (whose
 // tree holds only pending-retries.json) would delete scripts/ out from under
 // them.
-function updateEntries(mutate) {
+async function updateEntries(mutate) {
   ensureSafeDirectory();
-  const hasToken = !!(process.env.GITHUB_TOKEN || process.env.GH_TOKEN);
+  const remoteUrl = await resolveRemoteUrl();
   const maxAttempts = 3;
 
   const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pending-retries-'));
@@ -102,7 +137,7 @@ function updateEntries(mutate) {
         runGit('checkout --detach', { ...gitOpts, allowFailure: true });
         runGit(`branch -D ${BRANCH_NAME}`, { ...gitOpts, allowFailure: true });
       }
-      runGit(`fetch origin ${BRANCH_NAME}:${BRANCH_NAME}`, { ...gitOpts, allowFailure: true });
+      runGit(`fetch ${remoteUrl} ${BRANCH_NAME}:${BRANCH_NAME}`, { ...gitOpts, allowFailure: true });
 
       try {
         runGit(`checkout ${BRANCH_NAME}`, gitOpts);
@@ -127,13 +162,8 @@ function updateEntries(mutate) {
       runGit(`add ${FILE_NAME}`, gitOpts);
       runGit(`commit -m "pending-retries: update ${new Date().toISOString()}"`, gitOpts);
 
-      if (!hasToken) {
-        console.log('No GITHUB_TOKEN/GH_TOKEN set; skipping push of pending-retries branch.');
-        return result;
-      }
-
       try {
-        runGit(`push origin ${BRANCH_NAME}`, gitOpts);
+        runGit(`push ${remoteUrl} ${BRANCH_NAME}`, gitOpts);
         return result;
       } catch (err) {
         const isRejected = /non-fast-forward|fetch first/i.test(err.message);
