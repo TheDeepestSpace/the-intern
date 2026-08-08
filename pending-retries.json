@@ -635,12 +635,12 @@
         }
       }
     },
-    "retryCount": 0,
+    "retryCount": 1,
     "maxRetries": 3,
-    "retryAfter": "2026-08-08T09:30:00.000Z",
+    "retryAfter": "2026-08-08T09:55:10.589Z",
     "matchedText": "You've hit your session limit",
     "createdAt": "2026-08-08T05:25:37.517Z",
-    "updatedAt": "2026-08-08T05:25:37.517Z"
+    "updatedAt": "2026-08-08T09:30:10.589Z"
   },
   {
     "key": "dispatcher:TheDeepestSpace/the-intern#114",
