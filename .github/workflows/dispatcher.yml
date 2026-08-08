@@ -291,6 +291,26 @@ jobs:
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
 
+      # Restores whatever the backup step below left behind from a prior run on
+      # this same target repo/issue that ended without committing/pushing
+      # everything — crash, timeout, killed runner, or a silent stall (issue
+      # #115). Applies backed-up commits first (git am), then any remaining
+      # uncommitted diff on top, and clears the backup branch immediately after
+      # so a third stalled run doesn't reapply the same stale patch on newer
+      # work. No-ops (restored=false) when there is nothing to restore.
+      - name: Restore prior workspace backup
+        id: workspace_restore
+        if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
+        working-directory: target
+        run: node "$GITHUB_WORKSPACE/scripts/manage-workspace-backup.js" restore
+        env:
+          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
+          # Lets manage-workspace-backup.js mint its own the-intern-data token
+          # (issue #112's pattern) — the-intern-data is the sole workspace-backup store.
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+
       - name: Install script dependencies for Codex auth round-trip
         if: needs.detect-image.outputs.backend == 'codex'
         run: npm ci --omit=dev --include=prod --no-audit --no-fund
@@ -322,6 +342,7 @@ jobs:
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
           CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
           SUMMARY_CONTEXT: ${{ steps.summary_context.outputs.summary }}
+          WORKSPACE_RESTORED: ${{ steps.workspace_restore.outputs.restored }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
           RETRY_KEY: dispatcher:${{ needs.detect-image.outputs.target_repo }}${{ needs.detect-image.outputs.issue_number != '' && format('#{0}', needs.detect-image.outputs.issue_number) || '' }}
@@ -348,8 +369,12 @@ jobs:
             const prior = process.env.PRIOR_CONTEXT || "";
             const comment = process.env.COMMENT_BODY || "";
             const style = process.env.STYLE_GUIDE || "";
+            const workspaceRestored = process.env.WORKSPACE_RESTORED === "true";
 
             let prompt = `You are @the-intern-bot working on repository ${repo}, issue/PR #${issue}.\nYou have access to the GitHub CLI (\x27gh\x27) and full git tools. Use \x27gh\x27 to post comments, inspect code, run tests, or open PRs as needed.\n\n`;
+            if (workspaceRestored) {
+              prompt += `Uncommitted changes from a previous incomplete run were restored below — review and commit or discard as appropriate.\n\n`;
+            }
             if (style) {
               prompt += `${style}\n\n`;
             }
@@ -484,6 +509,26 @@ jobs:
           # and separately clears any queued retry (with a "resumed" ping) when this
           # run succeeded.
           RESULT_FILE=/tmp/result.json node "$GITHUB_WORKSPACE/scripts/handle-agent-outcome.js"
+
+      # Unconditional, every run (issue #115): if the agent left uncommitted
+      # changes or committed-but-unpushed work behind — crash, timeout, killed
+      # runner, or a silent stall with no error signal at all — this is the
+      # only place that work is captured before the container is torn down.
+      # Pushes the diff/commits/session-transcript to a per-key orphan branch
+      # on the-intern-data, or clears that branch when the tree is clean and
+      # there's nothing unpushed, so nothing stale leaks into a later
+      # unrelated run.
+      - name: Back up incomplete workspace changes
+        if: always() && needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
+        working-directory: target
+        run: node "$GITHUB_WORKSPACE/scripts/manage-workspace-backup.js" backup
+        env:
+          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
+          # Lets manage-workspace-backup.js mint its own the-intern-data token
+          # (issue #112's pattern) — the-intern-data is the sole workspace-backup store.
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
 
       # Runs even if the step above failed: OpenAI's CI/CD guidance for this flow is
       # to write back whatever codex left on disk regardless of run outcome, since a
