@@ -51,6 +51,10 @@ jobs:
         env:
           TARGET_REPO: ${{ steps.parse.outputs.target_repo }}
           ISSUE_NUMBER: ${{ steps.parse.outputs.issue_number }}
+          # Lets manage-summaries.js mint its own the-intern-data token for the
+          # dual-read (issue #112); fails soft to origin-only if unset/denied.
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
 
       - name: Resolve backend
         id: resolve_backend
@@ -279,6 +283,10 @@ jobs:
         env:
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
+          # Lets manage-summaries.js mint its own the-intern-data token for the
+          # dual-read (issue #112); fails soft to origin-only if unset/denied.
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
 
       - name: Install script dependencies for Codex auth round-trip
         if: needs.detect-image.outputs.backend == 'codex'
@@ -495,6 +503,10 @@ jobs:
           CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
           RESULT_FILE: target/session_result.txt
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Lets manage-summaries.js mint its own the-intern-data token for the
+          # dual-write (issue #112); fails soft to origin-only if unset/denied.
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
 
   notify-failure:
     needs: [detect-image, ensure-agent-overlay, handle]
