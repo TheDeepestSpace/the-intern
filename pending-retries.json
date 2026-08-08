@@ -641,5 +641,38 @@
     "matchedText": "You've hit your session limit",
     "createdAt": "2026-08-08T05:25:37.517Z",
     "updatedAt": "2026-08-08T05:25:37.517Z"
+  },
+  {
+    "key": "dispatcher:TheDeepestSpace/the-intern#114",
+    "source": "dispatcher",
+    "targetRepo": "TheDeepestSpace/the-intern",
+    "issueNumber": "114",
+    "chatId": null,
+    "dispatch": {
+      "type": "repository_dispatch",
+      "eventType": "coderabbit_review",
+      "clientPayload": {
+        "raw": {
+          "coderabbit_review": {
+            "html_url": "https://github.com/TheDeepestSpace/the-intern/pull/114#pullrequestreview-4888202215"
+          },
+          "installation": {
+            "id": 149064607
+          },
+          "pull_request": {
+            "number": 114
+          },
+          "repository": {
+            "full_name": "TheDeepestSpace/the-intern"
+          }
+        }
+      }
+    },
+    "retryCount": 0,
+    "maxRetries": 3,
+    "retryAfter": "2026-08-08T09:30:00.000Z",
+    "matchedText": "You've hit your session limit",
+    "createdAt": "2026-08-08T05:27:45.322Z",
+    "updatedAt": "2026-08-08T05:27:45.322Z"
   }
 ]
