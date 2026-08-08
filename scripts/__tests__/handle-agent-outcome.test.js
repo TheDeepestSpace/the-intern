@@ -74,28 +74,28 @@ describe('main', () => {
     };
   }
 
-  it('clears a queued retry and pings "resumed" on success', () => {
+  it('clears a queued retry and pings "resumed" on success', async () => {
     const entries = [{ key: baseEnv.RETRY_KEY, retryCount: 1, maxRetries: 3 }];
     const d = deps({
       readResultText: vi.fn(() => ({ isError: false, text: '' })),
       updateEntries: fakeUpdateEntries(entries),
     });
 
-    main(baseEnv, d);
+    await main(baseEnv, d);
 
     expect(d.sendTelegram).toHaveBeenCalledTimes(1);
     expect(d.sendTelegram.mock.calls[0][1]).toMatch(/resumed/);
   });
 
-  it('sends nothing on success when no retry was queued', () => {
+  it('sends nothing on success when no retry was queued', async () => {
     const d = deps({ readResultText: vi.fn(() => ({ isError: false, text: '' })) });
 
-    main(baseEnv, d);
+    await main(baseEnv, d);
 
     expect(d.sendTelegram).not.toHaveBeenCalled();
   });
 
-  it('does not fail the step when clearing a retry on success errors', () => {
+  it('does not fail the step when clearing a retry on success errors', async () => {
     const d = deps({
       readResultText: vi.fn(() => ({ isError: false, text: '' })),
       updateEntries: vi.fn(() => {
@@ -103,11 +103,11 @@ describe('main', () => {
       }),
     });
 
-    expect(() => main(baseEnv, d)).not.toThrow();
+    await expect(main(baseEnv, d)).resolves.not.toThrow();
     expect(d.sendTelegram).not.toHaveBeenCalled();
   });
 
-  it('queues a retry and pings "queued" on a usage-limit stall', () => {
+  it('queues a retry and pings "queued" on a usage-limit stall', async () => {
     const d = deps({
       readResultText: vi.fn(() => ({ isError: true, text: 'usage limit reached' })),
       detectUsageLimit: vi.fn(() => ({ matchedText: 'usage limit reached', retryAfter: '2026-08-03T12:00:00.000Z' })),
@@ -115,13 +115,13 @@ describe('main', () => {
       updateEntries: fakeUpdateEntries([]),
     });
 
-    main(baseEnv, d);
+    await main(baseEnv, d);
 
     expect(d.sendTelegram).toHaveBeenCalledTimes(1);
     expect(d.sendTelegram.mock.calls[0][1]).toMatch(/queued to auto-resume/);
   });
 
-  it('alerts on exhausted retry budget instead of queuing again', () => {
+  it('alerts on exhausted retry budget instead of queuing again', async () => {
     const entries = [
       { key: baseEnv.RETRY_KEY, retryCount: 3, maxRetries: 3, source: 'dispatcher', dispatch: {}, retryAfter: '2026-08-03T00:00:00.000Z' },
     ];
@@ -132,13 +132,13 @@ describe('main', () => {
       updateEntries: fakeUpdateEntries(entries),
     });
 
-    main(baseEnv, d);
+    await main(baseEnv, d);
 
     expect(d.sendTelegram).toHaveBeenCalledTimes(1);
     expect(d.sendTelegram.mock.calls[0][1]).toMatch(/used up all/);
   });
 
-  it('falls back to the generic failure notification when queuing a stall fails', () => {
+  it('falls back to the generic failure notification when queuing a stall fails', async () => {
     const d = deps({
       readResultText: vi.fn(() => ({ isError: true, text: 'usage limit reached' })),
       detectUsageLimit: vi.fn(() => ({ matchedText: 'usage limit reached', retryAfter: '2026-08-03T12:00:00.000Z' })),
@@ -148,39 +148,39 @@ describe('main', () => {
       }),
     });
 
-    expect(() => main(baseEnv, d)).not.toThrow();
+    await expect(main(baseEnv, d)).resolves.not.toThrow();
     expect(d.sendTelegram).toHaveBeenCalledTimes(1);
     expect(d.sendTelegram.mock.calls[0][1]).toMatch(/queuing the auto-retry failed/);
   });
 
-  it('falls back to the generic failure notification when a stall has no dispatch payload', () => {
+  it('falls back to the generic failure notification when a stall has no dispatch payload', async () => {
     const d = deps({
       readResultText: vi.fn(() => ({ isError: true, text: 'usage limit reached' })),
       detectUsageLimit: vi.fn(() => ({ matchedText: 'usage limit reached', retryAfter: '2026-08-03T12:00:00.000Z' })),
       buildDispatchPayload: vi.fn(() => null),
     });
 
-    main(baseEnv, d);
+    await main(baseEnv, d);
 
     expect(d.sendTelegram).toHaveBeenCalledTimes(1);
     expect(d.sendTelegram.mock.calls[0][1]).toMatch(/ran into an error/);
     expect(d.updateEntries).not.toHaveBeenCalled();
   });
 
-  it('sends the generic failure notification for a non-stall failure', () => {
+  it('sends the generic failure notification for a non-stall failure', async () => {
     const d = deps({ readResultText: vi.fn(() => ({ isError: true, text: 'some other crash' })) });
 
-    main(baseEnv, d);
+    await main(baseEnv, d);
 
     expect(d.sendTelegram).toHaveBeenCalledTimes(1);
     expect(d.sendTelegram.mock.calls[0][1]).toMatch(/ran into an error/);
     expect(d.updateEntries).not.toHaveBeenCalled();
   });
 
-  it('exits with an error and does not call any deps when RETRY_KEY is missing', () => {
+  it('exits with an error and does not call any deps when RETRY_KEY is missing', async () => {
     const d = deps();
 
-    main({ ...baseEnv, RETRY_KEY: '' }, d);
+    await main({ ...baseEnv, RETRY_KEY: '' }, d);
 
     expect(process.exitCode).toBe(1);
     expect(d.readResultText).not.toHaveBeenCalled();

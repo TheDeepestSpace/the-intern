@@ -51,8 +51,8 @@ jobs:
         env:
           TARGET_REPO: ${{ steps.parse.outputs.target_repo }}
           ISSUE_NUMBER: ${{ steps.parse.outputs.issue_number }}
-          # Lets manage-summaries.js mint its own the-intern-data token for the
-          # dual-read (issue #112); fails soft to origin-only if unset/denied.
+          # Lets manage-summaries.js mint its own the-intern-data token (issue
+          # #112) — the-intern-data is now the sole session-summary store.
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
 
@@ -237,8 +237,11 @@ jobs:
   handle:
     needs: [detect-image, ensure-agent-overlay]
     runs-on: ubuntu-latest
+    # contents: write is no longer needed here — session summaries and
+    # pending-retries both persist to the-intern-data via a separately minted
+    # installation token (issue #112), not this job's own GITHUB_TOKEN.
     permissions:
-      contents: write
+      contents: read
     # Per-issue serialization (queue: max) keeps a review and a follow-up comment on
     # the same PR from racing on checkout/push. codex-backend runs additionally need
     # global serialization: codex proactively rotates its own refresh token in place,
@@ -283,8 +286,8 @@ jobs:
         env:
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
-          # Lets manage-summaries.js mint its own the-intern-data token for the
-          # dual-read (issue #112); fails soft to origin-only if unset/denied.
+          # Lets manage-summaries.js mint its own the-intern-data token (issue
+          # #112) — the-intern-data is now the sole session-summary store.
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
 
@@ -327,6 +330,11 @@ jobs:
           DISPATCH_REF: ${{ github.ref_name }}
           MAX_RETRIES: 3
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Lets handle-agent-outcome.js's pending-retries read/write mint its own
+          # the-intern-data token (issue #112) — pending-retries.json now lives
+          # solely on the-intern-data.
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
         run: |
           export COMMENT_BODY="$CLEAN_PROMPT"
           export PRIOR_CONTEXT=$(cat ../prior_summary.txt 2>/dev/null || echo "$SUMMARY_CONTEXT")
@@ -502,9 +510,8 @@ jobs:
           BACKEND: ${{ needs.detect-image.outputs.backend }}
           CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
           RESULT_FILE: target/session_result.txt
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Lets manage-summaries.js mint its own the-intern-data token for the
-          # dual-write (issue #112); fails soft to origin-only if unset/denied.
+          # Lets manage-summaries.js mint its own the-intern-data token (issue
+          # #112) — the-intern-data is now the sole session-summary store.
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
 

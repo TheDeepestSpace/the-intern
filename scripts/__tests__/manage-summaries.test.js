@@ -8,6 +8,10 @@ import { fetchBackend, fetchSummary, fetchLatestSummary, resolveBackend, saveSum
 // These tests run real git against scratch repos in a tmpdir rather than mocking
 // git, per the issue: the bugs this module has actually had (dubious-ownership,
 // duplicate-push race) only show up against a real git binary.
+//
+// the-intern-data is simulated by a local bare repo pointed to via
+// DATA_REPO_REMOTE_URL, the same test/manual escape hatch the module itself
+// uses to bypass installation-token minting.
 
 function sh(cmd, cwd) {
   return execSync(cmd, { cwd, encoding: 'utf8', env: process.env }).trim();
@@ -18,11 +22,7 @@ function initBareRemote(dir) {
   sh('git init --bare -b main .', dir);
 }
 
-// Each work dir simulates a separate job's independent checkout, so its own
-// `main` history is local only (never pushed) — otherwise two work dirs
-// racing to push their unrelated `main` histories to the same remote would
-// collide on a ref the code under test never even reads.
-function initWorkRepo(dir, remoteDir) {
+function initWorkRepo(dir) {
   fs.mkdirSync(dir, { recursive: true });
   sh('git init -b main .', dir);
   sh('git config user.name "test"', dir);
@@ -30,7 +30,6 @@ function initWorkRepo(dir, remoteDir) {
   fs.writeFileSync(path.join(dir, 'README.md'), '# scratch repo\n');
   sh('git add README.md', dir);
   sh('git commit -m "initial commit"', dir);
-  sh(`git remote add origin "${remoteDir}"`, dir);
 }
 
 describe('manage-summaries', () => {
@@ -38,7 +37,7 @@ describe('manage-summaries', () => {
   let originalCwd;
   let tmpRoot;
   let fakeHome;
-  let remoteDir;
+  let dataRemoteDir;
 
   beforeAll(() => {
     // git config --global --add safe.directory writes to $HOME/.gitconfig; point
@@ -56,8 +55,9 @@ describe('manage-summaries', () => {
   beforeEach(() => {
     originalCwd = process.cwd();
     tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'manage-summaries-'));
-    remoteDir = path.join(tmpRoot, 'remote.git');
-    initBareRemote(remoteDir);
+    dataRemoteDir = path.join(tmpRoot, 'data-remote.git');
+    initBareRemote(dataRemoteDir);
+    process.env.DATA_REPO_REMOTE_URL = dataRemoteDir;
   });
 
   afterEach(() => {
@@ -74,7 +74,7 @@ describe('manage-summaries', () => {
 
   function newWorkDir(name) {
     const dir = path.join(tmpRoot, name);
-    initWorkRepo(dir, remoteDir);
+    initWorkRepo(dir);
     return dir;
   }
 
@@ -114,7 +114,6 @@ describe('manage-summaries', () => {
     it('round-trips a saved summary back out via fetch', async () => {
       const saver = newWorkDir('work-save');
       process.chdir(saver);
-      process.env.GITHUB_TOKEN = 'fake-token-for-push';
       await saveSummary('acme/widgets', '7', 'the original prompt', 'the execution result', 'codex');
       expect(process.exitCode).toBe(0);
 
@@ -133,7 +132,6 @@ describe('manage-summaries', () => {
     it('writes the summary to GITHUB_OUTPUT using a heredoc delimiter', async () => {
       const saver = newWorkDir('work-save-out');
       process.chdir(saver);
-      process.env.GITHUB_TOKEN = 'fake-token-for-push';
       await saveSummary('acme/widgets', '9', 'prompt', 'result');
 
       const fetcher = newWorkDir('work-fetch-out');
@@ -151,7 +149,6 @@ describe('manage-summaries', () => {
     it('writes the persisted backend to GITHUB_OUTPUT', async () => {
       const saver = newWorkDir('work-save-backend-out');
       process.chdir(saver);
-      process.env.GITHUB_TOKEN = 'fake-token-for-push';
       await saveSummary('acme/widgets', '10', 'prompt', 'result', 'codex');
 
       const fetcher = newWorkDir('work-fetch-backend-out');
@@ -167,15 +164,8 @@ describe('manage-summaries', () => {
     it('returns the backend from the most recent summary', async () => {
       const saver = newWorkDir('work-save-latest-backend');
       process.chdir(saver);
-      process.env.GITHUB_TOKEN = 'fake-token-for-push';
-      const now = vi.spyOn(Date, 'now').mockReturnValue(1000);
-
-      try {
-        await saveSummary('acme/widgets', '14', 'first prompt', 'first result', 'codex');
-        await saveSummary('acme/widgets', '14', 'second prompt', 'second result', 'claude');
-      } finally {
-        now.mockRestore();
-      }
+      await saveSummary('acme/widgets', '14', 'first prompt', 'first result', 'codex');
+      await saveSummary('acme/widgets', '14', 'second prompt', 'second result', 'claude');
 
       const fetcher = newWorkDir('work-fetch-latest-backend');
       process.chdir(fetcher);
@@ -186,7 +176,6 @@ describe('manage-summaries', () => {
     it('records the effective fallback for an unsupported backend', async () => {
       const saver = newWorkDir('work-save-invalid-backend');
       process.chdir(saver);
-      process.env.GITHUB_TOKEN = 'fake-token-for-push';
       await saveSummary('acme/widgets', '12', 'prompt', 'result', 'unsupported');
 
       const fetcher = newWorkDir('work-fetch-invalid-backend');
@@ -199,10 +188,9 @@ describe('manage-summaries', () => {
     it('sanitizes non-alphanumeric characters in the repo name into the branch/dir slug', async () => {
       const saver = newWorkDir('work-save-slug');
       process.chdir(saver);
-      process.env.GITHUB_TOKEN = 'fake-token-for-push';
       await saveSummary('acme/weird.repo!name', '3', 'p', 'r');
 
-      const branches = sh('git ls-remote --heads .', remoteDir);
+      const branches = sh('git ls-remote --heads .', dataRemoteDir);
       expect(branches).toContain('refs/heads/summaries/acme-weird-repo-name/3');
     });
   });
@@ -215,45 +203,43 @@ describe('manage-summaries', () => {
       await saveSummary('', '7', 'p', 'r');
       await saveSummary('acme/widgets', '', 'p', 'r');
 
-      const branches = sh('git ls-remote --heads .', remoteDir);
+      const branches = sh('git ls-remote --heads .', dataRemoteDir);
       expect(branches).not.toContain('summaries/');
     });
 
     it('refuses to save when the issue number is not a positive integer', async () => {
       const work = newWorkDir('work-save-invalid-issue');
       process.chdir(work);
-      process.env.GITHUB_TOKEN = 'fake-token-for-push';
 
       await saveSummary('acme/widgets', 'not-a-number', 'p', 'r');
 
       expect(process.exitCode).toBe(1);
-      const branches = sh('git ls-remote --heads .', remoteDir);
+      const branches = sh('git ls-remote --heads .', dataRemoteDir);
       expect(branches).not.toContain('summaries/');
     });
 
     it('refuses "0" as an issue number', async () => {
       const work = newWorkDir('work-save-zero-issue');
       process.chdir(work);
-      process.env.GITHUB_TOKEN = 'fake-token-for-push';
 
       await saveSummary('acme/widgets', '0', 'p', 'r');
 
       expect(process.exitCode).toBe(1);
     });
 
-    it('commits locally but skips pushing when no GITHUB_TOKEN/GH_TOKEN is set', async () => {
-      const work = newWorkDir('work-save-no-token');
+    it('fails when the-intern-data remote cannot be resolved (no override, no APP_ID/APP_PRIVATE_KEY)', async () => {
+      delete process.env.DATA_REPO_REMOTE_URL;
+      delete process.env.APP_ID;
+      delete process.env.APP_PRIVATE_KEY;
+
+      const work = newWorkDir('work-save-no-remote');
       process.chdir(work);
-      delete process.env.GITHUB_TOKEN;
-      delete process.env.GH_TOKEN;
 
       await saveSummary('acme/widgets', '11', 'p', 'r');
 
-      expect(process.exitCode).toBe(0);
-      const branches = sh('git ls-remote --heads .', remoteDir);
+      expect(process.exitCode).toBe(1);
+      const branches = sh('git ls-remote --heads .', dataRemoteDir);
       expect(branches).not.toContain('summaries/');
-      const localBranch = sh('git branch --list summaries/acme-widgets/11', work);
-      expect(localBranch).toContain('summaries/acme-widgets/11');
     });
 
     it('retries and succeeds when a concurrent job already pushed the branch first (regression for #49)', async () => {
@@ -265,7 +251,6 @@ describe('manage-summaries', () => {
       const workB = newWorkDir('work-race-b');
 
       process.chdir(workA);
-      process.env.GITHUB_TOKEN = 'fake-token-for-push';
       await saveSummary('acme/widgets', '42', 'prompt A', 'result A');
       expect(process.exitCode).toBe(0);
 
@@ -275,11 +260,11 @@ describe('manage-summaries', () => {
 
       // The remote branch must contain both summaries, not just the second writer's,
       // proving the retry rebuilt on top of A's commit instead of clobbering it.
-      const files = sh('git ls-tree -r --name-only summaries/acme-widgets/42', remoteDir);
+      const files = sh('git ls-tree -r --name-only summaries/acme-widgets/42', dataRemoteDir);
       const mdFiles = files.split('\n').filter(f => f.endsWith('.md'));
       expect(mdFiles).toHaveLength(2);
 
-      const log = sh('git log --oneline summaries/acme-widgets/42', remoteDir);
+      const log = sh('git log --oneline summaries/acme-widgets/42', dataRemoteDir);
       expect(log.split('\n')).toHaveLength(2);
 
       const fetcher = newWorkDir('work-race-fetch');
@@ -291,10 +276,9 @@ describe('manage-summaries', () => {
     it('surfaces a genuine push failure (not non-fast-forward) instead of retrying forever', async () => {
       const work = newWorkDir('work-save-bad-remote');
       process.chdir(work);
-      process.env.GITHUB_TOKEN = 'fake-token-for-push';
-      // Point origin at a path with no git repo at all so the push fails for a
-      // reason unrelated to the retry-worthy non-fast-forward case.
-      sh('git remote set-url origin /nonexistent/path/to/nowhere.git', work);
+      // Point the-intern-data remote at a path with no git repo at all so the
+      // push fails for a reason unrelated to the retry-worthy non-fast-forward case.
+      process.env.DATA_REPO_REMOTE_URL = '/nonexistent/path/to/nowhere.git';
 
       await saveSummary('acme/widgets', '13', 'p', 'r');
 
@@ -302,157 +286,15 @@ describe('manage-summaries', () => {
     });
   });
 
-  describe('dual-write / dual-read to the-intern-data', () => {
-    let dataRemoteDir;
-
-    beforeEach(() => {
-      dataRemoteDir = path.join(tmpRoot, 'data-remote.git');
-      initBareRemote(dataRemoteDir);
-      // DATA_REPO_REMOTE_URL bypasses installation-token minting entirely, so
-      // these tests exercise the real git dual-write/dual-read paths against a
-      // local bare repo instead of hitting the network.
-      process.env.DATA_REPO_REMOTE_URL = dataRemoteDir;
-    });
-
-    it('mirrors a saved summary onto the shared `summaries` branch on the-intern-data', async () => {
-      const work = newWorkDir('work-dual-save');
-      process.chdir(work);
-      process.env.GITHUB_TOKEN = 'fake-token-for-push';
-
-      await saveSummary('acme/widgets', '20', 'dual prompt', 'dual result', 'codex');
-      expect(process.exitCode).toBe(0);
-
-      const branches = sh('git branch --list summaries', dataRemoteDir);
-      expect(branches).toContain('summaries');
-
-      const files = sh('git ls-tree -r --name-only summaries', dataRemoteDir);
-      const mdFiles = files.split('\n').filter(f => f.startsWith('summaries/acme-widgets/20/') && f.endsWith('.md'));
-      expect(mdFiles).toHaveLength(1);
-
-      const content = sh(`git show summaries:${mdFiles[0]}`, dataRemoteDir);
-      expect(content).toContain('dual prompt');
-      expect(content).toContain('dual result');
-      expect(content).toContain('**Backend**: codex');
-    });
-
-    it('accumulates multiple issues as plain files on the same shared branch (no per-issue branches)', async () => {
-      const workA = newWorkDir('work-dual-multi-a');
-      process.chdir(workA);
-      process.env.GITHUB_TOKEN = 'fake-token-for-push';
-      await saveSummary('acme/widgets', '21', 'prompt one', 'result one');
-
-      const workB = newWorkDir('work-dual-multi-b');
-      process.chdir(workB);
-      await saveSummary('acme/other', '5', 'prompt two', 'result two');
-
-      const branches = sh("git branch --format='%(refname:short)'", dataRemoteDir);
-      expect(branches.split('\n').filter(Boolean)).toEqual(['summaries']);
-
-      const files = sh('git ls-tree -r --name-only summaries', dataRemoteDir);
-      expect(files).toContain('summaries/acme-widgets/21/');
-      expect(files).toContain('summaries/acme-other/5/');
-    });
-
-    it('fetchLatestSummary prefers the newer of the two sources when the-intern-data has the latest save', async () => {
-      const older = newWorkDir('work-dual-older');
-      process.chdir(older);
-      process.env.GITHUB_TOKEN = 'fake-token-for-push';
-      delete process.env.DATA_REPO_REMOTE_URL; // this save only reaches origin
-      const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
-      try {
-        await saveSummary('acme/widgets', '22', 'origin-only prompt', 'origin-only result');
-      } finally {
-        now.mockRestore();
-      }
-      expect(process.exitCode).toBe(0);
-
-      process.env.DATA_REPO_REMOTE_URL = dataRemoteDir;
-      const newer = newWorkDir('work-dual-newer');
-      process.chdir(newer);
-      // Leave GITHUB_TOKEN unset so this save's origin push is skipped entirely
-      // (see the "No GITHUB_TOKEN/GH_TOKEN set" early return in
-      // saveSummaryToOrigin) and only the-intern-data receives it — otherwise
-      // both sources would share the same mocked Date.now() timestamp and the
-      // assertions below couldn't tell which source fetchLatestSummary picked.
-      delete process.env.GITHUB_TOKEN;
-      const later = vi.spyOn(Date, 'now').mockReturnValue(3_000_000);
-      try {
-        await saveSummary('acme/widgets', '22', 'dual-write-only prompt', 'dual-write-only result');
-      } finally {
-        later.mockRestore();
-      }
-      expect(process.exitCode).toBe(0);
-
-      const fetcher = newWorkDir('work-dual-fetch');
-      process.chdir(fetcher);
-      const { content } = await fetchLatestSummary('acme/widgets', '22');
-
-      expect(content).toContain('dual-write-only result');
-      expect(content).not.toContain('origin-only result');
-    });
-
-    it('fetchLatestSummary falls back to origin when the-intern-data has an older or missing entry', async () => {
-      process.env.DATA_REPO_REMOTE_URL = dataRemoteDir;
-      const dualWriter = newWorkDir('work-dual-fallback-old');
-      process.chdir(dualWriter);
-      process.env.GITHUB_TOKEN = 'fake-token-for-push';
-      const early = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
-      try {
-        await saveSummary('acme/widgets', '23', 'first (mirrored) prompt', 'first (mirrored) result');
-      } finally {
-        early.mockRestore();
-      }
-
-      // Second save only reaches origin (data repo unreachable this time), so
-      // origin is now strictly newer than the mirrored copy.
-      delete process.env.DATA_REPO_REMOTE_URL;
-      const later = vi.spyOn(Date, 'now').mockReturnValue(2_000_000);
-      try {
-        await saveSummary('acme/widgets', '23', 'second (origin-only) prompt', 'second (origin-only) result');
-      } finally {
-        later.mockRestore();
-      }
-      expect(process.exitCode).toBe(0);
-
-      const fetcher = newWorkDir('work-dual-fallback-fetch');
-      process.chdir(fetcher);
-      process.env.DATA_REPO_REMOTE_URL = dataRemoteDir;
-      const { content } = await fetchLatestSummary('acme/widgets', '23');
-
-      expect(content).toContain('second (origin-only) result');
-    });
-
-    it('does not touch the origin save/fetch outcome when the-intern-data is unreachable', async () => {
+  describe('fetchLatestSummary', () => {
+    it('returns "" when the-intern-data is unreachable', async () => {
       process.env.DATA_REPO_REMOTE_URL = '/nonexistent/path/to/the-intern-data.git';
 
-      const work = newWorkDir('work-dual-unreachable');
+      const work = newWorkDir('work-unreachable-fetch');
       process.chdir(work);
-      process.env.GITHUB_TOKEN = 'fake-token-for-push';
+      const { content } = await fetchLatestSummary('acme/widgets', '24');
 
-      await saveSummary('acme/widgets', '24', 'prompt', 'result');
-      expect(process.exitCode).toBe(0);
-
-      const fetcher = newWorkDir('work-dual-unreachable-fetch');
-      process.chdir(fetcher);
-      const result = await fetchSummary('acme/widgets', '24');
-
-      expect(result).toContain('result');
-    });
-
-    it('skips the dual-write/dual-read entirely (without error) when no token material or override is configured', async () => {
-      delete process.env.DATA_REPO_REMOTE_URL;
-      delete process.env.APP_ID;
-      delete process.env.APP_PRIVATE_KEY;
-
-      const work = newWorkDir('work-dual-no-config');
-      process.chdir(work);
-      process.env.GITHUB_TOKEN = 'fake-token-for-push';
-
-      await saveSummary('acme/widgets', '25', 'prompt', 'result');
-      expect(process.exitCode).toBe(0);
-
-      const branches = sh('git branch --list summaries', dataRemoteDir);
-      expect(branches).toBe('');
+      expect(content).toBe('');
     });
   });
 });

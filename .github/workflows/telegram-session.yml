@@ -4,7 +4,10 @@ on:
     types: [telegram_message]
 
 permissions:
-  contents: write
+  # contents: write is no longer needed here — convo.md and pending-retries
+  # both persist to the-intern-data via a separately minted installation
+  # token (issue #112), not this job's own GITHUB_TOKEN.
+  contents: read
 
 jobs:
   respond:
@@ -43,25 +46,21 @@ jobs:
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           TARGET_REPO: ${{ github.repository }}
 
-      # Transitional (issue #112): mirrors conversation state onto the-intern-data
-      # alongside this repo's own telegram branch. continue-on-error since repo
-      # access for the App may not be granted yet — every step below that depends
-      # on this one is gated on its token output being non-empty, so a failure
-      # here just falls back to the existing the-intern-only behavior.
+      # the-intern-data is the sole store for conversation state (issue #112) —
+      # this repo's own telegram orphan branch is no longer read or written.
       - name: Mint installation token for the-intern-data
         id: data_token
-        continue-on-error: true
         run: node scripts/mint-installation-token.js
         env:
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           TARGET_REPO: TheDeepestSpace/the-intern-data
 
-      - name: Checkout telegram branch (create if missing)
+      - name: Checkout telegram branch on the-intern-data (create if missing)
         env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GH_TOKEN: ${{ steps.data_token.outputs.token }}
         run: |
-          REPO_URL="https://github.com/${{ github.repository }}.git"
+          REPO_URL="https://github.com/TheDeepestSpace/the-intern-data.git"
           git config --global user.name "the-intern-bot[bot]"
           git config --global user.email "the-intern-bot[bot]@users.noreply.github.com"
           git config --global --add safe.directory "*"
@@ -71,38 +70,9 @@ jobs:
           if git clone --branch telegram --single-branch "$REPO_URL" tg-state 2>/dev/null; then
             echo "Cloned existing telegram branch."
           else
-            echo "Creating orphan telegram branch..."
+            echo "Creating telegram branch on the-intern-data..."
             git clone "$REPO_URL" tg-state
             cd tg-state
-            git checkout --orphan telegram
-            git rm -rf . 2>/dev/null || true
-            echo "# Telegram bot state — conversation continuity" > README.md
-            echo "# Ongoing Telegram Conversation Summary" > convo.md
-            git add README.md convo.md
-            git commit -m "init telegram branch"
-            git push origin telegram
-            cd ..
-          fi
-
-      # Same shape as the step above, targeting the-intern-data's own `telegram`
-      # branch instead of an orphan branch on this repo (see manage-summaries.js
-      # for the equivalent split for session summaries).
-      - name: Checkout telegram branch on the-intern-data (create if missing)
-        id: data_checkout
-        if: steps.data_token.outputs.token != ''
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ steps.data_token.outputs.token }}
-        run: |
-          REPO_URL="https://github.com/TheDeepestSpace/the-intern-data.git"
-
-          rm -rf tg-data-state
-          if git clone --branch telegram --single-branch "$REPO_URL" tg-data-state 2>/dev/null; then
-            echo "Cloned existing telegram branch on the-intern-data."
-          else
-            echo "Creating telegram branch on the-intern-data..."
-            git clone "$REPO_URL" tg-data-state
-            cd tg-data-state
             git checkout --orphan telegram
             git rm -rf . 2>/dev/null || true
             echo "# Telegram bot state — conversation continuity" > README.md
@@ -135,13 +105,17 @@ jobs:
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
-          DATA_CHECKOUT_OUTCOME: ${{ steps.data_checkout.outcome }}
           CLEAN_TEXT: ${{ steps.parse.outputs.clean_text }}
           RETRY_SOURCE: telegram
           WORKFLOW_FILE: telegram-session.yml
           DISPATCH_REF: ${{ github.ref_name }}
           MAX_RETRIES: 3
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Lets handle-agent-outcome.js's pending-retries read/write mint its own
+          # the-intern-data token (issue #112) — pending-retries.json now lives
+          # solely on the-intern-data.
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
         run: |
           export MESSAGE="$CLEAN_TEXT"
           export CHAT_ID="$(jq -r '.client_payload.chat_id // empty' "$GITHUB_EVENT_PATH")"
@@ -181,29 +155,9 @@ jobs:
               if (err.code !== "ENOENT") throw err;
             }
 
-            // Reads the full convo.md from a clone dir plus its last-touched commit
-            // time, so the two sources below (the telegram branch on this repo, and
-            // on the-intern-data, see issue #112) can be compared and the more
-            // recently updated one used — context should never look "lost" mid cutover.
-            function readConvo(dir) {
-              const { execSync } = require("child_process");
-              let content = "";
-              let mtime = 0;
-              try {
-                content = fs.readFileSync(`${dir}/convo.md`, "utf8");
-                try {
-                  mtime = Number(execSync(`git -C ${dir} log -1 --format=%ct -- convo.md`, { encoding: "utf8" }).trim()) || 0;
-                } catch (err) {
-                  mtime = 0;
-                }
-              } catch (err) {
-                if (err.code !== "ENOENT") throw err;
-              }
-              return { content, mtime };
-            }
-
             // Truncates to the last N bytes on a line boundary, for prompt context
-            // only — the full content is what gets persisted (see below).
+            // only — the full content on disk (convo.md, read below) is what gets
+            // persisted back to the-intern-data.
             function truncateForPrompt(content) {
               const buffer = Buffer.from(content, "utf8");
               const MAX_CONVO_BYTES = 20 * 1024;
@@ -217,26 +171,11 @@ jobs:
               return buffer.subarray(contentStart).toString("utf8");
             }
 
-            const primaryConvo = readConvo(".");
-            // Only trust tg-data-state if its checkout step actually succeeded —
-            // a failed checkout can still leave a local orphan-branch placeholder
-            // on disk whose commit looks newer than the real conversation.
-            const dataRepoConvo = process.env.DATA_CHECKOUT_OUTCOME === "success"
-              ? readConvo("../tg-data-state")
-              : { content: "", mtime: 0 };
-            const convo = dataRepoConvo.mtime > primaryConvo.mtime && dataRepoConvo.content
-              ? dataRepoConvo.content
-              : primaryConvo.content;
-
-            // Write the full selected (newer) source back to tg-state/convo.md so
-            // the on-disk file the agent reads/updates and the prompt context agree
-            // — otherwise the agent could append to a stale primaryConvo while the
-            // prompt above it shows the newer dataRepoConvo, and the later mirror
-            // step would push that stale file back over the newer copy. Unlike the
-            // prompt below, this is never truncated, so conversations over 20 KB
-            // don't lose their earlier history on disk.
-            if (convo) {
-              fs.writeFileSync("convo.md", convo);
+            let convo = "";
+            try {
+              convo = fs.readFileSync("convo.md", "utf8");
+            } catch (err) {
+              if (err.code !== "ENOENT") throw err;
             }
 
             const msg = process.env.MESSAGE || "";
@@ -318,30 +257,11 @@ jobs:
         env:
           REPO_ADMIN_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
 
-      - name: Commit updated convo.md to telegram branch
-        working-directory: tg-state
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          git config user.name "the-intern-bot[bot]"
-          git config user.email "the-intern-bot[bot]@users.noreply.github.com"
-          git add convo.md || true
-          git commit -m "telegram: update convo.md $(date -u +%FT%TZ)" || echo "nothing to commit"
-          git push origin telegram
-
-      # Mirrors the same convo.md onto the-intern-data. Best-effort: skipped
-      # entirely if the earlier token mint failed (repo access not yet granted,
-      # see issue #112), and continue-on-error so a push race or other failure
-      # here never fails the job — the-intern's own telegram branch above
-      # remains the source of truth during the transition.
       - name: Commit updated convo.md to telegram branch on the-intern-data
-        if: steps.data_token.outputs.token != '' && steps.data_checkout.outcome == 'success'
-        continue-on-error: true
-        working-directory: tg-data-state
+        working-directory: tg-state
         env:
           GH_TOKEN: ${{ steps.data_token.outputs.token }}
         run: |
-          cp ../tg-state/convo.md convo.md
           git config user.name "the-intern-bot[bot]"
           git config user.email "the-intern-bot[bot]@users.noreply.github.com"
           git add convo.md || true

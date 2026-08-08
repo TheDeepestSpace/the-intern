@@ -54,7 +54,7 @@ function resolveMaxRetries(rawValue) {
 // Orchestration entry point. `deps` lets tests inject fakes for the
 // git-backed/network pieces (updateEntries, sendTelegram, buildDispatchPayload,
 // detectUsageLimit, readResultText) while exercising the real branch logic.
-function main(env = process.env, deps = {}) {
+async function main(env = process.env, deps = {}) {
   const {
     updateEntries: updateEntriesFn = updateEntries,
     sendTelegram: sendTelegramFn = sendTelegram,
@@ -97,7 +97,7 @@ function main(env = process.env, deps = {}) {
     console.log('Agent session completed.');
     let removed = null;
     try {
-      ({ removed } = updateEntriesFn((entries) => resolveEntry(entries, retryKey)));
+      ({ removed } = await updateEntriesFn((entries) => resolveEntry(entries, retryKey)));
     } catch (err) {
       // A pending-retries git failure here must not turn a successful agent
       // session into a failed workflow step.
@@ -133,7 +133,7 @@ function main(env = process.env, deps = {}) {
   if (stall && dispatch) {
     let queued;
     try {
-      queued = updateEntriesFn((entries) =>
+      queued = await updateEntriesFn((entries) =>
         upsertStall(entries, {
           key: retryKey,
           source: retrySource,
@@ -178,7 +178,10 @@ function main(env = process.env, deps = {}) {
 }
 
 if (require.main === module) {
-  main();
+  main().catch(err => {
+    console.error(err);
+    process.exitCode = 1;
+  });
 }
 
 module.exports = { readResultText, main };
