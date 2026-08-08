@@ -128,6 +128,11 @@ describe('data-repo-remote', () => {
         .toBe(`fetch https://***:***@github.com/${DATA_REPO}.git pending-retries:pending-retries`);
     });
 
+    it('redacts token-only userinfo embedded in a URL', () => {
+      expect(redactUrl(`fetch https://ghs_secret123@github.com/${DATA_REPO}.git pending-retries:pending-retries`))
+        .toBe(`fetch https://***:***@github.com/${DATA_REPO}.git pending-retries:pending-retries`);
+    });
+
     it('leaves strings with no embedded credentials unchanged', () => {
       const message = 'fatal: could not read Username for \'https://github.com\'';
       expect(redactUrl(message)).toBe(message);

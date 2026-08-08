@@ -281,8 +281,26 @@ jobs:
           git config user.name "the-intern-bot[bot]"
           git config user.email "the-intern-bot[bot]@users.noreply.github.com"
           git add convo.md || true
-          git commit -m "telegram: update convo.md $(date -u +%FT%TZ)" || echo "nothing to commit"
-          git push origin telegram
+          if ! git commit -m "telegram: update convo.md $(date -u +%FT%TZ)"; then
+            echo "nothing to commit"
+            exit 0
+          fi
+
+          # The 'the-intern-codex-auth' vs 'telegram-state' concurrency groups above
+          # only serialize runs within the same group, so a codex-backend run and a
+          # non-codex run can still push this shared branch concurrently. Fetch,
+          # rebase onto the latest tip, and retry instead of losing this update to a
+          # non-fast-forward rejection.
+          for attempt in 1 2 3 4 5; do
+            if git push origin telegram; then
+              exit 0
+            fi
+            echo "::warning::Push rejected (attempt $attempt/5); fetching and rebasing before retry."
+            git fetch origin telegram
+            git rebase origin/telegram
+          done
+          echo "::error::Failed to push convo.md to telegram branch after retries."
+          exit 1
 
   notify-failure:
     needs: respond

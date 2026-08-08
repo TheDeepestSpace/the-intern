@@ -46,7 +46,7 @@ async function resolveDataRepoRemoteUrl() {
 // ::add-mask:: only covers Actions logs, not local runs or the
 // DATA_REPO_REMOTE_URL test/manual override.
 function redactUrl(str) {
-  return str.replace(/:\/\/[^\s/@]*:[^\s/@]*@/g, '://***:***@');
+  return str.replace(/:\/\/[^\s/@]*(?::[^\s/@]*)?@/g, '://***:***@');
 }
 
 module.exports = { DATA_REPO, resolveDataRepoRemoteUrl, redactUrl };
