@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { MockAgent, setGlobalDispatcher, getGlobalDispatcher } from 'undici';
 import { getInstallationToken, mintAppJwt, getPrivateKey } from '../mint-installation-token.js';
 
@@ -184,15 +184,23 @@ describe('mint-installation-token', () => {
         .reply(404, 'Not Found')
         .times(3);
 
-      await expect(
-        getInstallationToken({
-          appId: '123',
-          privateKey: TEST_PRIVATE_KEY_PEM,
-          targetRepo: 'acme/missing',
-          retries: 3,
-          retryDelayMs: 0,
-        })
-      ).rejects.toThrow('Could not determine installationId for repo: acme/missing');
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      try {
+        await expect(
+          getInstallationToken({
+            appId: '123',
+            privateKey: TEST_PRIVATE_KEY_PEM,
+            targetRepo: 'acme/missing',
+            retries: 3,
+            retryDelayMs: 0,
+          })
+        ).rejects.toThrow('Could not determine installationId for repo: acme/missing');
+
+        expect(fetchSpy).toHaveBeenCalledTimes(3);
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
 
     it('throws with the response body when token minting fails', async () => {
