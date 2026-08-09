@@ -70,6 +70,17 @@ jobs:
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           TARGET_REPO: ${{ github.repository }}
 
+      # Gives the agent shell (issue #141) short-lived, single-repo-scoped
+      # read/write reach into the-intern-data, without exposing the
+      # long-lived DATA_REPO_TOKEN secret itself to agent-executed code.
+      - name: Mint installation token for the-intern-data
+        id: data_token
+        run: node scripts/mint-installation-token.js
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          TARGET_REPO: TheDeepestSpace/the-intern-data
+
       # the-intern-data is the sole store for conversation state (issue #112) —
       # this repo's own telegram orphan branch is no longer read or written.
       # Auth uses a static fine-grained PAT (issue #124), not a minted token.
@@ -130,8 +141,10 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # Lets handle-agent-outcome.js's pending-retries read/write authenticate
           # to the-intern-data (issue #124) — pending-retries.json now lives
-          # solely on the-intern-data.
-          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          # solely on the-intern-data. This is the freshly minted, single-repo-
+          # scoped, 1-hour token (issue #141), not the underlying secret — safe
+          # to pass through to the agent shell below.
+          DATA_REPO_TOKEN: ${{ steps.data_token.outputs.token }}
         run: |
           export MESSAGE="$CLEAN_TEXT"
           export CHAT_ID="$(jq -r '.client_payload.chat_id // empty' "$GITHUB_EVENT_PATH")"
@@ -232,7 +245,7 @@ jobs:
 
           id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
           chown -R dev:dev . /home/dev /tmp/prompt.txt /tmp/normalize-codex-result.js 2>/dev/null || true
-          env -u DATA_REPO_TOKEN su dev -c '
+          su dev -c '
             export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"
             export TG_BOT_TOKEN="$TG_BOT_TOKEN"
             export CHAT_ID="$CHAT_ID"
@@ -240,6 +253,7 @@ jobs:
             export GH_TOKEN="$GH_TOKEN"
             export GITHUB_TOKEN="$GITHUB_TOKEN"
             export BACKEND="$BACKEND"
+            export DATA_REPO_TOKEN="$DATA_REPO_TOKEN"
             export HOME="/home/dev"
             cd "$(pwd)"
 
