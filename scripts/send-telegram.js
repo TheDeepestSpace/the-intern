@@ -15,7 +15,7 @@ function escapeCodeContent(text) {
 // everything else so stray punctuation (periods, hyphens, underscores in
 // snake_case, etc.) doesn't get misread as formatting.
 function toTelegramMarkdownV2(text) {
-  const tokenPattern = /```[\s\S]*?```|`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]]+\]\([^)\s]+\)/g;
+  const tokenPattern = /```[\s\S]*?```|`[^`\n]+`|\*\*[\s\S]+?\*\*|\[[^\]]+\]\([^)\s]+\)/g;
   let result = '';
   let lastIndex = 0;
   let match;

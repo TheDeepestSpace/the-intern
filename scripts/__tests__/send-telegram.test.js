@@ -47,6 +47,16 @@ describe('send-telegram', () => {
     expect(capturedBody.text).toBe('hello');
   });
 
+  it('converts a bold span across a line break instead of escaping the delimiters', () => {
+    let capturedBody = null;
+    const { status } = runScriptWithBodyCapture('**first line\nsecond line** after', undefined, body => {
+      capturedBody = body;
+    });
+
+    expect(status).toBe(0);
+    expect(capturedBody.text).toBe('*first line\nsecond line* after');
+  });
+
   it('reads the message from stdin when MESSAGE_TEXT and argv are absent', () => {
     const { status, stdout } = runScript('send-telegram.js', {
       env: { TG_BOT_TOKEN: 'TESTTOKEN', CHAT_ID: '555' },
