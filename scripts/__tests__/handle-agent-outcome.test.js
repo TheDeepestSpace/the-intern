@@ -239,14 +239,37 @@ describe('main', () => {
   it('saves the codex event log on a codex-backend failure', async () => {
     const d = deps({ readResultText: vi.fn(() => ({ isError: true, text: 'some other crash' })) });
 
-    await main({ ...baseEnv, BACKEND: 'codex', GITHUB_RUN_ID: '999' }, d);
+    await main(
+      {
+        ...baseEnv,
+        BACKEND: 'codex',
+        GITHUB_RUN_ID: '999',
+        TARGET_REPO: 'owner/repo',
+        ISSUE_NUMBER: '42',
+        CODEX_EVENTS_FILE: '/tmp/custom-codex-events.jsonl',
+      },
+      d
+    );
 
     expect(d.saveCodexLog).toHaveBeenCalledTimes(1);
-    expect(d.saveCodexLog).toHaveBeenCalledWith(
-      expect.objectContaining({ targetRepo: '', issueNumber: '', runId: '999' })
-    );
+    expect(d.saveCodexLog).toHaveBeenCalledWith({
+      targetRepo: 'owner/repo',
+      issueNumber: '42',
+      runId: '999',
+      logFile: '/tmp/custom-codex-events.jsonl',
+    });
     expect(d.sendTelegram).toHaveBeenCalledTimes(1);
     expect(d.sendTelegram.mock.calls[0][1]).not.toMatch(/some other crash/);
+  });
+
+  it('lets saveCodexLog fall back to its default log path when CODEX_EVENTS_FILE is unset', async () => {
+    const d = deps({ readResultText: vi.fn(() => ({ isError: true, text: 'some other crash' })) });
+
+    await main({ ...baseEnv, BACKEND: 'codex', GITHUB_RUN_ID: '999' }, d);
+
+    expect(d.saveCodexLog).toHaveBeenCalledWith(
+      expect.objectContaining({ logFile: undefined })
+    );
   });
 
   it('does not save the codex event log on a claude-backend failure', async () => {

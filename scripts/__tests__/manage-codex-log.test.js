@@ -3,14 +3,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { getLogPath, saveCodexLog, BRANCH_NAME } from '../manage-codex-log.js';
+import { getLogPath, saveCodexLog, BRANCH_NAME, MAX_LOG_BYTES } from '../manage-codex-log.js';
 
 // Same real-git-against-a-scratch-bare-repo approach as
 // manage-workspace-backup.test.js: the-intern-data is simulated by a local
 // bare repo pointed to via DATA_REPO_REMOTE_URL.
 
+// maxBuffer raised past Node's 1MB default: the oversized-content regression
+// test below reads back a multi-megabyte blob via `git show`.
 function sh(cmd, cwd) {
-  return execSync(cmd, { cwd, encoding: 'utf8', env: process.env }).trim();
+  return execSync(cmd, { cwd, encoding: 'utf8', env: process.env, maxBuffer: 32 * 1024 * 1024 }).trim();
 }
 
 function initBareRemote(dir) {
@@ -143,6 +145,26 @@ describe('manage-codex-log', () => {
       await saveCodexLog({ targetRepo: 'acme/widgets', issueNumber: '5', runId: '1', logFile });
 
       expect(sh(`git ls-remote ${dataRemoteDir} ${BRANCH_NAME}`, work)).toBe('');
+    });
+
+    it('truncates oversized content to a UTF-8-safe boundary, never exceeding MAX_LOG_BYTES', async () => {
+      const work = newWorkDir('save-oversized-multibyte');
+      process.chdir(work);
+      const logFile = path.join(tmpRoot, 'oversized.jsonl');
+
+      // Places a 3-byte multibyte char ('中') straddling the exact byte offset
+      // the truncation cut lands on, so the naive `slice(-MAX_LOG_BYTES)` would
+      // split it mid-character and produce an invalid UTF-8 tail.
+      const pad = 'a'.repeat(100);
+      const tail = 'b'.repeat(MAX_LOG_BYTES - 2);
+      fs.writeFileSync(logFile, pad + '中' + tail);
+
+      await saveCodexLog({ targetRepo: 'acme/widgets', issueNumber: '5', runId: '1', logFile });
+
+      const pushed = readFromRemote(getLogPath('acme/widgets', '5', '1'));
+      expect(Buffer.byteLength(pushed, 'utf8')).toBeLessThanOrEqual(MAX_LOG_BYTES);
+      expect(pushed).not.toMatch(/�/); // no replacement chars from a mid-character split
+      expect(pushed.endsWith('b'.repeat(100))).toBe(true);
     });
 
     it('does not throw when the-intern-data remote is not configured', async () => {

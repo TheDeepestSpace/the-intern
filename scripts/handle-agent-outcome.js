@@ -130,10 +130,10 @@ async function main(env = process.env, deps = {}) {
         targetRepo,
         issueNumber,
         runId: env.GITHUB_RUN_ID,
-        logFile: env.CODEX_EVENTS_FILE,
+        logFile: env.CODEX_EVENTS_FILE || undefined,
       });
     } catch (err) {
-      console.error(`::error::Unexpected error saving codex log: ${err.message}`);
+      console.error(`::warning::Unexpected error saving codex log: ${err.message}`);
     }
   }
 

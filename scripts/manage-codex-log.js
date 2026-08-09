@@ -11,7 +11,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const { resolveDataRepoRemoteUrl, redactUrl } = require('./data-repo-remote.js');
 
 // Single shared branch (like pending-retries.json) rather than one branch per
@@ -33,20 +33,24 @@ function getLogPath(targetRepo, issueNumber, runId) {
   return path.join(sanitizeSlug(targetRepo), sanitizeSlug(issueNumber), `${sanitizeSlug(runId)}.jsonl`);
 }
 
-function runGit(cmd, options = {}) {
+// Args are passed as an array (execFileSync, not a shell) so none of
+// remoteUrl/targetRepo/issueNumber/runId/commit-message ever go through shell
+// interpretation, however they're generated upstream.
+function runGit(args, options = {}) {
   const { allowFailure = false, stdio: callerStdio, ...execOptions } = options;
   try {
     const stdio = allowFailure ? ['pipe', 'pipe', 'pipe'] : callerStdio;
-    return execSync(`git ${cmd}`, { encoding: 'utf8', ...execOptions, stdio }).trim();
+    return execFileSync('git', args, { encoding: 'utf8', ...execOptions, stdio }).trim();
   } catch (err) {
     if (allowFailure) return '';
+    const cmd = args.join(' ');
     const detail = (err.stderr || err.message || '').toString().trim();
     throw new Error(`git ${redactUrl(cmd)} failed: ${redactUrl(detail)}`);
   }
 }
 
 function ensureSafeDirectory(dir = process.cwd()) {
-  runGit(`config --global --add safe.directory "${dir}"`, { allowFailure: true });
+  runGit(['config', '--global', '--add', 'safe.directory', dir], { allowFailure: true });
 }
 
 async function resolveRemoteUrl() {
@@ -62,14 +66,14 @@ async function resolveRemoteUrl() {
 // this single shared branch.
 function pushWithRetry(remoteUrl, gitOpts, prepare, { maxAttempts = 3 } = {}) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    runGit('checkout --detach', { ...gitOpts, allowFailure: true });
-    runGit(`branch -D ${BRANCH_NAME}`, { ...gitOpts, allowFailure: true });
-    runGit(`fetch ${remoteUrl} ${BRANCH_NAME}:${BRANCH_NAME}`, { ...gitOpts, allowFailure: true });
+    runGit(['checkout', '--detach'], { ...gitOpts, allowFailure: true });
+    runGit(['branch', '-D', BRANCH_NAME], { ...gitOpts, allowFailure: true });
+    runGit(['fetch', remoteUrl, `${BRANCH_NAME}:${BRANCH_NAME}`], { ...gitOpts, allowFailure: true });
 
     prepare();
 
     try {
-      runGit(`push ${remoteUrl} ${BRANCH_NAME}`, gitOpts);
+      runGit(['push', remoteUrl, BRANCH_NAME], gitOpts);
       return;
     } catch (err) {
       const isRejected = /non-fast-forward|fetch first/i.test(err.message);
@@ -106,8 +110,13 @@ async function saveCodexLog({ targetRepo, issueNumber, runId, logFile = '/tmp/co
     console.log('Codex event log is empty; nothing to save.');
     return;
   }
-  if (Buffer.byteLength(content, 'utf8') > MAX_LOG_BYTES) {
-    content = content.slice(-MAX_LOG_BYTES);
+  const contentBytes = Buffer.from(content, 'utf8');
+  if (contentBytes.length > MAX_LOG_BYTES) {
+    let start = contentBytes.length - MAX_LOG_BYTES;
+    // Slicing by raw byte count can land mid-character; skip forward past any
+    // leading UTF-8 continuation bytes (10xxxxxx) so the kept tail decodes cleanly.
+    while (start < contentBytes.length && (contentBytes[start] & 0xc0) === 0x80) start++;
+    content = contentBytes.subarray(start).toString('utf8');
   }
 
   ensureSafeDirectory();
@@ -128,34 +137,34 @@ async function saveCodexLog({ targetRepo, issueNumber, runId, logFile = '/tmp/co
   const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-log-'));
   const gitOpts = { cwd: worktreeDir };
   try {
-    runGit(`worktree add --detach "${worktreeDir}"`);
+    runGit(['worktree', 'add', '--detach', worktreeDir]);
     ensureSafeDirectory(worktreeDir);
-    runGit('config user.name "the-intern-bot[bot]"', { ...gitOpts, allowFailure: true });
-    runGit('config user.email "the-intern-bot[bot]@users.noreply.github.com"', { ...gitOpts, allowFailure: true });
+    runGit(['config', 'user.name', 'the-intern-bot[bot]'], { ...gitOpts, allowFailure: true });
+    runGit(['config', 'user.email', 'the-intern-bot[bot]@users.noreply.github.com'], { ...gitOpts, allowFailure: true });
 
     pushWithRetry(remoteUrl, gitOpts, () => {
       try {
-        runGit(`checkout --orphan ${BRANCH_NAME}`, gitOpts);
-        runGit('rm -rf --ignore-unmatch .', gitOpts);
+        runGit(['checkout', '--orphan', BRANCH_NAME], gitOpts);
+        runGit(['rm', '-rf', '--ignore-unmatch', '.'], gitOpts);
       } catch {
-        runGit(`checkout ${BRANCH_NAME}`, gitOpts);
+        runGit(['checkout', BRANCH_NAME], gitOpts);
       }
 
       const destPath = path.join(worktreeDir, relPath);
       fs.mkdirSync(path.dirname(destPath), { recursive: true });
       fs.writeFileSync(destPath, content, 'utf8');
 
-      runGit(`add -- "${relPath}"`, gitOpts);
-      runGit(`commit -m "codex-log: ${targetRepo} #${issueNumber} run ${runId}"`, gitOpts);
+      runGit(['add', '--', relPath], gitOpts);
+      runGit(['commit', '-m', `codex-log: ${targetRepo} #${issueNumber} run ${runId}`], gitOpts);
     });
     console.log(`Pushed codex event log to the-intern-data:${BRANCH_NAME}/${relPath}`);
   } catch (err) {
     console.warn(`::warning::Failed to push codex event log: ${err.message}`);
   } finally {
-    runGit(`branch -D ${BRANCH_NAME}`, { ...gitOpts, allowFailure: true });
-    runGit(`worktree remove --force "${worktreeDir}"`, { allowFailure: true });
+    runGit(['branch', '-D', BRANCH_NAME], { ...gitOpts, allowFailure: true });
+    runGit(['worktree', 'remove', '--force', worktreeDir], { allowFailure: true });
     fs.rmSync(worktreeDir, { recursive: true, force: true });
   }
 }
 
-module.exports = { BRANCH_NAME, getLogPath, saveCodexLog };
+module.exports = { BRANCH_NAME, MAX_LOG_BYTES, getLogPath, saveCodexLog };
