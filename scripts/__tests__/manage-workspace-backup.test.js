@@ -18,7 +18,7 @@ import {
 // (non-fast-forward races, am/apply conflicts, branch-not-created-yet) only
 // show up against a real git binary. the-intern-data is simulated by a local
 // bare repo pointed to via DATA_REPO_REMOTE_URL, the same test/manual escape
-// hatch the module itself uses to bypass installation-token minting.
+// hatch the module itself uses to bypass DATA_REPO_TOKEN-based auth.
 
 function sh(cmd, cwd) {
   return execSync(cmd, { cwd, encoding: 'utf8', env: process.env }).trim();
@@ -88,8 +88,7 @@ describe('manage-workspace-backup', () => {
     process.chdir(originalCwd);
     process.exitCode = 0;
     delete process.env.DATA_REPO_REMOTE_URL;
-    delete process.env.APP_ID;
-    delete process.env.APP_PRIVATE_KEY;
+    delete process.env.DATA_REPO_TOKEN;
     delete process.env.GITHUB_OUTPUT;
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   });

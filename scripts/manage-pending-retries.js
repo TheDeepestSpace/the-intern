@@ -12,7 +12,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
-const { resolveDataRepoRemoteUrl, redactUrl, runWithFreshRemoteOnNotFound } = require('./data-repo-remote.js');
+const { resolveDataRepoRemoteUrl, redactUrl, runWithRetryOnNotFound } = require('./data-repo-remote.js');
 
 const BRANCH_NAME = 'pending-retries';
 const FILE_NAME = 'pending-retries.json';
@@ -56,13 +56,13 @@ function parseEntries(raw) {
   return parsed;
 }
 
-// resolveDataRepoRemoteUrl never throws (mint failures are swallowed and
-// logged internally) — it only ever returns a URL or null — so callers just
-// need to turn a null into the one real error case they care about.
+// resolveDataRepoRemoteUrl never throws — it only ever returns a URL or null
+// — so callers just need to turn a null into the one real error case they
+// care about.
 async function resolveRemoteUrl() {
   const remoteUrl = await resolveDataRepoRemoteUrl();
   if (!remoteUrl) {
-    throw new Error('the-intern-data remote is not configured (APP_ID/APP_PRIVATE_KEY or DATA_REPO_REMOTE_URL)');
+    throw new Error('the-intern-data remote is not configured (DATA_REPO_TOKEN or DATA_REPO_REMOTE_URL)');
   }
   return remoteUrl;
 }
@@ -80,7 +80,7 @@ async function readEntries() {
   }
 
   try {
-    await runWithFreshRemoteOnNotFound(remoteUrl, (url) => runGit(`fetch ${url} ${BRANCH_NAME}:${BRANCH_NAME}`));
+    await runWithRetryOnNotFound(remoteUrl, (url) => runGit(`fetch ${url} ${BRANCH_NAME}:${BRANCH_NAME}`));
   } catch (err) {
     // "couldn't find remote ref" means the branch legitimately doesn't exist
     // yet (e.g. no retry has ever been queued) — that's an empty queue, not a
@@ -138,7 +138,7 @@ async function updateEntries(mutate) {
         runGit(`branch -D ${BRANCH_NAME}`, { ...gitOpts, allowFailure: true });
       }
       try {
-        await runWithFreshRemoteOnNotFound(remoteUrl, (url) => {
+        await runWithRetryOnNotFound(remoteUrl, (url) => {
           remoteUrl = url;
           return runGit(`fetch ${url} ${BRANCH_NAME}:${BRANCH_NAME}`, { ...gitOpts, stdio: ['pipe', 'pipe', 'pipe'] });
         });
@@ -172,7 +172,7 @@ async function updateEntries(mutate) {
       runGit(`commit -m "pending-retries: update ${new Date().toISOString()}"`, gitOpts);
 
       try {
-        await runWithFreshRemoteOnNotFound(remoteUrl, (url) => {
+        await runWithRetryOnNotFound(remoteUrl, (url) => {
           remoteUrl = url;
           return runGit(`push ${url} ${BRANCH_NAME}`, gitOpts);
         });

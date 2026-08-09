@@ -2,7 +2,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
 const path = require('path');
-const { resolveDataRepoRemoteUrl, redactUrl, runWithFreshRemoteOnNotFound } = require('./data-repo-remote.js');
+const { resolveDataRepoRemoteUrl, redactUrl, runWithRetryOnNotFound } = require('./data-repo-remote.js');
 
 const SUPPORTED_BACKENDS = new Set(['claude', 'codex']);
 
@@ -60,7 +60,7 @@ async function fetchLatestSummaryFromDataRepo(targetRepo, issueNumber, remoteUrl
 
   // Fetch branch from the-intern-data if available (it may legitimately not exist yet)
   try {
-    await runWithFreshRemoteOnNotFound(remoteUrl, (url) => runGit(`fetch ${url} ${branchName}:${branchName}`));
+    await runWithRetryOnNotFound(remoteUrl, (url) => runGit(`fetch ${url} ${branchName}:${branchName}`));
   } catch (err) {
     // "couldn't find remote ref" means no prior summary was ever saved for
     // this issue — that's expected and silent. Any other fetch error (auth,
@@ -161,7 +161,7 @@ async function saveSummaryToDataRepo(targetRepo, issueNumber, promptText, result
         // re-fetch the branch's current tip before rebuilding our commit on it.
         runGit('checkout --detach');
         runGit(`branch -D ${branchName}`);
-        await runWithFreshRemoteOnNotFound(remoteUrl, (url) => {
+        await runWithRetryOnNotFound(remoteUrl, (url) => {
           remoteUrl = url;
           return runGit(`fetch ${url} ${branchName}:${branchName}`);
         });
@@ -203,7 +203,7 @@ ${resultText || 'N/A'}
       runGit(`commit -m "summary: ${targetRepo} #${issueNumber} at ${timestamp}"`);
 
       try {
-        await runWithFreshRemoteOnNotFound(remoteUrl, (url) => {
+        await runWithRetryOnNotFound(remoteUrl, (url) => {
           remoteUrl = url;
           return runGit(`push ${url} ${branchName}`);
         });
@@ -243,7 +243,7 @@ async function saveSummary(targetRepo, issueNumber, promptText, resultText, back
     return;
   }
   if (!remoteUrl) {
-    console.error('the-intern-data remote is not configured (APP_ID/APP_PRIVATE_KEY or DATA_REPO_REMOTE_URL); cannot save summary.');
+    console.error('the-intern-data remote is not configured (DATA_REPO_TOKEN or DATA_REPO_REMOTE_URL); cannot save summary.');
     process.exitCode = 1;
     return;
   }

@@ -11,7 +11,7 @@ import { fetchBackend, fetchSummary, fetchLatestSummary, resolveBackend, saveSum
 //
 // the-intern-data is simulated by a local bare repo pointed to via
 // DATA_REPO_REMOTE_URL, the same test/manual escape hatch the module itself
-// uses to bypass installation-token minting.
+// uses to bypass DATA_REPO_TOKEN-based auth.
 
 function sh(cmd, cwd) {
   return execSync(cmd, { cwd, encoding: 'utf8', env: process.env }).trim();
@@ -35,8 +35,7 @@ function initWorkRepo(dir) {
 describe('manage-summaries', () => {
   let originalHome;
   let originalCwd;
-  let originalAppId;
-  let originalAppPrivateKey;
+  let originalDataRepoToken;
   let tmpRoot;
   let fakeHome;
   let dataRemoteDir;
@@ -56,8 +55,7 @@ describe('manage-summaries', () => {
 
   beforeEach(() => {
     originalCwd = process.cwd();
-    originalAppId = process.env.APP_ID;
-    originalAppPrivateKey = process.env.APP_PRIVATE_KEY;
+    originalDataRepoToken = process.env.DATA_REPO_TOKEN;
     tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'manage-summaries-'));
     dataRemoteDir = path.join(tmpRoot, 'data-remote.git');
     initBareRemote(dataRemoteDir);
@@ -71,10 +69,8 @@ describe('manage-summaries', () => {
     delete process.env.GH_TOKEN;
     delete process.env.GITHUB_OUTPUT;
     delete process.env.DATA_REPO_REMOTE_URL;
-    if (originalAppId === undefined) delete process.env.APP_ID;
-    else process.env.APP_ID = originalAppId;
-    if (originalAppPrivateKey === undefined) delete process.env.APP_PRIVATE_KEY;
-    else process.env.APP_PRIVATE_KEY = originalAppPrivateKey;
+    if (originalDataRepoToken === undefined) delete process.env.DATA_REPO_TOKEN;
+    else process.env.DATA_REPO_TOKEN = originalDataRepoToken;
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   });
 
@@ -233,10 +229,9 @@ describe('manage-summaries', () => {
       expect(process.exitCode).toBe(1);
     });
 
-    it('fails when the-intern-data remote cannot be resolved (no override, no APP_ID/APP_PRIVATE_KEY)', async () => {
+    it('fails when the-intern-data remote cannot be resolved (no override, no DATA_REPO_TOKEN)', async () => {
       delete process.env.DATA_REPO_REMOTE_URL;
-      delete process.env.APP_ID;
-      delete process.env.APP_PRIVATE_KEY;
+      delete process.env.DATA_REPO_TOKEN;
 
       const work = newWorkDir('work-save-no-remote');
       process.chdir(work);

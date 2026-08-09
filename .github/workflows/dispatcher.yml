@@ -51,10 +51,9 @@ jobs:
         env:
           TARGET_REPO: ${{ steps.parse.outputs.target_repo }}
           ISSUE_NUMBER: ${{ steps.parse.outputs.issue_number }}
-          # Lets manage-summaries.js mint its own the-intern-data token (issue
-          # #112) — the-intern-data is now the sole session-summary store.
-          APP_ID: ${{ secrets.APP_ID }}
-          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          # Lets manage-summaries.js authenticate to the-intern-data (issue
+          # #124) — the-intern-data is now the sole session-summary store.
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
 
       - name: Resolve backend
         id: resolve_backend
@@ -238,8 +237,8 @@ jobs:
     needs: [detect-image, ensure-agent-overlay]
     runs-on: ubuntu-latest
     # contents: write is no longer needed here — session summaries and
-    # pending-retries both persist to the-intern-data via a separately minted
-    # installation token (issue #112), not this job's own GITHUB_TOKEN.
+    # pending-retries both persist to the-intern-data via a static
+    # DATA_REPO_TOKEN secret (issue #124), not this job's own GITHUB_TOKEN.
     permissions:
       contents: read
     # Per-issue serialization (queue: max) keeps a review and a follow-up comment on
@@ -286,10 +285,9 @@ jobs:
         env:
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
-          # Lets manage-summaries.js mint its own the-intern-data token (issue
-          # #112) — the-intern-data is now the sole session-summary store.
-          APP_ID: ${{ secrets.APP_ID }}
-          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          # Lets manage-summaries.js authenticate to the-intern-data (issue
+          # #124) — the-intern-data is now the sole session-summary store.
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
 
       # Restores whatever the backup step below left behind from a prior run on
       # this same target repo/issue that ended without committing/pushing
@@ -311,10 +309,9 @@ jobs:
         env:
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
-          # Lets manage-workspace-backup.js mint its own the-intern-data token
-          # (issue #112's pattern) — the-intern-data is the sole workspace-backup store.
-          APP_ID: ${{ secrets.APP_ID }}
-          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          # Lets manage-workspace-backup.js authenticate to the-intern-data
+          # (issue #124) — the-intern-data is the sole workspace-backup store.
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
 
       - name: Install script dependencies for Codex auth round-trip
         if: needs.detect-image.outputs.backend == 'codex'
@@ -356,11 +353,10 @@ jobs:
           DISPATCH_REF: ${{ github.ref_name }}
           MAX_RETRIES: 3
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          # Lets handle-agent-outcome.js's pending-retries read/write mint its own
-          # the-intern-data token (issue #112) — pending-retries.json now lives
+          # Lets handle-agent-outcome.js's pending-retries read/write authenticate
+          # to the-intern-data (issue #124) — pending-retries.json now lives
           # solely on the-intern-data.
-          APP_ID: ${{ secrets.APP_ID }}
-          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
         run: |
           export COMMENT_BODY="$CLEAN_PROMPT"
           export PRIOR_CONTEXT=$(cat ../prior_summary.txt 2>/dev/null || echo "$SUMMARY_CONTEXT")
@@ -504,7 +500,7 @@ jobs:
           '
           chown dev:dev /tmp/run_as_dev.sh /tmp/extract-result.js /tmp/normalize-codex-result.js
 
-          env -u TG_BOT_TOKEN -u TG_ADMIN_CHAT_ID -u APP_ID -u APP_PRIVATE_KEY su dev -c /tmp/run_as_dev.sh
+          env -u TG_BOT_TOKEN -u TG_ADMIN_CHAT_ID -u DATA_REPO_TOKEN su dev -c /tmp/run_as_dev.sh
 
           # the agent's own gh calls are how it normally reports back; if the session
           # crashed or produced nothing usable, that never happens, so detect that
@@ -530,10 +526,9 @@ jobs:
         env:
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
-          # Lets manage-workspace-backup.js mint its own the-intern-data token
-          # (issue #112's pattern) — the-intern-data is the sole workspace-backup store.
-          APP_ID: ${{ secrets.APP_ID }}
-          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          # Lets manage-workspace-backup.js authenticate to the-intern-data
+          # (issue #124) — the-intern-data is the sole workspace-backup store.
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
 
       # Runs even if the step above failed: OpenAI's CI/CD guidance for this flow is
       # to write back whatever codex left on disk regardless of run outcome, since a
@@ -560,10 +555,9 @@ jobs:
           BACKEND: ${{ needs.detect-image.outputs.backend }}
           CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
           RESULT_FILE: target/session_result.txt
-          # Lets manage-summaries.js mint its own the-intern-data token (issue
-          # #112) — the-intern-data is now the sole session-summary store.
-          APP_ID: ${{ secrets.APP_ID }}
-          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          # Lets manage-summaries.js authenticate to the-intern-data (issue
+          # #124) — the-intern-data is now the sole session-summary store.
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
 
   notify-failure:
     needs: [detect-image, ensure-agent-overlay, handle]
