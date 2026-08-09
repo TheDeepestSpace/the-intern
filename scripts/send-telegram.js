@@ -10,12 +10,21 @@ function escapeCodeContent(text) {
   return text.replace(/\\/g, '\\\\').replace(/`/g, '\\`');
 }
 
+// Matches a link URL, allowing one level of balanced parentheses inside it
+// (e.g. `https://en.wikipedia.org/wiki/Function_(mathematics)`) while still
+// stopping at the link's own closing `)`.
+const LINK_URL = String.raw`(?:[^\s()]|\([^\s()]*\))*`;
+const LINK_PATTERN = String.raw`\[[^\]]+\]\(${LINK_URL}\)`;
+
 // Converts the small subset of Markdown Claude actually emits (**bold**,
 // `code`, ```code blocks```, [text](url)) into Telegram MarkdownV2, escaping
 // everything else so stray punctuation (periods, hyphens, underscores in
 // snake_case, etc.) doesn't get misread as formatting.
 function toTelegramMarkdownV2(text) {
-  const tokenPattern = /```[\s\S]*?```|`[^`\n]+`|\*\*[\s\S]+?\*\*|\[[^\]]+\]\([^)\s]+\)/g;
+  const tokenPattern = new RegExp(
+    String.raw`\`\`\`[\s\S]*?\`\`\`|\`[^\`\n]+\`|\*\*[\s\S]+?\*\*|${LINK_PATTERN}`,
+    'g'
+  );
   let result = '';
   let lastIndex = 0;
   let match;
@@ -39,18 +48,29 @@ function convertToken(token) {
   if (token.startsWith('**')) {
     return '*' + escapePlain(token.slice(2, -2)) + '*';
   }
-  const linkMatch = token.match(/^\[([^\]]+)\]\(([^)\s]+)\)$/);
+  const linkMatch = token.match(new RegExp(String.raw`^\[([^\]]+)\]\((${LINK_URL})\)$`));
   const [, linkText, url] = linkMatch;
   const escapedUrl = url.replace(/\\/g, '\\\\').replace(/\)/g, '\\)');
   return '[' + escapePlain(linkText) + '](' + escapedUrl + ')';
 }
 
+// Overridable via env for tests; keeps a stalled connection from hanging the
+// send and plain-text fallback indefinitely.
+const REQUEST_TIMEOUT_MS = Number(process.env.TELEGRAM_REQUEST_TIMEOUT_MS) || 10_000;
+
 async function postToTelegram(botToken, payload) {
-  return fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function sendTelegramMessage() {
