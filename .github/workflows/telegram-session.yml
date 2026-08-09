@@ -67,13 +67,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # Deliberately NOT scoped to TARGET_REPO (unlike dispatcher.yml's mint
+      # step) — a live Telegram chat session needs to act across every repo
+      # the App installation covers (the-intern, svsch, the-intern-testing,
+      # the-intern-data), e.g. commenting/reacting/dispatching on issues in
+      # other repos mid-conversation. This is a deliberate, user-requested
+      # reach vs. safety tradeoff for this workflow only; dispatcher.yml
+      # stays scoped to targetRepo since it only ever needs to act on the
+      # repo it was dispatched for.
       - name: Mint installation token
         id: token
         run: node scripts/mint-installation-token.js
         env:
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
-          TARGET_REPO: ${{ github.repository }}
 
       # Gives the agent shell (issue #141) short-lived, single-repo-scoped
       # read/write reach into the-intern-data, without exposing the
