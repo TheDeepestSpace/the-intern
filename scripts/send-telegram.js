@@ -1,5 +1,78 @@
 const fs = require('fs');
 
+const RESERVED_CHARS = /[_*[\]()~`>#+\-=|{}.!\\]/g;
+
+function escapePlain(text) {
+  return text.replace(RESERVED_CHARS, '\\$&');
+}
+
+function escapeCodeContent(text) {
+  return text.replace(/\\/g, '\\\\').replace(/`/g, '\\`');
+}
+
+// Matches a link URL, allowing one level of balanced parentheses inside it
+// (e.g. `https://en.wikipedia.org/wiki/Function_(mathematics)`) while still
+// stopping at the link's own closing `)`.
+const LINK_URL = String.raw`(?:[^\s()]|\([^\s()]*\))*`;
+const LINK_PATTERN = String.raw`\[[^\]]+\]\(${LINK_URL}\)`;
+
+// Converts the small subset of Markdown Claude actually emits (**bold**,
+// `code`, ```code blocks```, [text](url)) into Telegram MarkdownV2, escaping
+// everything else so stray punctuation (periods, hyphens, underscores in
+// snake_case, etc.) doesn't get misread as formatting.
+function toTelegramMarkdownV2(text) {
+  const tokenPattern = new RegExp(
+    String.raw`\`\`\`[\s\S]*?\`\`\`|\`[^\`\n]+\`|\*\*[\s\S]+?\*\*|${LINK_PATTERN}`,
+    'g'
+  );
+  let result = '';
+  let lastIndex = 0;
+  let match;
+
+  while ((match = tokenPattern.exec(text)) !== null) {
+    result += escapePlain(text.slice(lastIndex, match.index));
+    result += convertToken(match[0]);
+    lastIndex = match.index + match[0].length;
+  }
+  result += escapePlain(text.slice(lastIndex));
+  return result;
+}
+
+function convertToken(token) {
+  if (token.startsWith('```')) {
+    return '```' + escapeCodeContent(token.slice(3, -3)) + '```';
+  }
+  if (token.startsWith('`')) {
+    return '`' + escapeCodeContent(token.slice(1, -1)) + '`';
+  }
+  if (token.startsWith('**')) {
+    return '*' + escapePlain(token.slice(2, -2)) + '*';
+  }
+  const linkMatch = token.match(new RegExp(String.raw`^\[([^\]]+)\]\((${LINK_URL})\)$`));
+  const [, linkText, url] = linkMatch;
+  const escapedUrl = url.replace(/\\/g, '\\\\').replace(/\)/g, '\\)');
+  return '[' + escapePlain(linkText) + '](' + escapedUrl + ')';
+}
+
+// Overridable via env for tests; keeps a stalled connection from hanging the
+// send and plain-text fallback indefinitely.
+const REQUEST_TIMEOUT_MS = Number(process.env.TELEGRAM_REQUEST_TIMEOUT_MS) || 10_000;
+
+async function postToTelegram(botToken, payload) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function sendTelegramMessage() {
   const botToken = process.env.TG_BOT_TOKEN;
   const chatId = process.env.CHAT_ID;
@@ -21,24 +94,47 @@ async function sendTelegramMessage() {
     process.exit(1);
   }
 
-  const payload = { chat_id: chatId, text: messageText };
+  let replyParameters;
   if (replyToMessageId) {
     // allow_sending_without_reply falls back to a plain send if the original
     // message was deleted mid-session, instead of failing the whole request.
-    payload.reply_parameters = {
+    replyParameters = {
       message_id: Number(replyToMessageId),
       allow_sending_without_reply: true,
     };
   }
 
-  const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
+  const payload = {
+    chat_id: chatId,
+    text: toTelegramMarkdownV2(messageText),
+    parse_mode: 'MarkdownV2',
+  };
+  if (replyParameters) {
+    payload.reply_parameters = replyParameters;
+  }
+
+  const res = await postToTelegram(botToken, payload);
 
   if (!res.ok) {
     const errText = await res.text();
+
+    if (res.status === 400 && /can't parse entities/i.test(errText)) {
+      // Converter missed an edge case — fall back to a plain send rather
+      // than dropping the message.
+      const plainPayload = { chat_id: chatId, text: messageText };
+      if (replyParameters) {
+        plainPayload.reply_parameters = replyParameters;
+      }
+      const plainRes = await postToTelegram(botToken, plainPayload);
+      if (plainRes.ok) {
+        console.log('Telegram message sent successfully (plain fallback).');
+        return;
+      }
+      const plainErrText = await plainRes.text();
+      console.error(`Telegram send failed (${plainRes.status}):`, plainErrText);
+      process.exit(1);
+    }
+
     console.error(`Telegram send failed (${res.status}):`, errText);
     process.exit(1);
   }
