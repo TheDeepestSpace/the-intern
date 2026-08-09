@@ -47,8 +47,7 @@ commit any of these to a file that gets pushed.
 | `APP_PRIVATE_KEY` | Worker, Actions | Full contents of the `.pem` file |
 | `WEBHOOK_SECRET` | Worker only | Used to verify `X-Hub-Signature-256` |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Actions | From `claude setup-token` |
-| `CODEX_AUTH_JSON` | Actions | Base64-encoded personal-account Codex login (`~/.codex/auth.json`), restored before each `backend=codex` run and persisted back after via `scripts/rotate-codex-auth.js` so a token refresh survives the ephemeral runner |
-| `REPO_ADMIN_TOKEN` | Actions | Fine-grained PAT with repository-secret write permission, used by `scripts/rotate-codex-auth.js` to write a refreshed `CODEX_AUTH_JSON` back after a Codex run |
+| `CODEX_AUTH_JSON` | Actions | Base64-encoded personal-account Codex login (`~/.codex/auth.json`), restored before each `backend=codex` run and persisted back after via `scripts/rotate-codex-auth.js` (using a short-lived installation token minted from `APP_ID`/`APP_PRIVATE_KEY`, which requires the App's `Secrets: read & write` permission) so a token refresh survives the ephemeral runner |
 | `BOT_LOGIN` | Worker | e.g. `the-intern-bot[bot]` — used to drop self-triggered events |
 | `ALLOWED_USERS` | Worker only | Comma-separated GitHub usernames permitted to trigger the bot — set to just your own login |
 | `CLOUDFLARE_API_TOKEN` | agent's shell / CI deploying the Worker | Not used at runtime by the Worker itself |

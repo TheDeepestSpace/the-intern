@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { getInstallationToken, getPrivateKey } = require('./mint-installation-token.js');
 
 // Codex CLI (personal-account login) rewrites access_token/refresh_token into
 // auth.json on every proactive refresh (~every 8 days) and on any 401. Our
@@ -61,18 +62,29 @@ async function persist() {
     return;
   }
 
-  const token = process.env.REPO_ADMIN_TOKEN;
-  if (!token) {
-    console.log('REPO_ADMIN_TOKEN not set; skipping persist of refreshed Codex auth.json.');
-    return;
-  }
-
   const repo = process.env.GITHUB_REPOSITORY;
   if (!repo) {
     console.error('GITHUB_REPOSITORY is not set; cannot determine which repo owns the secret.');
     process.exitCode = 1;
     return;
   }
+
+  const appId = process.env.APP_ID;
+  const privateKey = getPrivateKey(process.env);
+  if (!appId || !privateKey) {
+    console.log('APP_ID/APP_PRIVATE_KEY not set; skipping persist of refreshed Codex auth.json.');
+    return;
+  }
+
+  let token;
+  try {
+    token = await getInstallationToken({ appId, privateKey, targetRepo: repo });
+  } catch (err) {
+    console.error(`Failed to mint installation token for persisting Codex auth.json: ${err.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`::add-mask::${token}`);
 
   const raw = fs.readFileSync(authPath, 'utf8');
   let parsed;

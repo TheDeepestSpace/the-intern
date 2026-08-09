@@ -536,17 +536,20 @@ jobs:
       # to write back whatever codex left on disk regardless of run outcome, since a
       # refresh can happen before a mid-run failure and a rotated refresh token is
       # typically single-use — skipping the write-back on failure would strand the
-      # account on a dead token. REPO_ADMIN_TOKEN is a separate fine-grained PAT
-      # (Secrets: write, scoped to this repo only) because the installation/
-      # GITHUB_TOKEN credentials used elsewhere in this job cannot manage Actions
-      # secrets. Encryption uses the repo's public key via libsodium (GitHub's
-      # documented approach for the secrets API) so the refreshed token is sealed
-      # before it ever leaves the runner.
+      # account on a dead token. rotate-codex-auth.js mints its own short-lived
+      # installation token scoped to this repo (via mint-installation-token.js),
+      # using the App's Secrets: read & write permission, rather than requiring a
+      # separate long-lived PAT — only the Actions-issued GITHUB_TOKEN is hard-
+      # blocked from managing secrets; an App installation token can, so long as
+      # the App has the Secrets permission. Encryption uses the repo's public key
+      # via libsodium (GitHub's documented approach for the secrets API) so the
+      # refreshed token is sealed before it ever leaves the runner.
       - name: Persist refreshed Codex auth.json to secret
         if: always() && needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.backend == 'codex'
         run: node scripts/rotate-codex-auth.js persist
         env:
-          REPO_ADMIN_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
 
       - name: Commit session summary
         if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''

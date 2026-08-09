@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,7 +12,15 @@ import { restore, persist } from '../rotate-codex-auth.js';
 // require() it instead, same as rotate-codex-auth.js itself does.
 const sodium = createRequire(import.meta.url)('libsodium-wrappers');
 
-const ENV_KEYS = ['CODEX_HOME', 'CODEX_AUTH_JSON', 'REPO_ADMIN_TOKEN', 'GITHUB_REPOSITORY'];
+// A throwaway RSA key generated fresh per test run; only used to exercise the
+// installation-token minting code path, never a real credential.
+const { privateKey: TEST_PRIVATE_KEY_PEM } = crypto.generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: 'spki', format: 'pem' },
+  privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+});
+
+const ENV_KEYS = ['CODEX_HOME', 'CODEX_AUTH_JSON', 'APP_ID', 'APP_PRIVATE_KEY', 'GITHUB_REPOSITORY'];
 
 describe('rotate-codex-auth', () => {
   let savedEnv;
@@ -135,17 +144,10 @@ describe('rotate-codex-auth', () => {
       expect(logSpy.join('\n')).toContain('nothing to persist');
     });
 
-    it('skips when REPO_ADMIN_TOKEN is not set', async () => {
-      writeAuthFile(JSON.stringify({ access_token: 'abc' }));
-
-      await persist();
-
-      expect(logSpy.join('\n')).toContain('REPO_ADMIN_TOKEN not set');
-    });
-
     it('sets exitCode to 1 when GITHUB_REPOSITORY is not set', async () => {
       writeAuthFile(JSON.stringify({ access_token: 'abc' }));
-      process.env.REPO_ADMIN_TOKEN = 'admin-token';
+      process.env.APP_ID = '123';
+      process.env.APP_PRIVATE_KEY = TEST_PRIVATE_KEY_PEM;
 
       await persist();
 
@@ -153,10 +155,47 @@ describe('rotate-codex-auth', () => {
       expect(errorSpy.join('\n')).toContain('GITHUB_REPOSITORY is not set');
     });
 
+    it('skips when APP_ID/APP_PRIVATE_KEY not set', async () => {
+      writeAuthFile(JSON.stringify({ access_token: 'abc' }));
+      process.env.GITHUB_REPOSITORY = 'acme/widgets';
+
+      await persist();
+
+      expect(logSpy.join('\n')).toContain('APP_ID/APP_PRIVATE_KEY not set');
+    });
+
+    it('sets exitCode to 1 when minting the installation token fails', async () => {
+      writeAuthFile(JSON.stringify({ access_token: 'abc' }));
+      process.env.APP_ID = '123';
+      process.env.APP_PRIVATE_KEY = TEST_PRIVATE_KEY_PEM;
+      process.env.GITHUB_REPOSITORY = 'acme/widgets';
+
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+        .reply(404, 'Not Found')
+        .times(3);
+
+      await persist();
+
+      expect(process.exitCode).toBe(1);
+      expect(errorSpy.join('\n')).toContain('Failed to mint installation token for persisting Codex auth.json');
+      expect(logSpy.join('\n')).not.toContain('Persisted refreshed Codex auth.json');
+    }, 15000);
+
     it('sets exitCode to 1 when auth.json on disk is not valid JSON', async () => {
       writeAuthFile('not json');
-      process.env.REPO_ADMIN_TOKEN = 'admin-token';
+      process.env.APP_ID = '123';
+      process.env.APP_PRIVATE_KEY = TEST_PRIVATE_KEY_PEM;
       process.env.GITHUB_REPOSITORY = 'acme/widgets';
+
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+        .reply(200, { id: 555 });
+      client
+        .intercept({ method: 'POST', path: '/app/installations/555/access_tokens' })
+        .reply(201, { token: 'ghs_minted' });
 
       await persist();
 
@@ -166,11 +205,18 @@ describe('rotate-codex-auth', () => {
 
     it('sets exitCode to 1 when fetching the repo public key fails', async () => {
       writeAuthFile(JSON.stringify({ access_token: 'abc' }));
-      process.env.REPO_ADMIN_TOKEN = 'admin-token';
+      process.env.APP_ID = '123';
+      process.env.APP_PRIVATE_KEY = TEST_PRIVATE_KEY_PEM;
       process.env.GITHUB_REPOSITORY = 'acme/widgets';
 
-      agent
-        .get('https://api.github.com')
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+        .reply(200, { id: 555 });
+      client
+        .intercept({ method: 'POST', path: '/app/installations/555/access_tokens' })
+        .reply(201, { token: 'ghs_minted' });
+      client
         .intercept({ method: 'GET', path: '/repos/acme/widgets/actions/secrets/public-key' })
         .reply(404, 'Not Found');
 
@@ -183,11 +229,18 @@ describe('rotate-codex-auth', () => {
 
     it('sets exitCode to 1 when updating the secret fails', async () => {
       writeAuthFile(JSON.stringify({ access_token: 'abc' }));
-      process.env.REPO_ADMIN_TOKEN = 'admin-token';
+      process.env.APP_ID = '123';
+      process.env.APP_PRIVATE_KEY = TEST_PRIVATE_KEY_PEM;
       process.env.GITHUB_REPOSITORY = 'acme/widgets';
 
       const keypair = sodium.crypto_box_keypair();
       const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+        .reply(200, { id: 555 });
+      client
+        .intercept({ method: 'POST', path: '/app/installations/555/access_tokens' })
+        .reply(201, { token: 'ghs_minted' });
       client
         .intercept({ method: 'GET', path: '/repos/acme/widgets/actions/secrets/public-key' })
         .reply(200, {
@@ -205,21 +258,35 @@ describe('rotate-codex-auth', () => {
       expect(logSpy.join('\n')).toContain('::add-mask::abc');
     });
 
-    it('encrypts the refreshed auth.json with the repo public key and PUTs it to the secret', async () => {
+    it('mints an installation token scoped to GITHUB_REPOSITORY, then encrypts the refreshed auth.json with the repo public key and PUTs it to the secret', async () => {
       const refreshed = { access_token: 'new-access', refresh_token: 'new-refresh' };
       writeAuthFile(JSON.stringify(refreshed));
-      process.env.REPO_ADMIN_TOKEN = 'admin-token';
+      process.env.APP_ID = '123';
+      process.env.APP_PRIVATE_KEY = TEST_PRIVATE_KEY_PEM;
       process.env.GITHUB_REPOSITORY = 'acme/widgets';
 
       const keypair = sodium.crypto_box_keypair();
       let capturedBody = null;
+      let capturedAuthHeader = null;
 
       const client = agent.get('https://api.github.com');
       client
+        .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+        .reply(200, { id: 555 });
+      client
+        .intercept({ method: 'POST', path: '/app/installations/555/access_tokens' })
+        .reply(201, { token: 'ghs_minted' });
+      client
         .intercept({ method: 'GET', path: '/repos/acme/widgets/actions/secrets/public-key' })
-        .reply(200, {
-          key: sodium.to_base64(keypair.publicKey, sodium.base64_variants.ORIGINAL),
-          key_id: 'key-1',
+        .reply(opts => {
+          capturedAuthHeader = opts.headers.Authorization;
+          return {
+            statusCode: 200,
+            data: {
+              key: sodium.to_base64(keypair.publicKey, sodium.base64_variants.ORIGINAL),
+              key_id: 'key-1',
+            },
+          };
         });
       client
         .intercept({ method: 'PUT', path: '/repos/acme/widgets/actions/secrets/CODEX_AUTH_JSON' })
@@ -231,6 +298,7 @@ describe('rotate-codex-auth', () => {
       await persist();
 
       expect(process.exitCode).toBe(0);
+      expect(capturedAuthHeader).toBe('Bearer ghs_minted');
       expect(capturedBody.key_id).toBe('key-1');
 
       const decrypted = sodium.crypto_box_seal_open(
@@ -242,6 +310,7 @@ describe('rotate-codex-auth', () => {
       expect(JSON.parse(decoded)).toEqual(refreshed);
 
       const logged = logSpy.join('\n');
+      expect(logged).toContain('::add-mask::ghs_minted');
       expect(logged).toContain('::add-mask::new-access');
       expect(logged).toContain('::add-mask::new-refresh');
       expect(logged).toContain(`::add-mask::${Buffer.from(JSON.stringify(refreshed), 'utf8').toString('base64')}`);
