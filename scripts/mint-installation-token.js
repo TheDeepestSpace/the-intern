@@ -123,7 +123,11 @@ async function getInstallationToken({
         Authorization: `Bearer ${appJwt}`,
         Accept: 'application/vnd.github+json',
         'User-Agent': 'the-intern-bot',
+        'Content-Type': 'application/json',
       },
+      // Without `repositories`, GitHub grants the token access to every repo
+      // the installation can see. Scope it down to just targetRepo when known.
+      body: targetRepo ? JSON.stringify({ repositories: [targetRepo.split('/')[1]] }) : undefined,
     }
   );
 

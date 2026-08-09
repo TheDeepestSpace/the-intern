@@ -271,7 +271,8 @@ jobs:
         if: always() && needs.parse-trigger.outputs.backend == 'codex'
         run: node scripts/rotate-codex-auth.js persist
         env:
-          REPO_ADMIN_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
 
       - name: Commit updated convo.md to telegram branch on the-intern-data
         working-directory: tg-state
