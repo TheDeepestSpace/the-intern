@@ -31,6 +31,11 @@ jobs:
   respond:
     needs: parse-trigger
     runs-on: ubuntu-latest
+    # Installation access tokens (both `token` and `data_token` above) expire
+    # after 1 hour, non-configurably. Bound this job below that so a stuck
+    # agent run fails fast instead of limping on with an expired data_token
+    # for the rest of the default 6-hour job timeout.
+    timeout-minutes: 45
     # codex-backend runs need global serialization across the whole repo (not just
     # per-chat): codex proactively rotates its own refresh token in place, and
     # rotated refresh tokens are typically single-use, so an overlapping codex run
@@ -73,6 +78,9 @@ jobs:
       # Gives the agent shell (issue #141) short-lived, single-repo-scoped
       # read/write reach into the-intern-data, without exposing the
       # long-lived DATA_REPO_TOKEN secret itself to agent-executed code.
+      # Scoped to just the contents permission the-intern-data operations
+      # need — without an explicit `permissions`, GitHub grants every
+      # permission the app installation has, not just what's used here.
       - name: Mint installation token for the-intern-data
         id: data_token
         run: node scripts/mint-installation-token.js
@@ -80,6 +88,7 @@ jobs:
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           TARGET_REPO: TheDeepestSpace/the-intern-data
+          PERMISSIONS: '{"contents":"write"}'
 
       # the-intern-data is the sole store for conversation state (issue #112) —
       # this repo's own telegram orphan branch is no longer read or written.
