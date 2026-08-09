@@ -150,7 +150,21 @@ async function getInstallationToken({
   return data.token;
 }
 
-module.exports = { getInstallationToken, mintAppJwt, getPrivateKey };
+function parsePermissions(raw) {
+  if (!raw) return undefined;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`Invalid PERMISSIONS: not valid JSON (${error.message})`);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('Invalid PERMISSIONS: must be a JSON object of permission scopes');
+  }
+  return parsed;
+}
+
+module.exports = { getInstallationToken, mintAppJwt, getPrivateKey, parsePermissions };
 
 if (require.main === module) {
   (async () => {
@@ -159,7 +173,7 @@ if (require.main === module) {
       const privateKey = getPrivateKey(process.env);
       const installationId = process.env.INSTALLATION_ID;
       const targetRepo = process.env.TARGET_REPO;
-      const permissions = process.env.PERMISSIONS ? JSON.parse(process.env.PERMISSIONS) : undefined;
+      const permissions = parsePermissions(process.env.PERMISSIONS);
 
       if (!appId || !privateKey) {
         console.error('APP_ID and APP_PRIVATE_KEY secrets are required');
