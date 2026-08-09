@@ -201,11 +201,17 @@ describe('data-repo-remote', () => {
         .mockRejectedValueOnce(new Error('fatal: Repository not found.'))
         .mockRejectedValueOnce(new Error('fatal: Repository not found.'))
         .mockRejectedValueOnce(new Error('fatal: Repository not found.'))
+        .mockRejectedValueOnce(new Error('fatal: Repository not found.'))
+        .mockRejectedValueOnce(new Error('fatal: Repository not found.'))
         .mockImplementationOnce((url) => url);
       vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       const promise = runWithFreshRemoteOnNotFound('https://x-access-token:ghs_first@github.com/x.git', run, {
-        retries: 5,
+        // retries is > the number of rejections below so the 6th (successful)
+        // attempt isn't the last attempt, which would otherwise trigger the
+        // last-resort re-mint path (and its own network call) instead of
+        // just retrying with the same url.
+        retries: 6,
         retryBaseDelayMs: 2000,
         retryMaxDelayMs: 20000,
       });
@@ -222,6 +228,13 @@ describe('data-repo-remote', () => {
 
       await vi.advanceTimersByTimeAsync(8000);
       expect(run).toHaveBeenCalledTimes(4);
+
+      await vi.advanceTimersByTimeAsync(16000);
+      expect(run).toHaveBeenCalledTimes(5);
+
+      // Uncapped this would be 32000ms (2000 * 2^4); confirm it's capped at 20000.
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(run).toHaveBeenCalledTimes(6);
 
       await expect(promise).resolves.toBe('https://x-access-token:ghs_first@github.com/x.git');
 
