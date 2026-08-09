@@ -10,8 +10,8 @@ import { upsertStall, resolveEntry } from '../pending-retries-store.js';
 // this module's actual failure modes (branch-not-created-yet, concurrent
 // push races) only show up against a real git binary. the-intern-data is
 // simulated by a local bare repo pointed to via DATA_REPO_REMOTE_URL, the same
-// test/manual escape hatch the module itself uses to bypass installation-token
-// minting.
+// test/manual escape hatch the module itself uses to bypass DATA_REPO_TOKEN-based
+// auth.
 
 function sh(cmd, cwd) {
   return execSync(cmd, { cwd, encoding: 'utf8', env: process.env }).trim();
@@ -64,8 +64,7 @@ describe('manage-pending-retries', () => {
     process.chdir(originalCwd);
     process.exitCode = 0;
     delete process.env.DATA_REPO_REMOTE_URL;
-    delete process.env.APP_ID;
-    delete process.env.APP_PRIVATE_KEY;
+    delete process.env.DATA_REPO_TOKEN;
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   });
 
@@ -95,8 +94,7 @@ describe('manage-pending-retries', () => {
 
   it('readEntries returns [] when the-intern-data remote cannot be resolved', async () => {
     delete process.env.DATA_REPO_REMOTE_URL;
-    delete process.env.APP_ID;
-    delete process.env.APP_PRIVATE_KEY;
+    delete process.env.DATA_REPO_TOKEN;
     process.chdir(newWorkDir('work-read-no-remote'));
 
     expect(await readEntries()).toEqual([]);
@@ -104,8 +102,7 @@ describe('manage-pending-retries', () => {
 
   it('updateEntries throws when the-intern-data remote cannot be resolved', async () => {
     delete process.env.DATA_REPO_REMOTE_URL;
-    delete process.env.APP_ID;
-    delete process.env.APP_PRIVATE_KEY;
+    delete process.env.DATA_REPO_TOKEN;
     process.chdir(newWorkDir('work-write-no-remote'));
 
     await expect(

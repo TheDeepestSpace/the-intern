@@ -5,8 +5,8 @@ on:
 
 permissions:
   # contents: write is no longer needed here — convo.md and pending-retries
-  # both persist to the-intern-data via a separately minted installation
-  # token (issue #112), not this job's own GITHUB_TOKEN.
+  # both persist to the-intern-data via a static DATA_REPO_TOKEN secret
+  # (issue #124), not this job's own GITHUB_TOKEN.
   contents: read
 
 jobs:
@@ -56,17 +56,10 @@ jobs:
 
       # the-intern-data is the sole store for conversation state (issue #112) —
       # this repo's own telegram orphan branch is no longer read or written.
-      - name: Mint installation token for the-intern-data
-        id: data_token
-        run: node scripts/mint-installation-token.js
-        env:
-          APP_ID: ${{ secrets.APP_ID }}
-          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
-          TARGET_REPO: TheDeepestSpace/the-intern-data
-
+      # Auth uses a static fine-grained PAT (issue #124), not a minted token.
       - name: Checkout telegram branch on the-intern-data (create if missing)
         env:
-          GH_TOKEN: ${{ steps.data_token.outputs.token }}
+          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
         run: |
           REPO_URL="https://github.com/TheDeepestSpace/the-intern-data.git"
           git config --global user.name "the-intern-bot[bot]"
@@ -119,11 +112,10 @@ jobs:
           DISPATCH_REF: ${{ github.ref_name }}
           MAX_RETRIES: 3
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          # Lets handle-agent-outcome.js's pending-retries read/write mint its own
-          # the-intern-data token (issue #112) — pending-retries.json now lives
+          # Lets handle-agent-outcome.js's pending-retries read/write authenticate
+          # to the-intern-data (issue #124) — pending-retries.json now lives
           # solely on the-intern-data.
-          APP_ID: ${{ secrets.APP_ID }}
-          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
         run: |
           export MESSAGE="$CLEAN_TEXT"
           export CHAT_ID="$(jq -r '.client_payload.chat_id // empty' "$GITHUB_EVENT_PATH")"
@@ -224,7 +216,7 @@ jobs:
 
           id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
           chown -R dev:dev . /home/dev /tmp/prompt.txt /tmp/normalize-codex-result.js 2>/dev/null || true
-          env -u APP_ID -u APP_PRIVATE_KEY su dev -c '
+          env -u DATA_REPO_TOKEN su dev -c '
             export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"
             export TG_BOT_TOKEN="$TG_BOT_TOKEN"
             export CHAT_ID="$CHAT_ID"
@@ -265,21 +257,10 @@ jobs:
         env:
           REPO_ADMIN_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
 
-      # The agent can run long enough for steps.data_token (minted before "Run
-      # agent") to have crossed its one-hour expiry, so a fresh token is minted
-      # right before the push that actually needs it.
-      - name: Mint fresh installation token for the-intern-data
-        id: push_token
-        run: node scripts/mint-installation-token.js
-        env:
-          APP_ID: ${{ secrets.APP_ID }}
-          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
-          TARGET_REPO: TheDeepestSpace/the-intern-data
-
       - name: Commit updated convo.md to telegram branch on the-intern-data
         working-directory: tg-state
         env:
-          GH_TOKEN: ${{ steps.push_token.outputs.token }}
+          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
         run: |
           git config user.name "the-intern-bot[bot]"
           git config user.email "the-intern-bot[bot]@users.noreply.github.com"

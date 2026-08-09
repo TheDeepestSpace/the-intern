@@ -73,7 +73,7 @@ function writeOutput(name, value) {
 async function resolveRemoteUrl() {
   const remoteUrl = await resolveDataRepoRemoteUrl();
   if (!remoteUrl) {
-    throw new Error('the-intern-data remote is not configured (APP_ID/APP_PRIVATE_KEY or DATA_REPO_REMOTE_URL)');
+    throw new Error('the-intern-data remote is not configured (DATA_REPO_TOKEN or DATA_REPO_REMOTE_URL)');
   }
   return remoteUrl;
 }
