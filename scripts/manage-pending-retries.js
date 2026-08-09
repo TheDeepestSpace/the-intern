@@ -12,7 +12,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
-const { resolveDataRepoRemoteUrl, redactUrl } = require('./data-repo-remote.js');
+const { resolveDataRepoRemoteUrl, redactUrl, runWithFreshRemoteOnNotFound } = require('./data-repo-remote.js');
 
 const BRANCH_NAME = 'pending-retries';
 const FILE_NAME = 'pending-retries.json';
@@ -80,7 +80,7 @@ async function readEntries() {
   }
 
   try {
-    runGit(`fetch ${remoteUrl} ${BRANCH_NAME}:${BRANCH_NAME}`);
+    await runWithFreshRemoteOnNotFound(remoteUrl, (url) => runGit(`fetch ${url} ${BRANCH_NAME}:${BRANCH_NAME}`));
   } catch (err) {
     // "couldn't find remote ref" means the branch legitimately doesn't exist
     // yet (e.g. no retry has ever been queued) — that's an empty queue, not a
@@ -117,7 +117,7 @@ async function readEntries() {
 // them.
 async function updateEntries(mutate) {
   ensureSafeDirectory();
-  const remoteUrl = await resolveRemoteUrl();
+  let remoteUrl = await resolveRemoteUrl();
   const maxAttempts = 3;
 
   const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pending-retries-'));
@@ -137,7 +137,16 @@ async function updateEntries(mutate) {
         runGit('checkout --detach', { ...gitOpts, allowFailure: true });
         runGit(`branch -D ${BRANCH_NAME}`, { ...gitOpts, allowFailure: true });
       }
-      runGit(`fetch ${remoteUrl} ${BRANCH_NAME}:${BRANCH_NAME}`, { ...gitOpts, allowFailure: true });
+      try {
+        await runWithFreshRemoteOnNotFound(remoteUrl, (url) => {
+          remoteUrl = url;
+          return runGit(`fetch ${url} ${BRANCH_NAME}:${BRANCH_NAME}`, { ...gitOpts, stdio: ['pipe', 'pipe', 'pipe'] });
+        });
+      } catch {
+        // Tolerated the same as allowFailure: true previously did — the
+        // branch may legitimately not exist yet (first-ever write); checkout
+        // below falls back to creating the orphan branch in that case.
+      }
 
       try {
         runGit(`checkout ${BRANCH_NAME}`, gitOpts);
@@ -163,7 +172,10 @@ async function updateEntries(mutate) {
       runGit(`commit -m "pending-retries: update ${new Date().toISOString()}"`, gitOpts);
 
       try {
-        runGit(`push ${remoteUrl} ${BRANCH_NAME}`, gitOpts);
+        await runWithFreshRemoteOnNotFound(remoteUrl, (url) => {
+          remoteUrl = url;
+          return runGit(`push ${url} ${BRANCH_NAME}`, gitOpts);
+        });
         return result;
       } catch (err) {
         const isRejected = /non-fast-forward|fetch first/i.test(err.message);

@@ -2,7 +2,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
 const path = require('path');
-const { resolveDataRepoRemoteUrl, redactUrl } = require('./data-repo-remote.js');
+const { resolveDataRepoRemoteUrl, redactUrl, runWithFreshRemoteOnNotFound } = require('./data-repo-remote.js');
 
 const SUPPORTED_BACKENDS = new Set(['claude', 'codex']);
 
@@ -55,12 +55,12 @@ function writeOutput(name, value) {
   }
 }
 
-function fetchLatestSummaryFromDataRepo(targetRepo, issueNumber, remoteUrl) {
+async function fetchLatestSummaryFromDataRepo(targetRepo, issueNumber, remoteUrl) {
   const branchName = getBranchName(targetRepo, issueNumber);
 
   // Fetch branch from the-intern-data if available (it may legitimately not exist yet)
   try {
-    runGit(`fetch ${remoteUrl} ${branchName}:${branchName}`);
+    await runWithFreshRemoteOnNotFound(remoteUrl, (url) => runGit(`fetch ${url} ${branchName}:${branchName}`));
   } catch (err) {
     // "couldn't find remote ref" means no prior summary was ever saved for
     // this issue — that's expected and silent. Any other fetch error (auth,
@@ -104,7 +104,7 @@ async function fetchLatestSummary(targetRepo, issueNumber) {
   }
   if (!remoteUrl) return { content: '', filename: '' };
 
-  const result = fetchLatestSummaryFromDataRepo(targetRepo, issueNumber, remoteUrl);
+  const result = await fetchLatestSummaryFromDataRepo(targetRepo, issueNumber, remoteUrl);
   if (result.content) console.log(`Retrieved prior summary from the-intern-data: ${result.filename}`);
   return result;
 }
@@ -138,7 +138,7 @@ function resolveBackend(requestedBackend, backendExplicit, persistedBackend) {
 // Pushes one summary commit to the per-issue orphan branch on the-intern-data.
 // Sets process.exitCode = 1 on failure — there is no fallback store, so a
 // failed save here is a real data-loss event, not a soft-degrade.
-function saveSummaryToDataRepo(targetRepo, issueNumber, promptText, resultText, backend, remoteUrl) {
+async function saveSummaryToDataRepo(targetRepo, issueNumber, promptText, resultText, backend, remoteUrl) {
   ensureSafeDirectory();
   const branchName = getBranchName(targetRepo, issueNumber);
   const repoSlug = sanitizeSlug(targetRepo);
@@ -161,7 +161,10 @@ function saveSummaryToDataRepo(targetRepo, issueNumber, promptText, resultText, 
         // re-fetch the branch's current tip before rebuilding our commit on it.
         runGit('checkout --detach');
         runGit(`branch -D ${branchName}`);
-        runGit(`fetch ${remoteUrl} ${branchName}:${branchName}`);
+        await runWithFreshRemoteOnNotFound(remoteUrl, (url) => {
+          remoteUrl = url;
+          return runGit(`fetch ${url} ${branchName}:${branchName}`);
+        });
       }
 
       // Create the orphan branch, or switch to it if a prior run already created it
@@ -200,7 +203,10 @@ ${resultText || 'N/A'}
       runGit(`commit -m "summary: ${targetRepo} #${issueNumber} at ${timestamp}"`);
 
       try {
-        runGit(`push ${remoteUrl} ${branchName}`);
+        await runWithFreshRemoteOnNotFound(remoteUrl, (url) => {
+          remoteUrl = url;
+          return runGit(`push ${url} ${branchName}`);
+        });
         console.log(`Pushed summary to the-intern-data:${branchName}`);
         return builtContent;
       } catch (err) {
@@ -242,7 +248,7 @@ async function saveSummary(targetRepo, issueNumber, promptText, resultText, back
     return;
   }
 
-  saveSummaryToDataRepo(targetRepo, issueNumber, promptText, resultText, backend, remoteUrl);
+  await saveSummaryToDataRepo(targetRepo, issueNumber, promptText, resultText, backend, remoteUrl);
 }
 
 if (require.main === module) {
