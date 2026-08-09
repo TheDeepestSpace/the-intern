@@ -13,8 +13,11 @@ jobs:
     permissions:
       # pending-retries.json now persists to the-intern-data via a static
       # DATA_REPO_TOKEN secret (issue #124), not this job's own GITHUB_TOKEN.
-      # actions: write creates the workflow_dispatch/repository_dispatch re-fire.
-      contents: read
+      # actions: write creates the workflow_dispatch re-fire; repository_dispatch
+      # re-fires need contents: write, not actions: write (GitHub App permission
+      # model for POST /repos/{owner}/{repo}/dispatches) — actions: write alone
+      # gets a 403 "Resource not accessible by integration".
+      contents: write
       actions: write
     # Serialized so two overlapping runs (a slow run plus the next schedule
     # tick) can't both read the same due entry and double-fire it before
