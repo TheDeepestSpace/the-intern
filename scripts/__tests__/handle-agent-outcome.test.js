@@ -85,6 +85,7 @@ describe('main', () => {
       sendTelegram: vi.fn(),
       buildDispatchPayload: vi.fn(() => null),
       detectUsageLimit: vi.fn(() => null),
+      saveCodexLog: vi.fn(() => Promise.resolve()),
       ...overrides,
     };
   }
@@ -233,6 +234,38 @@ describe('main', () => {
     expect(d.sendTelegram).toHaveBeenCalledTimes(1);
     expect(d.sendTelegram.mock.calls[0][1]).toMatch(/ran into an error/);
     expect(d.updateEntries).not.toHaveBeenCalled();
+  });
+
+  it('saves the codex event log on a codex-backend failure', async () => {
+    const d = deps({ readResultText: vi.fn(() => ({ isError: true, text: 'some other crash' })) });
+
+    await main({ ...baseEnv, BACKEND: 'codex', GITHUB_RUN_ID: '999' }, d);
+
+    expect(d.saveCodexLog).toHaveBeenCalledTimes(1);
+    expect(d.saveCodexLog).toHaveBeenCalledWith(
+      expect.objectContaining({ targetRepo: '', issueNumber: '', runId: '999' })
+    );
+    expect(d.sendTelegram).toHaveBeenCalledTimes(1);
+    expect(d.sendTelegram.mock.calls[0][1]).not.toMatch(/some other crash/);
+  });
+
+  it('does not save the codex event log on a claude-backend failure', async () => {
+    const d = deps({ readResultText: vi.fn(() => ({ isError: true, text: 'some other crash' })) });
+
+    await main({ ...baseEnv, BACKEND: 'claude' }, d);
+
+    expect(d.saveCodexLog).not.toHaveBeenCalled();
+  });
+
+  it('still sends the generic failure notification when saving the codex log rejects', async () => {
+    const d = deps({
+      readResultText: vi.fn(() => ({ isError: true, text: 'some other crash' })),
+      saveCodexLog: vi.fn(() => Promise.reject(new Error('push rejected'))),
+    });
+
+    await expect(main({ ...baseEnv, BACKEND: 'codex' }, d)).resolves.not.toThrow();
+    expect(d.sendTelegram).toHaveBeenCalledTimes(1);
+    expect(d.sendTelegram.mock.calls[0][1]).toMatch(/ran into an error/);
   });
 
   it('exits with an error and does not call any deps when RETRY_KEY is missing', async () => {

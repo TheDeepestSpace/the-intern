@@ -9,6 +9,7 @@ const { execFileSync } = require('child_process');
 const { detectUsageLimit } = require('./detect-usage-limit');
 const { updateEntries, buildDispatchPayload } = require('./manage-pending-retries');
 const { upsertStall, resolveEntry } = require('./pending-retries-store');
+const { saveCodexLog } = require('./manage-codex-log');
 
 // Mirrors extract-result.js's own extraction (data.result ?? data.output ?? data)
 // so detection sees the same text a human would in session_result.txt.
@@ -61,6 +62,7 @@ async function main(env = process.env, deps = {}) {
     buildDispatchPayload: buildDispatchPayloadFn = buildDispatchPayload,
     detectUsageLimit: detectUsageLimitFn = detectUsageLimit,
     readResultText: readResultTextFn = readResultText,
+    saveCodexLog: saveCodexLogFn = saveCodexLog,
   } = deps;
 
   const workspace = env.GITHUB_WORKSPACE || process.cwd();
@@ -115,6 +117,25 @@ async function main(env = process.env, deps = {}) {
   }
 
   console.log('::warning::Agent produced no usable output or reported an error');
+
+  // codex has no equivalent of claude's --output-format json diagnostics; the
+  // raw JSONL event stream captured to /tmp/codex-events.jsonl is the only
+  // place a genuine codex crash shows up (issue #93/#134). Push it to
+  // the-intern-data (private) before the container tears down, regardless of
+  // whether this turns out to be a usage-limit stall or a generic failure —
+  // never send any of it to Telegram or a shared-visibility artifact.
+  if (env.BACKEND === 'codex') {
+    try {
+      await saveCodexLogFn({
+        targetRepo,
+        issueNumber,
+        runId: env.GITHUB_RUN_ID,
+        logFile: env.CODEX_EVENTS_FILE,
+      });
+    } catch (err) {
+      console.error(`::error::Unexpected error saving codex log: ${err.message}`);
+    }
+  }
 
   const stall = detectUsageLimitFn(text);
   const dispatch = stall
