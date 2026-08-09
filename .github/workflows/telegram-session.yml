@@ -10,25 +10,44 @@ permissions:
   contents: read
 
 jobs:
-  respond:
+  parse-trigger:
     runs-on: ubuntu-latest
-    # All runs — codex-backend or not — share a single global concurrency group:
-    #
+    # Split out from `respond` so the backend is known before that job starts —
+    # a job's `concurrency:` group is resolved before any of its own steps run,
+    # so it can't reference a step output from within the same job.
+    outputs:
+      backend: ${{ steps.parse.outputs.backend }}
+      clean_text: ${{ steps.parse.outputs.clean_text }}
+    steps:
+      - name: Checkout agent-infra
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Parse backend from Telegram message
+        id: parse
+        run: node scripts/parse-telegram-trigger.js
+
+  respond:
+    needs: parse-trigger
+    runs-on: ubuntu-latest
     # codex-backend runs need global serialization across the whole repo (not just
     # per-chat): codex proactively rotates its own refresh token in place, and
     # rotated refresh tokens are typically single-use, so an overlapping codex run
     # from here and from dispatcher.yml restoring/persisting CODEX_AUTH_JSON at once
-    # would race and strand each other on a stale token.
+    # would race and strand each other on a stale token. So codex-backend chats
+    # share dispatcher.yml's the-intern-codex-auth group.
     #
-    # Non-codex runs also need global (not just per-chat) serialization: every chat
-    # clones and pushes the same shared `telegram` branch on the-intern-data, so two
-    # different chats — or a codex and a non-codex run — running concurrently can
-    # race to push convo.md. The push step below retries on rejection by fetching
-    # and rebasing, but that can't recover from a genuine rebase conflict, so
-    # sharing one group with dispatcher.yml's codex-auth serialization avoids the
-    # race outright instead of relying on retries.
+    # Non-codex runs don't touch CODEX_AUTH_JSON, so they don't need that global
+    # group — they get their own the-intern-telegram group instead. They still need
+    # *some* single shared group (not per-chat) because every chat clones and
+    # pushes the same shared `telegram` branch on the-intern-data, so two different
+    # non-codex chats running concurrently can race to push convo.md. The push step
+    # below retries on rejection by fetching and rebasing, but that can't recover
+    # from a genuine rebase conflict, so serializing via one group avoids the race
+    # outright instead of relying on retries.
     concurrency:
-      group: the-intern-codex-auth
+      group: ${{ needs.parse-trigger.outputs.backend == 'codex' && 'the-intern-codex-auth' || 'the-intern-telegram' }}
       cancel-in-progress: false
       queue: max
     container:
@@ -42,10 +61,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Parse backend from Telegram message
-        id: parse
-        run: node scripts/parse-telegram-trigger.js
 
       - name: Mint installation token
         id: token
@@ -86,14 +101,14 @@ jobs:
           fi
 
       - name: Install script dependencies for Codex auth round-trip
-        if: steps.parse.outputs.backend == 'codex'
+        if: needs.parse-trigger.outputs.backend == 'codex'
         run: npm ci --omit=dev --include=prod --no-audit --no-fund
 
       # See dispatcher.yml's matching step for the full rationale — same
       # personal-account Codex login round-trip, just triggered from Telegram
       # instead of a GH comment.
       - name: Restore Codex auth.json from secret
-        if: steps.parse.outputs.backend == 'codex'
+        if: needs.parse-trigger.outputs.backend == 'codex'
         run: node scripts/rotate-codex-auth.js restore || echo "::warning::Codex auth.json restore failed; codex exec will fail without valid credentials"
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
@@ -101,13 +116,13 @@ jobs:
       - name: Run agent (fresh session with convo.md context)
         working-directory: tg-state
         env:
-          BACKEND: ${{ steps.parse.outputs.backend }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ steps.parse.outputs.backend != 'codex' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
+          BACKEND: ${{ needs.parse-trigger.outputs.backend }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ needs.parse-trigger.outputs.backend != 'codex' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
-          CLEAN_TEXT: ${{ steps.parse.outputs.clean_text }}
+          CLEAN_TEXT: ${{ needs.parse-trigger.outputs.clean_text }}
           RETRY_SOURCE: telegram
           WORKFLOW_FILE: telegram-session.yml
           DISPATCH_REF: ${{ github.ref_name }}
@@ -253,7 +268,7 @@ jobs:
       # why a mid-run failure can still leave a rotated, single-use refresh token
       # on disk that needs writing back regardless of outcome.
       - name: Persist refreshed Codex auth.json to secret
-        if: always() && steps.parse.outputs.backend == 'codex'
+        if: always() && needs.parse-trigger.outputs.backend == 'codex'
         run: node scripts/rotate-codex-auth.js persist
         env:
           REPO_ADMIN_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
