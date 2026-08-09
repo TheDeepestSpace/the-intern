@@ -31,6 +31,15 @@ const EXCLUDED_PATHS = ['session_result.txt'];
 // transcript into the-intern-data. The tail is what matters for debugging a
 // stall anyway.
 const TRANSCRIPT_MAX_LINES = 500;
+// The target-repo checkout (this module's cwd/worktree source in production)
+// has its own installation token persisted as a global-matching
+// `http.https://github.com/.extraheader` (dispatcher.yml's "Checkout target
+// repository" step can't set persist-credentials: false — the agent's own
+// push back to the target repo relies on it, see issue #128). That header
+// wins over the DATA_REPO_TOKEN embedded in remoteUrl's basic-auth userinfo,
+// so every fetch/push aimed at the-intern-data must explicitly clear it for
+// just that command.
+const CLEAR_TARGET_REPO_EXTRAHEADER = '-c http.https://github.com/.extraheader=';
 
 function sanitizeSlug(value) {
   return String(value).replace(/[^a-zA-Z0-9_-]/g, '-');
@@ -183,12 +192,12 @@ function pushWithRetry(remoteUrl, branchName, gitOpts, prepare, { maxAttempts = 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     runGit('checkout --detach', { ...gitOpts, allowFailure: true });
     runGit(`branch -D ${branchName}`, { ...gitOpts, allowFailure: true });
-    runGit(`fetch ${remoteUrl} ${branchName}:${branchName}`, { ...gitOpts, allowFailure: true });
+    runGit(`${CLEAR_TARGET_REPO_EXTRAHEADER} fetch ${remoteUrl} ${branchName}:${branchName}`, { ...gitOpts, allowFailure: true });
 
     prepare();
 
     try {
-      runGit(`push ${remoteUrl} ${branchName}`, gitOpts);
+      runGit(`${CLEAR_TARGET_REPO_EXTRAHEADER} push ${remoteUrl} ${branchName}`, gitOpts);
       return;
     } catch (err) {
       const isRejected = /non-fast-forward|fetch first/i.test(err.message);
@@ -229,7 +238,7 @@ async function clearBackup(targetRepo, issueNumber) {
     runGit('config user.email "the-intern-bot[bot]@users.noreply.github.com"', { ...gitOpts, allowFailure: true });
 
     try {
-      runGit(`fetch ${remoteUrl} ${branchName}:${branchName}`, gitOpts);
+      runGit(`${CLEAR_TARGET_REPO_EXTRAHEADER} fetch ${remoteUrl} ${branchName}:${branchName}`, gitOpts);
     } catch (err) {
       if (/couldn't find remote ref/i.test(err.message)) {
         console.log(`No backup branch ${branchName} to clear.`);
@@ -370,7 +379,7 @@ async function fetchBackup(targetRepo, issueNumber) {
   const branchName = getBranchName(targetRepo, issueNumber);
   const scratchRef = `refs/workspace-backup-fetch/${sanitizeSlug(issueNumber)}`;
   try {
-    runGit(`fetch ${remoteUrl} ${branchName}:${scratchRef}`);
+    runGit(`${CLEAR_TARGET_REPO_EXTRAHEADER} fetch ${remoteUrl} ${branchName}:${scratchRef}`);
   } catch (err) {
     if (!/couldn't find remote ref/i.test(err.message)) {
       console.warn(`::warning::Could not fetch workspace backup branch ${branchName}: ${err.message}`);
