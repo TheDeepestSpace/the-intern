@@ -138,35 +138,50 @@ describe('data-repo-remote', () => {
       process.env.APP_PRIVATE_KEY = TEST_PRIVATE_KEY_PEM;
     });
 
-    it('re-mints a fresh token and retries on a transient "Repository not found", then succeeds', async () => {
-      mockMint('ghs_second');
+    it('reuses the same url across retries on a transient "Repository not found", then succeeds', async () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       const run = vi.fn()
         .mockRejectedValueOnce(new Error('fatal: Repository not found.'))
         .mockImplementationOnce((url) => url);
 
-      const result = await runWithFreshRemoteOnNotFound('https://x-access-token:ghs_first@github.com/x.git', run, { retryDelayMs: 0 });
+      const result = await runWithFreshRemoteOnNotFound('https://x-access-token:ghs_first@github.com/x.git', run, { retries: 3, retryBaseDelayMs: 0 });
 
-      expect(result).toBe(`https://x-access-token:ghs_second@github.com/${DATA_REPO}.git`);
+      expect(result).toBe('https://x-access-token:ghs_first@github.com/x.git');
       expect(run).toHaveBeenCalledTimes(2);
       expect(run).toHaveBeenNthCalledWith(1, 'https://x-access-token:ghs_first@github.com/x.git');
-      expect(run).toHaveBeenNthCalledWith(2, `https://x-access-token:ghs_second@github.com/${DATA_REPO}.git`);
+      expect(run).toHaveBeenNthCalledWith(2, 'https://x-access-token:ghs_first@github.com/x.git');
       expect(warnSpy).toHaveBeenCalledTimes(1);
 
       warnSpy.mockRestore();
     });
 
+    it('re-mints a fresh token as a last resort right before the final attempt', async () => {
+      mockMint('ghs_second');
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const run = vi.fn()
+        .mockRejectedValueOnce(new Error('fatal: Repository not found.'))
+        .mockRejectedValueOnce(new Error('fatal: Repository not found.'))
+        .mockImplementationOnce((url) => url);
+
+      const result = await runWithFreshRemoteOnNotFound('https://x-access-token:ghs_first@github.com/x.git', run, { retries: 2, retryBaseDelayMs: 0 });
+
+      expect(result).toBe(`https://x-access-token:ghs_second@github.com/${DATA_REPO}.git`);
+      expect(run).toHaveBeenCalledTimes(3);
+      expect(run).toHaveBeenNthCalledWith(1, 'https://x-access-token:ghs_first@github.com/x.git');
+      expect(run).toHaveBeenNthCalledWith(2, 'https://x-access-token:ghs_first@github.com/x.git');
+      expect(run).toHaveBeenNthCalledWith(3, `https://x-access-token:ghs_second@github.com/${DATA_REPO}.git`);
+    });
+
     it('gives up and throws the last error after exhausting retries on a persistent "Repository not found"', async () => {
       mockMint('ghs_second');
-      mockMint('ghs_third');
-      mockMint('ghs_fourth');
       vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       const run = vi.fn().mockRejectedValue(new Error('fatal: Repository not found.'));
 
       await expect(
-        runWithFreshRemoteOnNotFound('https://x-access-token:ghs_first@github.com/x.git', run, { retries: 3, retryDelayMs: 0 })
+        runWithFreshRemoteOnNotFound('https://x-access-token:ghs_first@github.com/x.git', run, { retries: 3, retryBaseDelayMs: 0 })
       ).rejects.toThrow(/Repository not found/);
       expect(run).toHaveBeenCalledTimes(4);
     });
@@ -175,9 +190,42 @@ describe('data-repo-remote', () => {
       const run = vi.fn().mockRejectedValue(new Error('fatal: could not read Username'));
 
       await expect(
-        runWithFreshRemoteOnNotFound('https://x-access-token:ghs_first@github.com/x.git', run, { retryDelayMs: 0 })
+        runWithFreshRemoteOnNotFound('https://x-access-token:ghs_first@github.com/x.git', run, { retryBaseDelayMs: 0 })
       ).rejects.toThrow(/could not read Username/);
       expect(run).toHaveBeenCalledTimes(1);
+    });
+
+    it('uses capped exponential backoff between retries', async () => {
+      vi.useFakeTimers();
+      const run = vi.fn()
+        .mockRejectedValueOnce(new Error('fatal: Repository not found.'))
+        .mockRejectedValueOnce(new Error('fatal: Repository not found.'))
+        .mockRejectedValueOnce(new Error('fatal: Repository not found.'))
+        .mockImplementationOnce((url) => url);
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const promise = runWithFreshRemoteOnNotFound('https://x-access-token:ghs_first@github.com/x.git', run, {
+        retries: 5,
+        retryBaseDelayMs: 2000,
+        retryMaxDelayMs: 20000,
+      });
+      // Flush pending microtasks before advancing fake timers so each rejected
+      // run() call is observed before the next sleep is scheduled.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(run).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(run).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(run).toHaveBeenCalledTimes(3);
+
+      await vi.advanceTimersByTimeAsync(8000);
+      expect(run).toHaveBeenCalledTimes(4);
+
+      await expect(promise).resolves.toBe('https://x-access-token:ghs_first@github.com/x.git');
+
+      vi.useRealTimers();
     });
   });
 
