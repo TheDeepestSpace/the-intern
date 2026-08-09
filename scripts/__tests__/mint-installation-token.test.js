@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { MockAgent, setGlobalDispatcher, getGlobalDispatcher } from 'undici';
-import { getInstallationToken, mintAppJwt, getPrivateKey } from '../mint-installation-token.js';
+import { getInstallationToken, mintAppJwt, getPrivateKey, parsePermissions } from '../mint-installation-token.js';
 
 // A throwaway RSA key generated fresh per test run; only used to exercise the
 // signing code path, never a real credential.
@@ -213,5 +213,56 @@ describe('mint-installation-token', () => {
         getInstallationToken({ appId: '123', privateKey: TEST_PRIVATE_KEY_PEM, installationId: '999' })
       ).rejects.toThrow(/Token mint failed \(401\): Bad credentials/);
     });
+
+    it('scopes the access-token request body to the target repo and requested permissions', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({
+          method: 'POST',
+          path: '/app/installations/999/access_tokens',
+          body: (body) => {
+            const parsed = JSON.parse(body);
+            return (
+              Array.isArray(parsed.repositories) &&
+              parsed.repositories.length === 1 &&
+              parsed.repositories[0] === 'widgets' &&
+              JSON.stringify(parsed.permissions) === JSON.stringify({ contents: 'write' })
+            );
+          },
+        })
+        .reply(201, { token: 'ghs_scopedtoken' });
+
+      const token = await getInstallationToken({
+        appId: '123',
+        privateKey: TEST_PRIVATE_KEY_PEM,
+        installationId: '999',
+        targetRepo: 'acme/widgets',
+        permissions: { contents: 'write' },
+      });
+
+      expect(token).toBe('ghs_scopedtoken');
+    });
+  });
+
+  describe('parsePermissions', () => {
+    it('returns undefined when unset or empty', () => {
+      expect(parsePermissions(undefined)).toBeUndefined();
+      expect(parsePermissions('')).toBeUndefined();
+    });
+
+    it('returns the parsed object for valid JSON permissions', () => {
+      expect(parsePermissions('{"contents":"write"}')).toEqual({ contents: 'write' });
+    });
+
+    it('throws on invalid JSON', () => {
+      expect(() => parsePermissions('{not json')).toThrow(/Invalid PERMISSIONS/);
+    });
+
+    it.each(['null', 'false', '0', '"contents"', '[]'])(
+      'throws when parsed value %s is not a plain object',
+      (raw) => {
+        expect(() => parsePermissions(raw)).toThrow(/Invalid PERMISSIONS/);
+      }
+    );
   });
 });

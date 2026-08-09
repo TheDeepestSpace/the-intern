@@ -99,6 +99,7 @@ async function getInstallationToken({
   targetRepo,
   retries,
   retryDelayMs,
+  permissions,
 }) {
   if (!appId) throw new Error('Missing APP_ID secret');
   if (!privateKey) throw new Error('Missing APP_PRIVATE_KEY secret');
@@ -127,7 +128,16 @@ async function getInstallationToken({
       },
       // Without `repositories`, GitHub grants the token access to every repo
       // the installation can see. Scope it down to just targetRepo when known.
-      body: targetRepo ? JSON.stringify({ repositories: [targetRepo.split('/')[1]] }) : undefined,
+      // Without `permissions`, GitHub grants every permission the installation
+      // has, even ones the caller only needs read-only (or no) access to —
+      // pass it through when the caller specifies a minimal set.
+      body:
+        targetRepo || permissions
+          ? JSON.stringify({
+              ...(targetRepo ? { repositories: [targetRepo.split('/')[1]] } : {}),
+              ...(permissions ? { permissions } : {}),
+            })
+          : undefined,
     }
   );
 
@@ -140,7 +150,21 @@ async function getInstallationToken({
   return data.token;
 }
 
-module.exports = { getInstallationToken, mintAppJwt, getPrivateKey };
+function parsePermissions(raw) {
+  if (!raw) return undefined;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`Invalid PERMISSIONS: not valid JSON (${error.message})`);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('Invalid PERMISSIONS: must be a JSON object of permission scopes');
+  }
+  return parsed;
+}
+
+module.exports = { getInstallationToken, mintAppJwt, getPrivateKey, parsePermissions };
 
 if (require.main === module) {
   (async () => {
@@ -149,13 +173,20 @@ if (require.main === module) {
       const privateKey = getPrivateKey(process.env);
       const installationId = process.env.INSTALLATION_ID;
       const targetRepo = process.env.TARGET_REPO;
+      const permissions = parsePermissions(process.env.PERMISSIONS);
 
       if (!appId || !privateKey) {
         console.error('APP_ID and APP_PRIVATE_KEY secrets are required');
         process.exit(1);
       }
 
-      const token = await getInstallationToken({ appId, privateKey, installationId, targetRepo });
+      const token = await getInstallationToken({
+        appId,
+        privateKey,
+        installationId,
+        targetRepo,
+        permissions,
+      });
 
       // Tell GitHub Actions runner to mask this token across all step logs
       console.log(`::add-mask::${token}`);
