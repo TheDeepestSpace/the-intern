@@ -49,8 +49,9 @@ function redactUrl(str) {
   return str.replace(/:\/\/[^\s/@]*(?::[^\s/@]*)?@/g, '://***:***@');
 }
 
-const GIT_REMOTE_RETRIES = 3;
-const GIT_REMOTE_RETRY_DELAY_MS = 3000;
+const GIT_REMOTE_RETRIES = 10;
+const GIT_REMOTE_RETRY_BASE_DELAY_MS = 2000;
+const GIT_REMOTE_RETRY_MAX_DELAY_MS = 20000;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -60,12 +61,24 @@ function isTransientRemoteNotFound(message) {
   return /repository not found/i.test(String(message || ''));
 }
 
-// mintDataRepoToken mints a brand-new token on every call, and GitHub
-// intermittently serves a transient "Repository not found" on a git
-// fetch/push against a token minted moments earlier (issue #120) — the same
+// Capped exponential backoff: baseDelayMs, ×2 per attempt, capped at
+// maxDelayMs. Propagation lag (see below) is usually 1-3s but occasionally
+// longer, so a flat delay either overwaits the common case or underwaits the
+// rare one.
+function backoffDelay(attempt, baseDelayMs, maxDelayMs) {
+  return Math.min(baseDelayMs * 2 ** attempt, maxDelayMs);
+}
+
+// GitHub intermittently serves a transient "Repository not found" on a git
+// fetch/push against a freshly minted token (issue #120) — the same
 // token-propagation-lag blip #117 fixed for the installation-lookup call,
-// but here hitting the git command that follows the mint instead. Re-mint a
-// fresh token and retry a few times before surfacing the failure.
+// but here hitting the git command that follows the mint instead. Retry a
+// few times before surfacing the failure.
+//
+// The token itself is valid immediately; only the backend propagation lags,
+// so re-minting on every retry buys nothing but an extra API call. Reuse the
+// same `url` across attempts, and only re-mint right before the final
+// attempt as a last resort.
 //
 // `remoteUrl` is used on the first attempt; callers that already resolved
 // one (to raise their own "not configured" error before this point) pass it
@@ -74,7 +87,11 @@ function isTransientRemoteNotFound(message) {
 async function runWithFreshRemoteOnNotFound(
   remoteUrl,
   run,
-  { retries = GIT_REMOTE_RETRIES, retryDelayMs = GIT_REMOTE_RETRY_DELAY_MS } = {}
+  {
+    retries = GIT_REMOTE_RETRIES,
+    retryBaseDelayMs = GIT_REMOTE_RETRY_BASE_DELAY_MS,
+    retryMaxDelayMs = GIT_REMOTE_RETRY_MAX_DELAY_MS,
+  } = {}
 ) {
   let url = remoteUrl;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -83,9 +100,11 @@ async function runWithFreshRemoteOnNotFound(
     } catch (err) {
       const isLastAttempt = attempt === retries;
       if (isLastAttempt || !isTransientRemoteNotFound(err.message)) throw err;
-      console.warn(`the-intern-data git operation hit a transient "Repository not found" (attempt ${attempt + 1}/${retries}), re-minting token and retrying: ${redactUrl(err.message)}`);
-      await sleep(retryDelayMs);
-      url = (await resolveDataRepoRemoteUrl()) || url;
+      const delay = backoffDelay(attempt, retryBaseDelayMs, retryMaxDelayMs);
+      console.warn(`the-intern-data git operation hit a transient "Repository not found" (attempt ${attempt + 1}/${retries}), retrying in ${delay}ms: ${redactUrl(err.message)}`);
+      await sleep(delay);
+      const isNextAttemptLast = attempt + 1 === retries;
+      if (isNextAttemptLast) url = (await resolveDataRepoRemoteUrl()) || url;
     }
   }
 }
