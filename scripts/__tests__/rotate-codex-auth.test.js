@@ -268,6 +268,7 @@ describe('rotate-codex-auth', () => {
       const keypair = sodium.crypto_box_keypair();
       let capturedBody = null;
       let capturedAuthHeader = null;
+      let capturedTokenRequestBody = null;
 
       const client = agent.get('https://api.github.com');
       client
@@ -275,7 +276,10 @@ describe('rotate-codex-auth', () => {
         .reply(200, { id: 555 });
       client
         .intercept({ method: 'POST', path: '/app/installations/555/access_tokens' })
-        .reply(201, { token: 'ghs_minted' });
+        .reply(opts => {
+          capturedTokenRequestBody = JSON.parse(opts.body);
+          return { statusCode: 201, data: { token: 'ghs_minted' } };
+        });
       client
         .intercept({ method: 'GET', path: '/repos/acme/widgets/actions/secrets/public-key' })
         .reply(opts => {
@@ -298,6 +302,7 @@ describe('rotate-codex-auth', () => {
       await persist();
 
       expect(process.exitCode).toBe(0);
+      expect(capturedTokenRequestBody).toEqual({ repositories: ['widgets'] });
       expect(capturedAuthHeader).toBe('Bearer ghs_minted');
       expect(capturedBody.key_id).toBe('key-1');
 
