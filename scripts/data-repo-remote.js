@@ -77,13 +77,13 @@ async function runWithFreshRemoteOnNotFound(
   { retries = GIT_REMOTE_RETRIES, retryDelayMs = GIT_REMOTE_RETRY_DELAY_MS } = {}
 ) {
   let url = remoteUrl;
-  for (let attempt = 1; attempt <= retries; attempt++) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await run(url);
     } catch (err) {
       const isLastAttempt = attempt === retries;
       if (isLastAttempt || !isTransientRemoteNotFound(err.message)) throw err;
-      console.warn(`the-intern-data git operation hit a transient "Repository not found" (attempt ${attempt}/${retries}), re-minting token and retrying: ${redactUrl(err.message)}`);
+      console.warn(`the-intern-data git operation hit a transient "Repository not found" (attempt ${attempt + 1}/${retries}), re-minting token and retrying: ${redactUrl(err.message)}`);
       await sleep(retryDelayMs);
       url = (await resolveDataRepoRemoteUrl()) || url;
     }

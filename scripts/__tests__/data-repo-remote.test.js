@@ -160,6 +160,7 @@ describe('data-repo-remote', () => {
     it('gives up and throws the last error after exhausting retries on a persistent "Repository not found"', async () => {
       mockMint('ghs_second');
       mockMint('ghs_third');
+      mockMint('ghs_fourth');
       vi.spyOn(console, 'warn').mockImplementation(() => {});
 
       const run = vi.fn().mockRejectedValue(new Error('fatal: Repository not found.'));
@@ -167,7 +168,7 @@ describe('data-repo-remote', () => {
       await expect(
         runWithFreshRemoteOnNotFound('https://x-access-token:ghs_first@github.com/x.git', run, { retries: 3, retryDelayMs: 0 })
       ).rejects.toThrow(/Repository not found/);
-      expect(run).toHaveBeenCalledTimes(3);
+      expect(run).toHaveBeenCalledTimes(4);
     });
 
     it('does not retry (or re-mint) a non-transient error', async () => {
