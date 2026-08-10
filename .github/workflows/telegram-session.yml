@@ -81,6 +81,8 @@ jobs:
         env:
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          TARGET_REPO: ${{ github.repository }}
+          SCOPE_TO_REPO: 'false'
 
       # Gives the agent shell (issue #141) short-lived, single-repo-scoped
       # read/write reach into the-intern-data, without exposing the

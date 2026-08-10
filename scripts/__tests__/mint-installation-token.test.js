@@ -242,6 +242,29 @@ describe('mint-installation-token', () => {
 
       expect(token).toBe('ghs_scopedtoken');
     });
+
+    it('does not scope access-token request body to repositories when scopeToRepo is false, even if targetRepo is provided for lookup', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+        .reply(200, { id: 555 });
+      client
+        .intercept({
+          method: 'POST',
+          path: '/app/installations/555/access_tokens',
+          body: (body) => body === undefined || body === null,
+        })
+        .reply(201, { token: 'ghs_unscopedtoken' });
+
+      const token = await getInstallationToken({
+        appId: '123',
+        privateKey: TEST_PRIVATE_KEY_PEM,
+        targetRepo: 'acme/widgets',
+        scopeToRepo: false,
+      });
+
+      expect(token).toBe('ghs_unscopedtoken');
+    });
   });
 
   describe('parsePermissions', () => {

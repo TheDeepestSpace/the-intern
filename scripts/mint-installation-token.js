@@ -100,6 +100,7 @@ async function getInstallationToken({
   retries,
   retryDelayMs,
   permissions,
+  scopeToRepo = true,
 }) {
   if (!appId) throw new Error('Missing APP_ID secret');
   if (!privateKey) throw new Error('Missing APP_PRIVATE_KEY secret');
@@ -116,6 +117,8 @@ async function getInstallationToken({
     throw new Error(`Could not determine installationId for repo: ${targetRepo || 'unknown'}`);
   }
 
+  const shouldScopeRepo = scopeToRepo && Boolean(targetRepo);
+
   const res = await fetch(
     `https://api.github.com/app/installations/${targetInstallationId}/access_tokens`,
     {
@@ -127,14 +130,15 @@ async function getInstallationToken({
         'Content-Type': 'application/json',
       },
       // Without `repositories`, GitHub grants the token access to every repo
-      // the installation can see. Scope it down to just targetRepo when known.
-      // Without `permissions`, GitHub grants every permission the installation
-      // has, even ones the caller only needs read-only (or no) access to —
-      // pass it through when the caller specifies a minimal set.
+      // the installation can see. Scope it down to just targetRepo when known
+      // and scopeToRepo is true. Without `permissions`, GitHub grants every
+      // permission the installation has, even ones the caller only needs
+      // read-only (or no) access to — pass it through when the caller
+      // specifies a minimal set.
       body:
-        targetRepo || permissions
+        shouldScopeRepo || permissions
           ? JSON.stringify({
-              ...(targetRepo ? { repositories: [targetRepo.split('/')[1]] } : {}),
+              ...(shouldScopeRepo ? { repositories: [targetRepo.split('/')[1]] } : {}),
               ...(permissions ? { permissions } : {}),
             })
           : undefined,
@@ -174,6 +178,7 @@ if (require.main === module) {
       const installationId = process.env.INSTALLATION_ID;
       const targetRepo = process.env.TARGET_REPO;
       const permissions = parsePermissions(process.env.PERMISSIONS);
+      const scopeToRepo = process.env.SCOPE_TO_REPO !== 'false';
 
       if (!appId || !privateKey) {
         console.error('APP_ID and APP_PRIVATE_KEY secrets are required');
@@ -186,6 +191,7 @@ if (require.main === module) {
         installationId,
         targetRepo,
         permissions,
+        scopeToRepo,
       });
 
       // Tell GitHub Actions runner to mask this token across all step logs
