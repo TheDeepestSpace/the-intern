@@ -31,10 +31,12 @@ jobs:
   respond:
     needs: parse-trigger
     runs-on: ubuntu-latest
-    # Installation access tokens (both `token` and `data_token` above) expire
-    # after 1 hour, non-configurably. Bound this job below that so a stuck
-    # agent run fails fast instead of limping on with an expired data_token
-    # for the rest of the default 6-hour job timeout.
+    # `data_token` (the-intern-data reach, issue #141) expires after 1 hour,
+    # non-configurably, and — unlike `token` above, which the background
+    # refresher in the "Run agent" step now keeps valid past that cap
+    # (issue #145) — has no equivalent refresh yet. Bound this job below that
+    # so a stuck agent run fails fast instead of limping on with an expired
+    # data_token for the rest of the default 6-hour job timeout.
     timeout-minutes: 45
     # codex-backend runs need global serialization across the whole repo (not just
     # per-chat): codex proactively rotates its own refresh token in place, and
@@ -151,6 +153,15 @@ jobs:
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          # Let the background token refresher below (issue #145) re-mint with
+          # the same scoping the initial "Mint installation token" step above
+          # used (unscoped, since this session can act across every repo the
+          # App installation covers), once that token expires past its fixed
+          # 1hr cap.
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          TARGET_REPO: ${{ github.repository }}
+          SCOPE_TO_REPO: 'false'
           CLEAN_TEXT: ${{ needs.parse-trigger.outputs.clean_text }}
           RETRY_SOURCE: telegram
           WORKFLOW_FILE: telegram-session.yml
@@ -263,13 +274,29 @@ jobs:
 
           id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
           chown -R dev:dev . /home/dev /tmp/prompt.txt /tmp/normalize-codex-result.js 2>/dev/null || true
-          su dev -c '
+
+          # Authenticate the dev user's gh/git credential store once with the
+          # token minted above (issue #145), then re-mint and rewrite it every
+          # ~45min for the duration of the agent run below — see
+          # dispatcher.yml's matching steps for the full rationale. GH_TOKEN/
+          # GITHUB_TOKEN are stripped from the agent's own env further down
+          # (`env -u`) so its gh/git calls fall through to this refreshed
+          # on-disk store instead of a stale env var (gh prefers env vars over
+          # stored credentials, which would otherwise shadow every refresh).
+          su dev -c 'echo "$GH_TOKEN" | gh auth login --with-token && gh auth setup-git'
+
+          # Runs as this step's own (root) user, not as dev, so
+          # APP_ID/APP_PRIVATE_KEY never reach the dev user — the same
+          # untrusted context the agent CLI runs in. Killed by PID as soon as
+          # the agent process exits, before any always() cleanup steps.
+          node "$GITHUB_WORKSPACE/scripts/refresh-gh-token.js" &
+          REFRESHER_PID=$!
+
+          env -u APP_ID -u APP_PRIVATE_KEY -u GH_TOKEN -u GITHUB_TOKEN su dev -c '
             export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"
             export TG_BOT_TOKEN="$TG_BOT_TOKEN"
             export CHAT_ID="$CHAT_ID"
             export REPLY_TO_MESSAGE_ID="$REPLY_TO_MESSAGE_ID"
-            export GH_TOKEN="$GH_TOKEN"
-            export GITHUB_TOKEN="$GITHUB_TOKEN"
             export BACKEND="$BACKEND"
             export DATA_REPO_TOKEN="$DATA_REPO_TOKEN"
             export HOME="/home/dev"
@@ -285,6 +312,9 @@ jobs:
               claude -p "$PROMPT" --output-format json --dangerously-skip-permissions 2>&1 | tee result.json || true
             fi
           '
+
+          kill "$REFRESHER_PID" 2>/dev/null || true
+          wait "$REFRESHER_PID" 2>/dev/null || true
 
           # See dispatcher.yml's matching step: detects a Claude usage-limit stall
           # (issue #100) and queues a pending-retries.json entry instead of leaving
