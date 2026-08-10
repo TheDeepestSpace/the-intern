@@ -85,7 +85,10 @@ describe('applyToken', () => {
     const originalLog = console.log;
     console.log = (msg) => logs.push(msg);
     try {
-      applyToken('ghs_secret', { env: { PATH: '/usr/bin' }, exec });
+      applyToken('ghs_secret', {
+        env: { PATH: '/usr/bin', APP_ID: '123', APP_PRIVATE_KEY: 'dummy-key' },
+        exec,
+      });
     } finally {
       console.log = originalLog;
     }
@@ -98,6 +101,8 @@ describe('applyToken', () => {
     expect(args.join(' ')).not.toContain('ghs_secret');
     expect(opts.env.REFRESHED_GH_TOKEN).toBe('ghs_secret');
     expect(opts.env.PATH).toBe('/usr/bin');
+    expect(opts.env).not.toHaveProperty('APP_ID');
+    expect(opts.env).not.toHaveProperty('APP_PRIVATE_KEY');
   });
 });
 

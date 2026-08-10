@@ -291,6 +291,10 @@ jobs:
           # the agent process exits, before any always() cleanup steps.
           node "$GITHUB_WORKSPACE/scripts/refresh-gh-token.js" &
           REFRESHER_PID=$!
+          # su dev -c below runs under this step's default set -e, so a
+          # non-zero exit (e.g. the agent CLI failing) would skip straight
+          # past the kill/wait further down and leak the refresher process.
+          trap 'kill "$REFRESHER_PID" 2>/dev/null || true; wait "$REFRESHER_PID" 2>/dev/null || true' EXIT
 
           env -u APP_ID -u APP_PRIVATE_KEY -u GH_TOKEN -u GITHUB_TOKEN su dev -c '
             export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"
@@ -315,6 +319,7 @@ jobs:
 
           kill "$REFRESHER_PID" 2>/dev/null || true
           wait "$REFRESHER_PID" 2>/dev/null || true
+          trap - EXIT
 
           # See dispatcher.yml's matching step: detects a Claude usage-limit stall
           # (issue #100) and queues a pending-retries.json entry instead of leaving
