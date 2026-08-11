@@ -141,3 +141,49 @@ export function mockCheckSuiteDispatchFlow({ pullRequestAuthor = 'the-intern-bot
     .spyOn(globalThis, 'fetch')
     .mockImplementation(githubApiFetchHandler({ pullRequestAuthor, dispatchOk }));
 }
+
+// Mocks the push flow's outbound calls: installation-token mint, listing open
+// PRs targeting the pushed branch (GET /repos/:owner/:repo/pulls), polling
+// mergeable_state per PR (GET /repos/:owner/:repo/pulls/:number — returning
+// null `nullPollsBeforeState[number]` times before settling, to exercise the
+// retry-past-null path), then repository_dispatch for any PR that comes back
+// dirty.
+export function mockPushDispatchFlow({
+  openPulls = [{ number: 7, user: { login: 'the-intern-bot[bot]' } }],
+  mergeableStates = {},
+  nullPollsBeforeState = {},
+  dispatchOk = true,
+} = {}) {
+  const pollCounts = {};
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+
+    if (request.method === 'POST' && url.pathname.match(/^\/app\/installations\/\d+\/access_tokens$/)) {
+      return new Response(JSON.stringify({ token: 'test-installation-token' }), { status: 201 });
+    }
+
+    if (request.method === 'GET' && url.pathname.match(/^\/repos\/.+\/.+\/pulls$/)) {
+      return new Response(JSON.stringify(openPulls), { status: 200 });
+    }
+
+    if (request.method === 'GET' && url.pathname.match(/^\/repos\/.+\/.+\/pulls\/\d+$/)) {
+      const number = Number(url.pathname.split('/').pop());
+      pollCounts[number] = (pollCounts[number] || 0) + 1;
+      const nullPolls = nullPollsBeforeState[number] || 0;
+      const mergeableState =
+        pollCounts[number] <= nullPolls ? null : mergeableStates[number] ?? null;
+      return new Response(JSON.stringify({ number, mergeable_state: mergeableState }), {
+        status: 200,
+      });
+    }
+
+    if (request.method === 'POST' && url.pathname.match(/\/repos\/.+\/.+\/dispatches$/)) {
+      return dispatchOk
+        ? new Response(null, { status: 204 })
+        : new Response('nope', { status: 422 });
+    }
+
+    throw new Error(`Unexpected fetch: ${request.method} ${url.pathname}`);
+  });
+}

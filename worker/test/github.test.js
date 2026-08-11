@@ -5,6 +5,7 @@ import {
   githubRequest,
   mockCheckSuiteDispatchFlow,
   mockGithubDispatchFlow,
+  mockPushDispatchFlow,
 } from './fixtures.js';
 
 afterEach(() => {
@@ -32,6 +33,20 @@ function coderabbitReviewPayload(overrides = {}) {
       html_url: 'https://github.com/TheDeepestSpace/the-intern/pull/7#pullrequestreview-1',
     },
     pull_request: { number: 7, user: { login: 'the-intern-bot[bot]' } },
+    ...overrides,
+  };
+}
+
+function pushPayload(overrides = {}) {
+  return {
+    ref: 'refs/heads/main',
+    installation: { id: 42 },
+    repository: {
+      full_name: 'TheDeepestSpace/the-intern',
+      owner: { login: 'TheDeepestSpace' },
+      name: 'the-intern',
+      default_branch: 'main',
+    },
     ...overrides,
   };
 }
@@ -85,7 +100,7 @@ describe('handleGitHub allowlist gating', () => {
 
   it('skips the allowlist check entirely when ALLOWED_USERS is unset', async () => {
     const res = await worker.fetch(
-      githubRequest({ eventType: 'push', body: issueCommentPayload() }),
+      githubRequest({ eventType: 'star', body: issueCommentPayload() }),
       baseGithubEnv()
     );
 
@@ -109,7 +124,7 @@ describe('handleGitHub allowlist gating', () => {
 });
 
 describe('handleGitHub event-type filtering', () => {
-  it.each(['push', 'pull_request', 'star', 'workflow_run'])(
+  it.each(['pull_request', 'star', 'workflow_run'])(
     'ignores irrelevant event type %s',
     async eventType => {
       const res = await worker.fetch(
@@ -498,5 +513,146 @@ describe('handleGitHub check_suite handling', () => {
     );
     expect(res.status).toBe(200);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('handleGitHub push handling', () => {
+  it('dispatches merge_conflict when a default-branch push leaves a bot-authored PR dirty', async () => {
+    const fetchSpy = mockPushDispatchFlow({ mergeableStates: { 7: 'dirty' } });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv({ MERGEABLE_POLL_DELAY_MS: '1' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+
+    const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+    expect(dispatchCall).toBeTruthy();
+    const [, dispatchInit] = dispatchCall;
+    const body = JSON.parse(dispatchInit.body);
+    expect(body.event_type).toBe('merge_conflict');
+    expect(body.client_payload.raw.pull_request.number).toBe(7);
+    expect(body.client_payload.raw.merge_conflict.mergeable_state).toBe('dirty');
+    expect(body.client_payload.raw.merge_conflict.base_ref).toBe('main');
+  });
+
+  it('retries past a null mergeable_state before dispatching', async () => {
+    const fetchSpy = mockPushDispatchFlow({
+      mergeableStates: { 7: 'dirty' },
+      nullPollsBeforeState: { 7: 2 },
+    });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv({ MERGEABLE_POLL_DELAY_MS: '1' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+
+    const pollCalls = fetchSpy.mock.calls.filter(([input]) =>
+      new URL(input.url ?? input).pathname.match(/\/pulls\/7$/)
+    );
+    expect(pollCalls.length).toBe(3);
+  });
+
+  it('does not dispatch when mergeable_state is clean', async () => {
+    const fetchSpy = mockPushDispatchFlow({ mergeableStates: { 7: 'clean' } });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv({ MERGEABLE_POLL_DELAY_MS: '1' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ignored: no bot-authored pull requests became unmergeable');
+
+    const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+    expect(dispatchCall).toBeUndefined();
+  });
+
+  it('gives up after the poll cap when mergeable_state stays null', async () => {
+    const fetchSpy = mockPushDispatchFlow({
+      mergeableStates: { 7: 'dirty' },
+      nullPollsBeforeState: { 7: 99 },
+    });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv({ MERGEABLE_POLL_DELAY_MS: '1', MERGEABLE_POLL_ATTEMPTS: '3' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ignored: no bot-authored pull requests became unmergeable');
+
+    const pollCalls = fetchSpy.mock.calls.filter(([input]) =>
+      new URL(input.url ?? input).pathname.match(/\/pulls\/7$/)
+    );
+    expect(pollCalls.length).toBe(3);
+  });
+
+  it('ignores PRs not authored by the bot', async () => {
+    const fetchSpy = mockPushDispatchFlow({
+      openPulls: [{ number: 7, user: { login: 'someone-else' } }],
+    });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ignored: no bot-authored pull requests became unmergeable');
+
+    const pollCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.match(/\/pulls\/7$/)
+    );
+    expect(pollCall).toBeUndefined();
+  });
+
+  it('ignores pushes to a non-default branch', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload({ ref: 'refs/heads/feature-x' }) }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ignored: push not on default branch');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('ignores a branch-deletion push', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload({ deleted: true }) }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ignored: push not on default branch');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when the payload has no installation id', async () => {
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload({ installation: undefined }) }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe('missing installation id');
+  });
+
+  it('returns 502 when the dispatch call fails', async () => {
+    mockPushDispatchFlow({ mergeableStates: { 7: 'dirty' }, dispatchOk: false });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv({ MERGEABLE_POLL_DELAY_MS: '1' })
+    );
+    expect(res.status).toBe(502);
+  });
+
+  it('bypasses the ALLOWED_USERS allowlist for pushes', async () => {
+    mockPushDispatchFlow({ mergeableStates: { 7: 'dirty' } });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv({ ALLOWED_USERS: 'alice, carol', MERGEABLE_POLL_DELAY_MS: '1' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
   });
 });

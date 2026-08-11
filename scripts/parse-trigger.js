@@ -50,6 +50,13 @@ function parseTrigger() {
       targetRepo = payload.repository?.full_name || '';
       issueNumber = String(payload.pull_request.number || '');
       commentBody = `CodeRabbit posted a review on PR #${payload.pull_request.number} (${payload.coderabbit_review.html_url}). Read it and address any actionable feedback.`;
+    } else if (payload.pull_request && payload.merge_conflict) {
+      // merge_conflict: synthesized instruction, same shape as ci_failure/
+      // coderabbit_review above. Fires when a push to the default branch left
+      // this bot-authored PR unmergeable.
+      targetRepo = payload.repository?.full_name || '';
+      issueNumber = String(payload.pull_request.number || '');
+      commentBody = `A push to ${payload.merge_conflict.base_ref || 'the default branch'} left this PR unmergeable (mergeable_state: ${payload.merge_conflict.mergeable_state}). Merge or rebase the latest default branch into this PR's branch, resolve the conflicts, and push the fix.`;
     } else {
       // Fallback extraction
       targetRepo = payload.repository?.full_name || process.env.INPUT_TARGET_REPO || '';
