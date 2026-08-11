@@ -5,6 +5,7 @@ import { execSync } from 'node:child_process';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import {
   getBranchName,
+  collectWorkspaceState,
   collectTranscriptFiles,
   saveBackup,
   fetchBackup,
@@ -303,6 +304,46 @@ describe('manage-workspace-backup', () => {
       // `am --abort` must leave the checkout usable, not mid-am.
       expect(fs.existsSync(path.join(fresh, '.git', 'rebase-apply'))).toBe(false);
       expect(sh('git status --porcelain', fresh)).toBe('');
+    });
+  });
+
+  describe('collectWorkspaceState with large binary output', () => {
+    // Regression test for issue #149: `git diff --cached --binary` and
+    // `git format-patch --binary --stdout` used to be captured through
+    // execSync's default stdout pipe, which can crash with ENOBUFS on Linux
+    // once the child produces output faster than Node's synchronous pipe
+    // reader can drain it. A large binary file's base64-encoded patch is
+    // enough to exercise that path; this asserts it's captured intact via
+    // the file-redirect approach instead of silently truncating or crashing.
+    it('captures a large uncommitted binary diff without crashing', () => {
+      const work = newWorkDir('large-binary-diff');
+      process.chdir(work);
+      const bytes = require('crypto').randomBytes(8 * 1024 * 1024);
+      fs.writeFileSync(path.join(work, 'large.bin'), bytes);
+
+      const { diffPatch, commitsPatch } = collectWorkspaceState({});
+
+      expect(commitsPatch).toBe('');
+      expect(diffPatch).toContain('large.bin');
+      expect(diffPatch.length).toBeGreaterThan(bytes.length);
+    });
+
+    it('captures a large unpushed commit diff without crashing', () => {
+      const work = newWorkDir('large-binary-commit');
+      const baselineFile = path.join(tmpRoot, 'baseline-sha-large.txt');
+      fs.writeFileSync(baselineFile, sh('git rev-parse HEAD', work) + '\n');
+
+      process.chdir(work);
+      const bytes = require('crypto').randomBytes(8 * 1024 * 1024);
+      fs.writeFileSync(path.join(work, 'large.bin'), bytes);
+      sh('git add large.bin', work);
+      sh('git commit -m "add large binary file"', work);
+
+      const { diffPatch, commitsPatch } = collectWorkspaceState({ baselineShaFile: baselineFile });
+
+      expect(diffPatch).toBe('');
+      expect(commitsPatch).toContain('add large binary file');
+      expect(commitsPatch.length).toBeGreaterThan(bytes.length);
     });
   });
 
