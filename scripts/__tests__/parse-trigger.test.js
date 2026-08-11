@@ -162,6 +162,34 @@ describe('parse-trigger', () => {
     });
   });
 
+  describe('repository_dispatch: merge_conflict shape', () => {
+    it('synthesizes a comment body from the mergeable_state and base ref', () => {
+      process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
+      process.env.GITHUB_EVENT_PATH = writeEventPayload({
+        action: 'merge_conflict',
+        client_payload: {
+          raw: {
+            installation: { id: 4242 },
+            repository: { full_name: 'acme/widgets' },
+            pull_request: { number: 9 },
+            merge_conflict: { mergeable_state: 'dirty', base_ref: 'main' },
+          },
+        },
+      });
+
+      const result = parseTrigger();
+
+      expect(result.target_repo).toBe('acme/widgets');
+      expect(result.issue_number).toBe('9');
+      expect(result.installation_id).toBe('4242');
+      expect(result.event_type).toBe('merge_conflict');
+      expect(result.comment_body).toBe(
+        "A push to main left this PR unmergeable (mergeable_state: dirty). Merge or rebase the latest default branch into this PR's branch, resolve the conflicts, and push the fix."
+      );
+      expect(result.clean_prompt).toBe(result.comment_body);
+    });
+  });
+
   describe('repository_dispatch: fallback extraction', () => {
     it('falls back to INPUT_* env vars when payload has no recognizable shape', () => {
       process.env.GITHUB_EVENT_NAME = 'repository_dispatch';

@@ -57,6 +57,11 @@ async function handleGitHub(request, env) {
     return handleCheckSuite(payload, env);
   }
 
+  // Likewise, a push has no comment author.
+  if (eventType === 'push') {
+    return handlePush(payload, env);
+  }
+
   // Likewise, a CodeRabbit review is never authored by an allowlisted human
   // and never mentions the bot, so it needs its own bypass flow too.
   const reviewerLogin = (payload.review?.user?.login || '').toLowerCase();
@@ -211,6 +216,127 @@ async function handleCheckSuite(payload, env) {
   } catch (err) {
     return new Response(`internal error: ${err.message}`, { status: 500 });
   }
+}
+
+// Auto-queues a merge_conflict dispatch when a push to the default branch
+// leaves an open bot-authored PR unmergeable. GitHub has no webhook for "PR
+// became unmergeable" — mergeable_state is computed asynchronously and only
+// exposed by polling GET /pulls/{n}, which can return null mid-computation
+// (see pollMergeableState). No dedup/KV: a PR that's still dirty on the next
+// push just re-dispatches, same retry-until-fixed shape as handleCheckSuite.
+async function handlePush(payload, env) {
+  const defaultBranch = payload.repository?.default_branch;
+  const pushedBranch = (payload.ref || '').replace(/^refs\/heads\//, '');
+
+  if (payload.deleted || !defaultBranch || pushedBranch !== defaultBranch) {
+    return new Response('ignored: push not on default branch', { status: 200 });
+  }
+
+  const installationId = payload.installation?.id;
+  if (!installationId) {
+    return new Response('missing installation id', { status: 400 });
+  }
+
+  const botLogin = (env.BOT_LOGIN || 'the-intern-bot[bot]').toLowerCase();
+  const sourceOwner = payload.repository?.owner?.login;
+  const sourceRepo = payload.repository?.name;
+  const pollAttempts = Number(env.MERGEABLE_POLL_ATTEMPTS) || 5;
+  const pollDelayMs = Number(env.MERGEABLE_POLL_DELAY_MS) || 300;
+
+  try {
+    const token = await getInstallationToken(env, installationId);
+
+    const openPulls = [];
+    let pullsUrl = `https://api.github.com/repos/${sourceOwner}/${sourceRepo}/pulls?state=open&base=${encodeURIComponent(pushedBranch)}&per_page=100`;
+    while (pullsUrl) {
+      const pullsRes = await fetch(pullsUrl, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'the-intern-bot-relay',
+        },
+      });
+      if (!pullsRes.ok) {
+        const errorText = await pullsRes.text();
+        return new Response(`failed to list pull requests: ${errorText}`, { status: 502 });
+      }
+      openPulls.push(...(await pullsRes.json()));
+      pullsUrl = parseNextLinkUrl(pullsRes.headers.get('Link'));
+    }
+    const botPulls = openPulls.filter(
+      pr => (pr.user?.login || '').toLowerCase() === botLogin
+    );
+
+    let dispatched = 0;
+    for (const { number } of botPulls) {
+      const pullRequest = await pollMergeableState(
+        sourceOwner,
+        sourceRepo,
+        number,
+        token,
+        pollAttempts,
+        pollDelayMs
+      );
+      if (!pullRequest || pullRequest.mergeable_state !== 'dirty') continue;
+
+      const dispatchRes = await dispatchRepoEvent(env, token, 'merge_conflict', {
+        repository: payload.repository,
+        pull_request: pullRequest,
+        merge_conflict: { mergeable_state: pullRequest.mergeable_state, base_ref: pushedBranch },
+        installation: payload.installation,
+      });
+
+      if (!dispatchRes.ok) {
+        const errorText = await dispatchRes.text();
+        return new Response(`dispatch failed: ${errorText}`, { status: 502 });
+      }
+      dispatched++;
+    }
+
+    return new Response(
+      dispatched > 0 ? 'ok' : 'ignored: no bot-authored pull requests became unmergeable',
+      { status: 200 }
+    );
+  } catch (err) {
+    return new Response(`internal error: ${err.message}`, { status: 500 });
+  }
+}
+
+// Polls GET /pulls/{n} for mergeable, retrying past a null response (GitHub
+// still computing it) with a short fixed backoff. mergeable_state can turn
+// non-null before mergeable finishes computing, so mergeable is the signal
+// that the computation actually settled. Gives up and returns null after the
+// attempt cap, rather than treating a still-null state as a conflict.
+async function pollMergeableState(owner, repo, number, token, attempts, delayMs) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const prRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${number}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'the-intern-bot-relay',
+      },
+    });
+    if (!prRes.ok) return null;
+    const pullRequest = await prRes.json();
+    if (pullRequest.mergeable !== null && pullRequest.mergeable !== undefined) {
+      return pullRequest;
+    }
+    if (attempt < attempts - 1) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+  return null;
+}
+
+// Extracts the rel="next" URL from a GitHub Link header, or null if there's
+// no next page (single-page result, or the final page).
+function parseNextLinkUrl(linkHeader) {
+  if (!linkHeader) return null;
+  for (const part of linkHeader.split(',')) {
+    const match = part.match(/<([^>]+)>;\s*rel="next"/);
+    if (match) return match[1];
+  }
+  return null;
 }
 
 // Auto-queues a coderabbit_review dispatch when CodeRabbit reviews a PR the

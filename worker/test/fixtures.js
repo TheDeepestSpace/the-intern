@@ -141,3 +141,68 @@ export function mockCheckSuiteDispatchFlow({ pullRequestAuthor = 'the-intern-bot
     .spyOn(globalThis, 'fetch')
     .mockImplementation(githubApiFetchHandler({ pullRequestAuthor, dispatchOk }));
 }
+
+// Mocks the push flow's outbound calls: installation-token mint, listing open
+// PRs targeting the pushed branch (GET /repos/:owner/:repo/pulls, paginated
+// via Link headers when `pulledPages` is set), polling mergeable per PR (GET
+// /repos/:owner/:repo/pulls/:number — returning mergeable: null
+// `nullPollsBeforeState[number]` times before settling, to exercise the
+// retry-past-null path; `pendingMergeableStates[number]` optionally sets a
+// non-null mergeable_state on those pending responses, to exercise the case
+// where mergeable_state resolves before mergeable does), then
+// repository_dispatch for any PR that comes back dirty.
+export function mockPushDispatchFlow({
+  openPulls = [{ number: 7, user: { login: 'the-intern-bot[bot]' } }],
+  pulledPages = null,
+  mergeableStates = {},
+  nullPollsBeforeState = {},
+  pendingMergeableStates = {},
+  dispatchOk = true,
+} = {}) {
+  const pollCounts = {};
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+
+    if (request.method === 'POST' && url.pathname.match(/^\/app\/installations\/\d+\/access_tokens$/)) {
+      return new Response(JSON.stringify({ token: 'test-installation-token' }), { status: 201 });
+    }
+
+    if (request.method === 'GET' && url.pathname.match(/^\/repos\/.+\/.+\/pulls$/)) {
+      if (pulledPages) {
+        const page = Number(url.searchParams.get('page') || '1');
+        const isLastPage = page >= pulledPages.length;
+        let headers;
+        if (!isLastPage) {
+          const nextUrl = new URL(request.url);
+          nextUrl.searchParams.set('page', String(page + 1));
+          headers = { Link: `<${nextUrl.toString()}>; rel="next"` };
+        }
+        return new Response(JSON.stringify(pulledPages[page - 1]), { status: 200, headers });
+      }
+      return new Response(JSON.stringify(openPulls), { status: 200 });
+    }
+
+    if (request.method === 'GET' && url.pathname.match(/^\/repos\/.+\/.+\/pulls\/\d+$/)) {
+      const number = Number(url.pathname.split('/').pop());
+      pollCounts[number] = (pollCounts[number] || 0) + 1;
+      const nullPolls = nullPollsBeforeState[number] || 0;
+      const pending = pollCounts[number] <= nullPolls;
+      const mergeableState = pending
+        ? pendingMergeableStates[number] ?? null
+        : mergeableStates[number] ?? null;
+      const mergeable = pending ? null : mergeableState === 'dirty' ? false : mergeableState === 'clean' ? true : null;
+      return new Response(JSON.stringify({ number, mergeable, mergeable_state: mergeableState }), {
+        status: 200,
+      });
+    }
+
+    if (request.method === 'POST' && url.pathname.match(/\/repos\/.+\/.+\/dispatches$/)) {
+      return dispatchOk
+        ? new Response(null, { status: 204 })
+        : new Response('nope', { status: 422 });
+    }
+
+    throw new Error(`Unexpected fetch: ${request.method} ${url.pathname}`);
+  });
+}
