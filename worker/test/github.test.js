@@ -556,6 +556,49 @@ describe('handleGitHub push handling', () => {
     expect(pollCalls.length).toBe(3);
   });
 
+  it('keeps polling when mergeable_state resolves before mergeable does', async () => {
+    const fetchSpy = mockPushDispatchFlow({
+      mergeableStates: { 7: 'dirty' },
+      nullPollsBeforeState: { 7: 1 },
+      pendingMergeableStates: { 7: 'unstable' },
+    });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv({ MERGEABLE_POLL_DELAY_MS: '1' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+
+    const pollCalls = fetchSpy.mock.calls.filter(([input]) =>
+      new URL(input.url ?? input).pathname.match(/\/pulls\/7$/)
+    );
+    expect(pollCalls.length).toBe(2);
+  });
+
+  it('follows the Link header to dispatch bot PRs found on later pages', async () => {
+    const fetchSpy = mockPushDispatchFlow({
+      pulledPages: [
+        [{ number: 1, user: { login: 'someone-else' } }],
+        [{ number: 7, user: { login: 'the-intern-bot[bot]' } }],
+      ],
+      mergeableStates: { 7: 'dirty' },
+    });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv({ MERGEABLE_POLL_DELAY_MS: '1' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+
+    const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+    expect(dispatchCall).toBeTruthy();
+    const [, dispatchInit] = dispatchCall;
+    const body = JSON.parse(dispatchInit.body);
+    expect(body.client_payload.raw.pull_request.number).toBe(7);
+  });
+
   it('does not dispatch when mergeable_state is clean', async () => {
     const fetchSpy = mockPushDispatchFlow({ mergeableStates: { 7: 'clean' } });
     const res = await worker.fetch(

@@ -246,21 +246,23 @@ async function handlePush(payload, env) {
   try {
     const token = await getInstallationToken(env, installationId);
 
-    const pullsRes = await fetch(
-      `https://api.github.com/repos/${sourceOwner}/${sourceRepo}/pulls?state=open&base=${encodeURIComponent(pushedBranch)}&per_page=100`,
-      {
+    const openPulls = [];
+    let pullsUrl = `https://api.github.com/repos/${sourceOwner}/${sourceRepo}/pulls?state=open&base=${encodeURIComponent(pushedBranch)}&per_page=100`;
+    while (pullsUrl) {
+      const pullsRes = await fetch(pullsUrl, {
         headers: {
           Authorization: `Bearer ${token}`,
           Accept: 'application/vnd.github+json',
           'User-Agent': 'the-intern-bot-relay',
         },
+      });
+      if (!pullsRes.ok) {
+        const errorText = await pullsRes.text();
+        return new Response(`failed to list pull requests: ${errorText}`, { status: 502 });
       }
-    );
-    if (!pullsRes.ok) {
-      const errorText = await pullsRes.text();
-      return new Response(`failed to list pull requests: ${errorText}`, { status: 502 });
+      openPulls.push(...(await pullsRes.json()));
+      pullsUrl = parseNextLinkUrl(pullsRes.headers.get('Link'));
     }
-    const openPulls = await pullsRes.json();
     const botPulls = openPulls.filter(
       pr => (pr.user?.login || '').toLowerCase() === botLogin
     );
@@ -300,10 +302,11 @@ async function handlePush(payload, env) {
   }
 }
 
-// Polls GET /pulls/{n} for mergeable_state, retrying past a null response
-// (GitHub still computing it) with a short fixed backoff. Gives up and
-// returns null after the attempt cap, rather than treating a still-null
-// state as a conflict.
+// Polls GET /pulls/{n} for mergeable, retrying past a null response (GitHub
+// still computing it) with a short fixed backoff. mergeable_state can turn
+// non-null before mergeable finishes computing, so mergeable is the signal
+// that the computation actually settled. Gives up and returns null after the
+// attempt cap, rather than treating a still-null state as a conflict.
 async function pollMergeableState(owner, repo, number, token, attempts, delayMs) {
   for (let attempt = 0; attempt < attempts; attempt++) {
     const prRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${number}`, {
@@ -315,12 +318,23 @@ async function pollMergeableState(owner, repo, number, token, attempts, delayMs)
     });
     if (!prRes.ok) return null;
     const pullRequest = await prRes.json();
-    if (pullRequest.mergeable_state !== null && pullRequest.mergeable_state !== undefined) {
+    if (pullRequest.mergeable !== null && pullRequest.mergeable !== undefined) {
       return pullRequest;
     }
     if (attempt < attempts - 1) {
       await new Promise(resolve => setTimeout(resolve, delayMs));
     }
+  }
+  return null;
+}
+
+// Extracts the rel="next" URL from a GitHub Link header, or null if there's
+// no next page (single-page result, or the final page).
+function parseNextLinkUrl(linkHeader) {
+  if (!linkHeader) return null;
+  for (const part of linkHeader.split(',')) {
+    const match = part.match(/<([^>]+)>;\s*rel="next"/);
+    if (match) return match[1];
   }
   return null;
 }
