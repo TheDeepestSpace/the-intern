@@ -525,8 +525,12 @@ jobs:
       # failure here must not turn an already-successful "Run agent" step
       # into a red job and a false-alarm failure notification. The step still
       # surfaces its own ::error:: annotation and non-zero exit for
-      # visibility; it just doesn't fail the job.
+      # visibility; it just doesn't fail the job. Because the job can no
+      # longer go red for this, the step below sends an explicit Telegram
+      # ping so a broken backup (e.g. issue #149's ENOBUFS crash) doesn't go
+      # unnoticed just because it no longer fails CI.
       - name: Back up incomplete workspace changes
+        id: backup
         if: always() && needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
         continue-on-error: true
         working-directory: target
@@ -537,6 +541,20 @@ jobs:
           # Lets manage-workspace-backup.js authenticate to the-intern-data
           # (issue #124) — the-intern-data is the sole workspace-backup store.
           DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+
+      - name: Notify maintainer of workspace-backup failure
+        if: steps.backup.outcome == 'failure'
+        continue-on-error: true
+        run: node scripts/notify-failure.js
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
+          REPO: ${{ github.repository }}
+          WORKFLOW_NAME: dispatcher (workspace backup)
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
+          FAILED_JOBS: workspace-backup
 
       # Runs even if the step above failed: OpenAI's CI/CD guidance for this flow is
       # to write back whatever codex left on disk regardless of run outcome, since a
