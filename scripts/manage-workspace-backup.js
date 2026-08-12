@@ -70,6 +70,33 @@ function runGit(cmd, options = {}) {
   }
 }
 
+// Same as runGit, but for commands whose stdout can be large/binary (diff,
+// format-patch). execSync's default stdio pipes stdout through Node, which
+// reads it synchronously in a tight loop; on Linux, a child that produces
+// output faster than that loop drains the pipe can overflow it and crash
+// with ENOBUFS — an OS pipe-capacity error, not the maxBuffer Node-side
+// limit, so raising maxBuffer does not help (issue #149). Redirecting stdout
+// straight to a file descriptor sidesteps Node's pipe entirely; the OS
+// writes the file directly and there is no synchronous reader to overrun.
+function runGitToFile(cmd, options = {}) {
+  const { allowFailure = false, trim = true, ...execOptions } = options;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-backup-git-'));
+  const outFile = path.join(tmpDir, 'output');
+  const fd = fs.openSync(outFile, 'w');
+  try {
+    execSync(`git ${cmd}`, { maxBuffer: LARGE_BUFFER, ...execOptions, stdio: ['ignore', fd, 'pipe'] });
+    const output = fs.readFileSync(outFile, 'utf8');
+    return trim ? output.trim() : output;
+  } catch (err) {
+    if (allowFailure) return '';
+    const detail = (err.stderr || err.message || '').toString().trim();
+    throw new Error(`git ${redactUrl(cmd)} failed: ${redactUrl(detail)}`);
+  } finally {
+    fs.closeSync(fd);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 function ensureSafeDirectory(dir = process.cwd()) {
   runGit(`config --global --add safe.directory "${dir}"`, { allowFailure: true });
 }
@@ -114,11 +141,11 @@ function resolveAheadBase(baselineShaFile) {
 function collectWorkspaceState({ baselineShaFile } = {}) {
   const pathspec = ['.', ...EXCLUDED_PATHS.map(p => `":(exclude)${p}"`)].join(' ');
   runGit(`add -A -- ${pathspec}`);
-  const diffPatch = runGit(`diff --cached HEAD --binary`, { trim: false });
+  const diffPatch = runGitToFile(`diff --cached HEAD --binary`, { trim: false });
 
   const base = resolveAheadBase(baselineShaFile);
   const commitsPatch = base
-    ? runGit(`format-patch ${base}..HEAD --binary --stdout`, { trim: false })
+    ? runGitToFile(`format-patch ${base}..HEAD --binary --stdout`, { trim: false })
     : '';
 
   return { diffPatch, commitsPatch };
