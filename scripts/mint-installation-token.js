@@ -55,10 +55,31 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// GitHub's installation-lookup endpoint intermittently blips with a transient
-// "Repository not found" even though access is correctly configured (issue
-// #117) — a same-token retry seconds later succeeds. Retry a few times before
-// giving up so a passing API glitch doesn't red-flag the whole dispatcher job.
+// GitHub's installation endpoints intermittently blip with transient errors
+// (e.g. a "Repository not found" on lookup, issue #117) even though access is
+// correctly configured — a same-request retry seconds later succeeds. Retries
+// `attemptFn` a few times with a fixed delay before giving up, so a passing
+// API glitch doesn't red-flag the whole dispatcher job. `attemptFn` should
+// throw/reject an Error describing the failure; that message is both logged
+// between retries and rethrown once retries are exhausted.
+async function retryWithBackoff(
+  attemptFn,
+  { retries = INSTALLATION_LOOKUP_RETRIES, retryDelayMs = INSTALLATION_LOOKUP_RETRY_DELAY_MS } = {}
+) {
+  let lastError;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await attemptFn();
+    } catch (error) {
+      lastError = error;
+      const isLastAttempt = attempt === retries;
+      console.error(error.message + (isLastAttempt ? '' : ` — retrying (attempt ${attempt}/${retries})...`));
+      if (!isLastAttempt) await sleep(retryDelayMs);
+    }
+  }
+  throw lastError;
+}
+
 async function getInstallationIdForRepo(
   appJwt,
   targetRepo,
@@ -66,30 +87,29 @@ async function getInstallationIdForRepo(
 ) {
   if (!targetRepo || !targetRepo.includes('/')) return null;
 
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    let failure;
-    try {
-      const res = await fetch(`https://api.github.com/repos/${targetRepo}/installation`, {
-        headers: {
-          Authorization: `Bearer ${appJwt}`,
-          Accept: 'application/vnd.github+json',
-          'User-Agent': 'the-intern-bot',
-        },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        return data.id;
+  try {
+    return await retryWithBackoff(async () => {
+      let res;
+      try {
+        res = await fetch(`https://api.github.com/repos/${targetRepo}/installation`, {
+          headers: {
+            Authorization: `Bearer ${appJwt}`,
+            Accept: 'application/vnd.github+json',
+            'User-Agent': 'the-intern-bot',
+          },
+        });
+      } catch (error) {
+        throw new Error(`Lookup installation failed for ${targetRepo}: ${error.message}`);
       }
-      failure = `Lookup installation failed for ${targetRepo} (${res.status}): ${await res.text()}`;
-    } catch (error) {
-      failure = `Lookup installation failed for ${targetRepo}: ${error.message}`;
-    }
-
-    const isLastAttempt = attempt === retries;
-    console.error(failure + (isLastAttempt ? '' : ` — retrying (attempt ${attempt}/${retries})...`));
-    if (!isLastAttempt) await sleep(retryDelayMs);
+      if (!res.ok) {
+        throw new Error(`Lookup installation failed for ${targetRepo} (${res.status}): ${await res.text()}`);
+      }
+      const data = await res.json();
+      return data.id;
+    }, { retries, retryDelayMs });
+  } catch {
+    return null;
   }
-  return null;
 }
 
 async function getInstallationToken({
@@ -119,39 +139,41 @@ async function getInstallationToken({
 
   const shouldScopeRepo = scopeToRepo && Boolean(targetRepo);
 
-  const res = await fetch(
-    `https://api.github.com/app/installations/${targetInstallationId}/access_tokens`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${appJwt}`,
-        Accept: 'application/vnd.github+json',
-        'User-Agent': 'the-intern-bot',
-        'Content-Type': 'application/json',
-      },
-      // Without `repositories`, GitHub grants the token access to every repo
-      // the installation can see. Scope it down to just targetRepo when known
-      // and scopeToRepo is true. Without `permissions`, GitHub grants every
-      // permission the installation has, even ones the caller only needs
-      // read-only (or no) access to — pass it through when the caller
-      // specifies a minimal set.
-      body:
-        shouldScopeRepo || permissions
-          ? JSON.stringify({
-              ...(shouldScopeRepo ? { repositories: [targetRepo.split('/')[1]] } : {}),
-              ...(permissions ? { permissions } : {}),
-            })
-          : undefined,
+  return retryWithBackoff(async () => {
+    const res = await fetch(
+      `https://api.github.com/app/installations/${targetInstallationId}/access_tokens`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${appJwt}`,
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'the-intern-bot',
+          'Content-Type': 'application/json',
+        },
+        // Without `repositories`, GitHub grants the token access to every repo
+        // the installation can see. Scope it down to just targetRepo when known
+        // and scopeToRepo is true. Without `permissions`, GitHub grants every
+        // permission the installation has, even ones the caller only needs
+        // read-only (or no) access to — pass it through when the caller
+        // specifies a minimal set.
+        body:
+          shouldScopeRepo || permissions
+            ? JSON.stringify({
+                ...(shouldScopeRepo ? { repositories: [targetRepo.split('/')[1]] } : {}),
+                ...(permissions ? { permissions } : {}),
+              })
+            : undefined,
+      }
+    );
+
+    if (!res.ok) {
+      const errorText = await res.text();
+      throw new Error(`Token mint failed (${res.status}): ${errorText}`);
     }
-  );
 
-  if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(`Token mint failed (${res.status}): ${errorText}`);
-  }
-
-  const data = await res.json();
-  return data.token;
+    const data = await res.json();
+    return data.token;
+  }, { retries, retryDelayMs });
 }
 
 function parsePermissions(raw) {
