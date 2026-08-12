@@ -203,15 +203,43 @@ describe('mint-installation-token', () => {
       }
     });
 
-    it('throws with the response body when token minting fails', async () => {
+    it('throws with the response body when token minting fails on every attempt', async () => {
       const client = agent.get('https://api.github.com');
       client
         .intercept({ method: 'POST', path: '/app/installations/999/access_tokens' })
-        .reply(401, 'Bad credentials');
+        .reply(401, 'Bad credentials')
+        .times(3);
 
       await expect(
-        getInstallationToken({ appId: '123', privateKey: TEST_PRIVATE_KEY_PEM, installationId: '999' })
+        getInstallationToken({
+          appId: '123',
+          privateKey: TEST_PRIVATE_KEY_PEM,
+          installationId: '999',
+          retries: 3,
+          retryDelayMs: 0,
+        })
       ).rejects.toThrow(/Token mint failed \(401\): Bad credentials/);
+    });
+
+    it('retries token minting on a transient failure and succeeds', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'POST', path: '/app/installations/999/access_tokens' })
+        .replyWithError(new Error('fetch failed'))
+        .times(2);
+      client
+        .intercept({ method: 'POST', path: '/app/installations/999/access_tokens' })
+        .reply(201, { token: 'ghs_mintretriedtoken' });
+
+      const token = await getInstallationToken({
+        appId: '123',
+        privateKey: TEST_PRIVATE_KEY_PEM,
+        installationId: '999',
+        retries: 3,
+        retryDelayMs: 0,
+      });
+
+      expect(token).toBe('ghs_mintretriedtoken');
     });
 
     it('scopes the access-token request body to the target repo and requested permissions', async () => {
