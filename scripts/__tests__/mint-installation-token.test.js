@@ -203,22 +203,56 @@ describe('mint-installation-token', () => {
       }
     });
 
-    it('throws with the response body when token minting fails on every attempt', async () => {
+    it('fails immediately on a non-transient token-mint error without retrying', async () => {
       const client = agent.get('https://api.github.com');
       client
         .intercept({ method: 'POST', path: '/app/installations/999/access_tokens' })
         .reply(401, 'Bad credentials')
+        .times(1);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      try {
+        await expect(
+          getInstallationToken({
+            appId: '123',
+            privateKey: TEST_PRIVATE_KEY_PEM,
+            installationId: '999',
+            retries: 3,
+            retryDelayMs: 0,
+          })
+        ).rejects.toThrow(/Token mint failed \(401\): Bad credentials/);
+
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('gives up after exhausting all retries on a persistent transient token-mint failure', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'POST', path: '/app/installations/999/access_tokens' })
+        .reply(503, 'Service Unavailable')
         .times(3);
 
-      await expect(
-        getInstallationToken({
-          appId: '123',
-          privateKey: TEST_PRIVATE_KEY_PEM,
-          installationId: '999',
-          retries: 3,
-          retryDelayMs: 0,
-        })
-      ).rejects.toThrow(/Token mint failed \(401\): Bad credentials/);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      try {
+        await expect(
+          getInstallationToken({
+            appId: '123',
+            privateKey: TEST_PRIVATE_KEY_PEM,
+            installationId: '999',
+            retries: 3,
+            retryDelayMs: 0,
+          })
+        ).rejects.toThrow(/Token mint failed \(503\): Service Unavailable/);
+
+        expect(fetchSpy).toHaveBeenCalledTimes(3);
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
 
     it('retries token minting on a transient failure and succeeds', async () => {

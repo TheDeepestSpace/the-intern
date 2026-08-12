@@ -60,6 +60,8 @@ function sleep(ms) {
 // failed" for issue #155) even though the app is correctly configured — a
 // same-input retry seconds later succeeds. Retry a few times before giving up
 // so a passing API glitch doesn't red-flag the whole dispatcher job.
+// An operation's rejection is retried unless it explicitly opts out via
+// `error.retryable = false` (e.g. a permanent 401 that a retry can't fix).
 async function withRetries(
   operation,
   { retries = DEFAULT_RETRIES, retryDelayMs = DEFAULT_RETRY_DELAY_MS } = {}
@@ -68,7 +70,7 @@ async function withRetries(
     try {
       return await operation();
     } catch (error) {
-      const isLastAttempt = attempt === retries;
+      const isLastAttempt = attempt === retries || error.retryable === false;
       console.error(error.message + (isLastAttempt ? '' : ` — retrying (attempt ${attempt}/${retries})...`));
       if (isLastAttempt) throw error;
       await sleep(retryDelayMs);
@@ -155,7 +157,11 @@ async function getInstallationToken({
 
     if (!res.ok) {
       const errorText = await res.text();
-      throw new Error(`Token mint failed (${res.status}): ${errorText}`);
+      const error = new Error(`Token mint failed (${res.status}): ${errorText}`);
+      // Only rate-limiting and server errors are worth retrying — credential
+      // and validation failures (e.g. 401, 422) will fail the same way again.
+      error.retryable = res.status === 429 || res.status >= 500;
+      throw error;
     }
 
     return res.json();
