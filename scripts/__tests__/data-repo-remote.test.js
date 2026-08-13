@@ -62,6 +62,23 @@ describe('data-repo-remote', () => {
       warnSpy.mockRestore();
     });
 
+    it('reuses the same url across retries on a transient GitHub 5xx, then succeeds', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const run = vi.fn()
+        .mockRejectedValueOnce(new Error('remote: Internal Server Error.'))
+        .mockImplementationOnce((url) => url);
+
+      const result = await runWithRetryOnNotFound('https://x-access-token:ghs_first@github.com/x.git', run, { retries: 3, retryBaseDelayMs: 0 });
+
+      expect(result).toBe('https://x-access-token:ghs_first@github.com/x.git');
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).not.toMatch(/Repository not found/);
+
+      warnSpy.mockRestore();
+    });
+
     it('gives up and throws the last error after exhausting retries on a persistent "Repository not found"', async () => {
       vi.spyOn(console, 'warn').mockImplementation(() => {});
 

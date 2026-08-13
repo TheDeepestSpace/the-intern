@@ -43,8 +43,9 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function isTransientRemoteNotFound(message) {
-  return /repository not found/i.test(String(message || ''));
+function isTransientRemoteError(message) {
+  const str = String(message || '');
+  return /repository not found/i.test(str) || /internal server error|50[023]/i.test(str);
 }
 
 // Capped exponential backoff: baseDelayMs, ×2 per attempt, capped at
@@ -55,13 +56,14 @@ function backoffDelay(attempt, baseDelayMs, maxDelayMs) {
   return Math.min(baseDelayMs * 2 ** attempt, maxDelayMs);
 }
 
-// GitHub intermittently serves a transient "Repository not found" on a git
-// fetch/push against the-intern-data (issue #120) — the same
-// token-propagation-lag blip #117 fixed for the installation-lookup call,
-// but here hitting the git command itself. With a static token (#124) there
-// is nothing to refresh, so every attempt just reuses the same `remoteUrl`
-// passed in; retrying alone is enough to ride out the blip. Retry a few
-// times before surfacing the failure.
+// GitHub intermittently serves a transient error on a git fetch/push against
+// the-intern-data: either "Repository not found" (issue #120) — the same
+// token-propagation-lag blip #117 fixed for the installation-lookup call, but
+// here hitting the git command itself — or a GitHub-side 5xx/"Internal Server
+// Error" (issue #159). With a static token (#124) there is nothing to
+// refresh, so every attempt just reuses the same `remoteUrl` passed in;
+// retrying alone is enough to ride out either blip. Retry a few times before
+// surfacing the failure.
 //
 // `remoteUrl` is used on every attempt; callers that already resolved one
 // (to raise their own "not configured" error before this point) pass it
@@ -81,9 +83,9 @@ async function runWithRetryOnNotFound(
       return await run(remoteUrl);
     } catch (err) {
       const isLastAttempt = attempt === retries;
-      if (isLastAttempt || !isTransientRemoteNotFound(err.message)) throw err;
+      if (isLastAttempt || !isTransientRemoteError(err.message)) throw err;
       const delay = backoffDelay(attempt, retryBaseDelayMs, retryMaxDelayMs);
-      console.warn(`the-intern-data git operation hit a transient "Repository not found" (attempt ${attempt + 1}/${retries}), retrying in ${delay}ms: ${redactUrl(err.message)}`);
+      console.warn(`the-intern-data git operation hit a transient error (attempt ${attempt + 1}/${retries}), retrying in ${delay}ms: ${redactUrl(err.message)}`);
       await sleep(delay);
     }
   }
