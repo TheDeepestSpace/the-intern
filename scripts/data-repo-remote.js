@@ -43,9 +43,16 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Matches git's actual HTTP-error wording ("The requested URL returned
+// error: 500") rather than a bare 50[023], so a repo name or diagnostic
+// value that happens to contain those digits doesn't trigger a retry.
 function isTransientRemoteError(message) {
   const str = String(message || '');
-  return /repository not found/i.test(str) || /internal server error|50[023]/i.test(str);
+  return (
+    /repository not found/i.test(str) ||
+    /internal server error/i.test(str) ||
+    /returned error:\s*50[023]\b/i.test(str)
+  );
 }
 
 // Capped exponential backoff: baseDelayMs, ×2 per attempt, capped at
