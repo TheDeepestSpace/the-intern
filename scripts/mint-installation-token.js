@@ -48,27 +48,41 @@ function mintAppJwt(appId, privateKeyPem) {
   return `${dataToSign}.${signature}`;
 }
 
-const INSTALLATION_LOOKUP_RETRIES = 3;
-const INSTALLATION_LOOKUP_RETRY_DELAY_MS = 3000;
+const DEFAULT_RETRIES = 3;
+const DEFAULT_RETRY_DELAY_MS = 3000;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// GitHub's installation-lookup endpoint intermittently blips with a transient
-// "Repository not found" even though access is correctly configured (issue
-// #117) — a same-token retry seconds later succeeds. Retry a few times before
-// giving up so a passing API glitch doesn't red-flag the whole dispatcher job.
-async function getInstallationIdForRepo(
-  appJwt,
-  targetRepo,
-  { retries = INSTALLATION_LOOKUP_RETRIES, retryDelayMs = INSTALLATION_LOOKUP_RETRY_DELAY_MS } = {}
+// GitHub's installation and token-minting endpoints intermittently blip with
+// transient errors (e.g. "Repository not found" for issue #117, "fetch
+// failed" for issue #155) even though the app is correctly configured — a
+// same-input retry seconds later succeeds. Retry a few times before giving up
+// so a passing API glitch doesn't red-flag the whole dispatcher job.
+// An operation's rejection is retried unless it explicitly opts out via
+// `error.retryable = false` (e.g. a permanent 401 that a retry can't fix).
+async function withRetries(
+  operation,
+  { retries = DEFAULT_RETRIES, retryDelayMs = DEFAULT_RETRY_DELAY_MS } = {}
 ) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      const isLastAttempt = attempt === retries || error.retryable === false;
+      console.error(error.message + (isLastAttempt ? '' : ` — retrying (attempt ${attempt}/${retries})...`));
+      if (isLastAttempt) throw error;
+      await sleep(retryDelayMs);
+    }
+  }
+}
+
+async function getInstallationIdForRepo(appJwt, targetRepo, { retries, retryDelayMs } = {}) {
   if (!targetRepo || !targetRepo.includes('/')) return null;
 
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    let failure;
-    try {
+  try {
+    return await withRetries(async () => {
       const res = await fetch(`https://api.github.com/repos/${targetRepo}/installation`, {
         headers: {
           Authorization: `Bearer ${appJwt}`,
@@ -76,20 +90,15 @@ async function getInstallationIdForRepo(
           'User-Agent': 'the-intern-bot',
         },
       });
-      if (res.ok) {
-        const data = await res.json();
-        return data.id;
+      if (!res.ok) {
+        throw new Error(`Lookup installation failed for ${targetRepo} (${res.status}): ${await res.text()}`);
       }
-      failure = `Lookup installation failed for ${targetRepo} (${res.status}): ${await res.text()}`;
-    } catch (error) {
-      failure = `Lookup installation failed for ${targetRepo}: ${error.message}`;
-    }
-
-    const isLastAttempt = attempt === retries;
-    console.error(failure + (isLastAttempt ? '' : ` — retrying (attempt ${attempt}/${retries})...`));
-    if (!isLastAttempt) await sleep(retryDelayMs);
+      const data = await res.json();
+      return data.id;
+    }, { retries, retryDelayMs });
+  } catch (error) {
+    return null;
   }
-  return null;
 }
 
 async function getInstallationToken({
@@ -119,38 +128,45 @@ async function getInstallationToken({
 
   const shouldScopeRepo = scopeToRepo && Boolean(targetRepo);
 
-  const res = await fetch(
-    `https://api.github.com/app/installations/${targetInstallationId}/access_tokens`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${appJwt}`,
-        Accept: 'application/vnd.github+json',
-        'User-Agent': 'the-intern-bot',
-        'Content-Type': 'application/json',
-      },
-      // Without `repositories`, GitHub grants the token access to every repo
-      // the installation can see. Scope it down to just targetRepo when known
-      // and scopeToRepo is true. Without `permissions`, GitHub grants every
-      // permission the installation has, even ones the caller only needs
-      // read-only (or no) access to — pass it through when the caller
-      // specifies a minimal set.
-      body:
-        shouldScopeRepo || permissions
-          ? JSON.stringify({
-              ...(shouldScopeRepo ? { repositories: [targetRepo.split('/')[1]] } : {}),
-              ...(permissions ? { permissions } : {}),
-            })
-          : undefined,
+  const data = await withRetries(async () => {
+    const res = await fetch(
+      `https://api.github.com/app/installations/${targetInstallationId}/access_tokens`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${appJwt}`,
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'the-intern-bot',
+          'Content-Type': 'application/json',
+        },
+        // Without `repositories`, GitHub grants the token access to every repo
+        // the installation can see. Scope it down to just targetRepo when known
+        // and scopeToRepo is true. Without `permissions`, GitHub grants every
+        // permission the installation has, even ones the caller only needs
+        // read-only (or no) access to — pass it through when the caller
+        // specifies a minimal set.
+        body:
+          shouldScopeRepo || permissions
+            ? JSON.stringify({
+                ...(shouldScopeRepo ? { repositories: [targetRepo.split('/')[1]] } : {}),
+                ...(permissions ? { permissions } : {}),
+              })
+            : undefined,
+      }
+    );
+
+    if (!res.ok) {
+      const errorText = await res.text();
+      const error = new Error(`Token mint failed (${res.status}): ${errorText}`);
+      // Only rate-limiting and server errors are worth retrying — credential
+      // and validation failures (e.g. 401, 422) will fail the same way again.
+      error.retryable = res.status === 429 || res.status >= 500;
+      throw error;
     }
-  );
 
-  if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(`Token mint failed (${res.status}): ${errorText}`);
-  }
+    return res.json();
+  }, { retries, retryDelayMs });
 
-  const data = await res.json();
   return data.token;
 }
 
