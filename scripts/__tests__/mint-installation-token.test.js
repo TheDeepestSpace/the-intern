@@ -203,23 +203,80 @@ describe('mint-installation-token', () => {
       }
     });
 
-    it('throws with the response body when token minting fails', async () => {
+    it('fails immediately on a non-transient token-mint error without retrying', async () => {
       const client = agent.get('https://api.github.com');
       client
         .intercept({ method: 'POST', path: '/app/installations/999/access_tokens' })
-        .reply(401, 'Bad credentials');
+        .reply(401, 'Bad credentials')
+        .times(1);
 
-      await expect(
-        getInstallationToken({
-          appId: '123',
-          privateKey: TEST_PRIVATE_KEY_PEM,
-          installationId: '999',
-          retries: 1,
-        })
-      ).rejects.toThrow(/Token mint failed \(401\): Bad credentials/);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      try {
+        await expect(
+          getInstallationToken({
+            appId: '123',
+            privateKey: TEST_PRIVATE_KEY_PEM,
+            installationId: '999',
+            retries: 3,
+            retryDelayMs: 0,
+          })
+        ).rejects.toThrow(/Token mint failed \(401\): Bad credentials/);
+
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('gives up after exhausting all retries on a persistent transient token-mint failure', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'POST', path: '/app/installations/999/access_tokens' })
+        .reply(503, 'Service Unavailable')
+        .times(3);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      try {
+        await expect(
+          getInstallationToken({
+            appId: '123',
+            privateKey: TEST_PRIVATE_KEY_PEM,
+            installationId: '999',
+            retries: 3,
+            retryDelayMs: 0,
+          })
+        ).rejects.toThrow(/Token mint failed \(503\): Service Unavailable/);
+
+        expect(fetchSpy).toHaveBeenCalledTimes(3);
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
 
     it('retries token minting on a transient failure and succeeds', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'POST', path: '/app/installations/999/access_tokens' })
+        .replyWithError(new Error('fetch failed'))
+        .times(2);
+      client
+        .intercept({ method: 'POST', path: '/app/installations/999/access_tokens' })
+        .reply(201, { token: 'ghs_mintretriedtoken' });
+
+      const token = await getInstallationToken({
+        appId: '123',
+        privateKey: TEST_PRIVATE_KEY_PEM,
+        installationId: '999',
+        retries: 3,
+        retryDelayMs: 0,
+      });
+
+      expect(token).toBe('ghs_mintretriedtoken');
+    });
+
+    it('retries token minting on a transient 500 failure and succeeds', async () => {
       const client = agent.get('https://api.github.com');
       client
         .intercept({ method: 'POST', path: '/app/installations/999/access_tokens' })
@@ -238,32 +295,6 @@ describe('mint-installation-token', () => {
       });
 
       expect(token).toBe('ghs_retriedtoken');
-    });
-
-    it('gives up after exhausting all retries on persistent token-mint failure', async () => {
-      const client = agent.get('https://api.github.com');
-      client
-        .intercept({ method: 'POST', path: '/app/installations/999/access_tokens' })
-        .reply(401, 'Bad credentials')
-        .times(3);
-
-      const fetchSpy = vi.spyOn(globalThis, 'fetch');
-
-      try {
-        await expect(
-          getInstallationToken({
-            appId: '123',
-            privateKey: TEST_PRIVATE_KEY_PEM,
-            installationId: '999',
-            retries: 3,
-            retryDelayMs: 0,
-          })
-        ).rejects.toThrow(/Token mint failed \(401\): Bad credentials/);
-
-        expect(fetchSpy).toHaveBeenCalledTimes(3);
-      } finally {
-        fetchSpy.mockRestore();
-      }
     });
 
     it('scopes the access-token request body to the target repo and requested permissions', async () => {
