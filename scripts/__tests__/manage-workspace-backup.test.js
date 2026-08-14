@@ -375,6 +375,38 @@ describe('manage-workspace-backup', () => {
         warnSpy.mockRestore();
       }
     });
+
+    // Regression test for the CodeRabbit follow-up on #167/#168:
+    // resolveAheadBase() must resolve @{u} to the immutable commit sha, not
+    // the symbolic `origin/main`-style ref name — rev-list and format-patch
+    // are two separate git invocations, and resolving the symbolic ref twice
+    // could let a concurrent fetch make them disagree about what "ahead"
+    // means. Asserting the logged ahead-base is a bare 40-char sha (not
+    // "origin/main") exercises the real @{u} upstream path end to end.
+    it('resolves the upstream base to an immutable commit sha, not a symbolic ref', () => {
+      const upstreamRemote = path.join(tmpRoot, 'upstream.git');
+      initBareRemote(upstreamRemote);
+
+      const work = newWorkDir('upstream-sha-base');
+      sh(`git remote add origin ${upstreamRemote}`, work);
+      sh('git push -u origin main', work);
+
+      process.chdir(work);
+      fs.writeFileSync(path.join(work, 'unpushed.txt'), 'ahead of the pushed upstream\n');
+      sh('git add unpushed.txt', work);
+      sh('git commit -m "commit ahead of upstream"', work);
+
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        const { commitsPatch } = collectWorkspaceState({});
+
+        expect(commitsPatch).toContain('commit ahead of upstream');
+        const aheadBaseLine = logSpy.mock.calls.map(([msg]) => msg).find((msg) => /ahead-base=/.test(msg));
+        expect(aheadBaseLine).toMatch(/ahead-base=[0-9a-f]{40}\s/);
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
   });
 
   describe('runBackupStep clearing behavior', () => {

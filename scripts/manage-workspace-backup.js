@@ -157,7 +157,12 @@ async function resolveRemoteUrl() {
 // the stop hook) so a brand-new local branch that was never pushed is still
 // covered.
 function resolveAheadBase(baselineShaFile) {
-  const upstream = runGit('rev-parse --abbrev-ref --symbolic-full-name @{u}', { allowFailure: true });
+  // Resolve to the immutable commit sha, not the symbolic `origin/main`-style
+  // ref: rev-list and format-patch below are two separate git invocations,
+  // and a concurrent fetch updating the remote-tracking ref between them
+  // could otherwise make the reported commit count and the patch content
+  // disagree about what "ahead" means.
+  const upstream = runGit('rev-parse --verify @{u}', { allowFailure: true });
   if (upstream) return upstream;
   if (baselineShaFile && fs.existsSync(baselineShaFile)) {
     const sha = fs.readFileSync(baselineShaFile, 'utf8').trim();
