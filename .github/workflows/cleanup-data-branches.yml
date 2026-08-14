@@ -1,0 +1,33 @@
+name: cleanup the-intern-data branches
+
+on:
+  schedule:
+    # Offset from ci.yaml's '0 6 * * *' so the two nightly jobs don't collide
+    # on the same runner pool.
+    - cron: '0 7 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the-intern
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Delete the-intern-data branches for merged PRs
+        run: node scripts/cleanup-data-branches.js
+        env:
+          # Lets the script list/delete summaries/ and workspace/ branches on
+          # the-intern-data (issue #124's static PAT).
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          # Mints a per-target-repo installation token (same as
+          # dispatcher.yml/mint-installation-token.js) to check each branch's
+          # PR merge state — this repo's own GITHUB_TOKEN has no access to
+          # other repos' pulls.
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
