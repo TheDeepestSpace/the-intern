@@ -105,6 +105,34 @@ function runGitToFile(cmd, options = {}) {
   }
 }
 
+// Same as runGitToFile, but for callers that need to enforce a size ceiling
+// without paying for it: an implausible ahead-base can turn format-patch's
+// output into a multi-hundred-MB patch, and reading that whole thing into a
+// string just to immediately discover it's over the limit and throw it away
+// defeats the point of the sanity check. Stats the file on disk first and,
+// when it's over maxBytes, returns only the size — the caller never pays for
+// fs.readFileSync on the oversized patch.
+function runGitToFileSized(cmd, maxBytes, options = {}) {
+  const { allowFailure = false, trim = true, ...execOptions } = options;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-backup-git-'));
+  const outFile = path.join(tmpDir, 'output');
+  const fd = fs.openSync(outFile, 'w');
+  try {
+    execSync(`git ${cmd}`, { maxBuffer: LARGE_BUFFER, ...execOptions, stdio: ['ignore', fd, 'pipe'] });
+    const { size } = fs.statSync(outFile);
+    if (size > maxBytes) return { tooLarge: true, size, content: '' };
+    const output = fs.readFileSync(outFile, 'utf8');
+    return { tooLarge: false, size, content: trim ? output.trim() : output };
+  } catch (err) {
+    if (allowFailure) return { tooLarge: false, size: 0, content: '' };
+    const detail = (err.stderr || err.message || '').toString().trim();
+    throw new Error(`git ${redactUrl(cmd)} failed: ${redactUrl(detail)}`);
+  } finally {
+    fs.closeSync(fd);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 function ensureSafeDirectory(dir = process.cwd()) {
   runGit(`config --global --add safe.directory "${dir}"`, { allowFailure: true });
 }
@@ -157,17 +185,20 @@ function collectWorkspaceState({ baselineShaFile, maxCommitsPatchBytes = MAX_COM
     const commitCount = runGit(`rev-list --count ${base}..HEAD`, { allowFailure: true }) || '(unknown)';
     console.log(`workspace-backup: ahead-base=${base} commits-ahead=${commitCount}`);
 
-    const patch = runGitToFile(`format-patch ${base}..HEAD --binary --stdout`, { trim: false });
-    const patchBytes = Buffer.byteLength(patch, 'utf8');
-    if (patchBytes > maxCommitsPatchBytes) {
+    const { tooLarge, size, content } = runGitToFileSized(
+      `format-patch ${base}..HEAD --binary --stdout`,
+      maxCommitsPatchBytes,
+      { trim: false }
+    );
+    if (tooLarge) {
       console.warn(
-        `::warning::workspace-backup: commits.patch would be ${(patchBytes / (1024 * 1024)).toFixed(1)}MB ` +
+        `::warning::workspace-backup: commits.patch would be ${(size / (1024 * 1024)).toFixed(1)}MB ` +
         `(base=${base}, commits-ahead=${commitCount}), over the ${(maxCommitsPatchBytes / (1024 * 1024)).toFixed(0)}MB ` +
         `sanity threshold. This almost always means the ahead-base is wrong, not that there is really this much ` +
         `unpushed work. Skipping the commits backup instead of pushing a patch that GitHub would reject.`
       );
     } else {
-      commitsPatch = patch;
+      commitsPatch = content;
     }
   }
 
