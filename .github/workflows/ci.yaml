@@ -43,6 +43,7 @@ jobs:
         run: npm test
 
   worker-audit:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -82,6 +83,7 @@ jobs:
         run: npm test
 
   scripts-audit:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
