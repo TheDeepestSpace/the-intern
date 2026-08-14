@@ -116,7 +116,12 @@ async function getTokenForRepo(targetRepo, env, cache, mintFn = getInstallationT
   if (cache.has(targetRepo)) return cache.get(targetRepo);
   let token = null;
   try {
-    token = await mintFn({ appId: env.APP_ID, privateKey: getPrivateKey(env), targetRepo });
+    token = await mintFn({
+      appId: env.APP_ID,
+      privateKey: getPrivateKey(env),
+      targetRepo,
+      permissions: { pull_requests: 'read' },
+    });
   } catch (err) {
     console.warn(`::warning::Could not mint an installation token for ${targetRepo}, leaving its branches untouched: ${err.message}`);
   }

@@ -149,6 +149,12 @@ describe('getTokenForRepo', () => {
     expect(a).toBe('tok-123');
     expect(b).toBe('tok-123');
     expect(mintFn).toHaveBeenCalledTimes(1);
+    expect(mintFn).toHaveBeenCalledWith({
+      appId: 'app',
+      privateKey: 'key',
+      targetRepo: 'acme/widgets',
+      permissions: { pull_requests: 'read' },
+    });
   });
 
   it('caches a mint failure as null instead of retrying every call', async () => {
