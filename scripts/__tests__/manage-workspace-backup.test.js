@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import {
   getBranchName,
   collectWorkspaceState,
@@ -344,6 +344,36 @@ describe('manage-workspace-backup', () => {
       expect(diffPatch).toBe('');
       expect(commitsPatch).toContain('add large binary file');
       expect(commitsPatch.length).toBeGreaterThan(bytes.length);
+    });
+
+    // Regression test for issue #167: an implausible ahead-base (e.g. `@{u}`
+    // resolving somewhere unrelated) can produce a commits.patch far larger
+    // than the real session, which GitHub then rejects (GH001, >100MB) and
+    // pages the maintainer for a run that already succeeded. Rather than
+    // push a patch that size, collectWorkspaceState should skip it.
+    it('skips the commits backup when the patch exceeds the size sanity threshold', () => {
+      const work = newWorkDir('implausible-base-commit');
+      const baselineFile = path.join(tmpRoot, 'baseline-sha-implausible.txt');
+      fs.writeFileSync(baselineFile, sh('git rev-parse HEAD', work) + '\n');
+
+      process.chdir(work);
+      fs.writeFileSync(path.join(work, 'small.txt'), 'a real, tiny unpushed commit\n');
+      sh('git add small.txt', work);
+      sh('git commit -m "small unpushed commit"', work);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { diffPatch, commitsPatch } = collectWorkspaceState({
+          baselineShaFile: baselineFile,
+          maxCommitsPatchBytes: 1,
+        });
+
+        expect(diffPatch).toBe('');
+        expect(commitsPatch).toBe('');
+        expect(warnSpy.mock.calls.some(([msg]) => /commits\.patch would be/.test(msg))).toBe(true);
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
   });
 

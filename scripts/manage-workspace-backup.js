@@ -21,6 +21,14 @@ const DIFF_FILE = 'diff.patch';
 const COMMITS_FILE = 'commits.patch';
 const TRANSCRIPT_DIR = 'transcript';
 const LARGE_BUFFER = 1024 * 1024 * 50;
+// GitHub hard-rejects any pushed file over 100MB (GH001) — the exact
+// rejection that paged the maintainer in issue #167, for a session whose
+// real diff was <60 lines. A commits.patch anywhere near that size is a
+// signal that resolveAheadBase() picked an implausible base (e.g. `@{u}`
+// pointing somewhere unrelated, or a stale baseline sha) rather than real
+// unpushed work, so it's treated as a skip-and-warn instead of a value to
+// push and let fail downstream.
+const MAX_COMMITS_PATCH_BYTES = 1024 * 1024 * 90;
 // Agent-infra bookkeeping that must never enter the backup: it's written into
 // the target checkout by the dispatcher's "Run agent" step, not by the agent,
 // and restoring it on the next dispatch would dump it back as an uncommitted
@@ -138,15 +146,30 @@ function resolveAheadBase(baselineShaFile) {
 // huge diff) is a genuine error, not "nothing to back up" — swallowing it
 // would make the caller believe the tree is clean and delete any existing
 // backup instead of preserving it.
-function collectWorkspaceState({ baselineShaFile } = {}) {
+function collectWorkspaceState({ baselineShaFile, maxCommitsPatchBytes = MAX_COMMITS_PATCH_BYTES } = {}) {
   const pathspec = ['.', ...EXCLUDED_PATHS.map(p => `":(exclude)${p}"`)].join(' ');
   runGit(`add -A -- ${pathspec}`);
   const diffPatch = runGitToFile(`diff --cached HEAD --binary`, { trim: false });
 
   const base = resolveAheadBase(baselineShaFile);
-  const commitsPatch = base
-    ? runGitToFile(`format-patch ${base}..HEAD --binary --stdout`, { trim: false })
-    : '';
+  let commitsPatch = '';
+  if (base) {
+    const commitCount = runGit(`rev-list --count ${base}..HEAD`, { allowFailure: true }) || '(unknown)';
+    console.log(`workspace-backup: ahead-base=${base} commits-ahead=${commitCount}`);
+
+    const patch = runGitToFile(`format-patch ${base}..HEAD --binary --stdout`, { trim: false });
+    const patchBytes = Buffer.byteLength(patch, 'utf8');
+    if (patchBytes > maxCommitsPatchBytes) {
+      console.warn(
+        `::warning::workspace-backup: commits.patch would be ${(patchBytes / (1024 * 1024)).toFixed(1)}MB ` +
+        `(base=${base}, commits-ahead=${commitCount}), over the ${(maxCommitsPatchBytes / (1024 * 1024)).toFixed(0)}MB ` +
+        `sanity threshold. This almost always means the ahead-base is wrong, not that there is really this much ` +
+        `unpushed work. Skipping the commits backup instead of pushing a patch that GitHub would reject.`
+      );
+    } else {
+      commitsPatch = patch;
+    }
+  }
 
   return { diffPatch, commitsPatch };
 }
