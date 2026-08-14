@@ -492,6 +492,8 @@ jobs:
               stopHookSettings,
               "STOPHOOKEOF",
               "git rev-parse HEAD > /tmp/stop_hook_baseline_sha.txt 2>/dev/null || true",
+              "git for-each-ref --format=\"%(objectname) %(refname)\" > /tmp/stop_hook_baseline_refs.txt 2>/dev/null || true",
+              "date -u +%Y-%m-%dT%H:%M:%SZ > /tmp/stop_hook_session_start.txt 2>/dev/null || true",
               "PROMPT=\"$(cat /tmp/prompt.txt)\"",
               "set +e",
               ...runLines,

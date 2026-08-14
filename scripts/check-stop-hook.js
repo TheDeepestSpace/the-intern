@@ -22,7 +22,8 @@
 const fs = require('fs');
 const { execFileSync } = require('child_process');
 
-const BASELINE_SHA_FILE = '/tmp/stop_hook_baseline_sha.txt';
+const BASELINE_REFS_FILE = '/tmp/stop_hook_baseline_refs.txt';
+const SESSION_START_FILE = '/tmp/stop_hook_session_start.txt';
 const BLOCK_COUNT_FILE = '/tmp/stop_hook_block_count.txt';
 const MAX_BLOCKS = 3;
 
@@ -84,29 +85,72 @@ function getLastAssistantMessage(input) {
   return '';
 }
 
-// "Landed commits" is approximated as "a commit exists now that didn't exist
-// at session start, on any local ref" — this covers a commit on the checked-
-// out branch, a commit on a freshly created branch, and a branch that was
-// pushed (which updates the local remote-tracking ref) for a PR, without
-// needing a GitHub API round-trip from inside the hook.
-function hasLandedCommits(cwd, baseline) {
+// Parses `git for-each-ref --format='%(objectname) %(refname)'` output into
+// a Map(refname -> sha).
+function parseRefs(text) {
+  const map = new Map();
+  text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .forEach((line) => {
+      const idx = line.indexOf(' ');
+      if (idx === -1) return;
+      map.set(line.slice(idx + 1), line.slice(0, idx));
+    });
+  return map;
+}
+
+// True if any ref present now points somewhere it didn't at baseline —
+// either a new ref (freshly created/fetched branch) or an existing ref whose
+// tip moved (a new commit, or a push updating the remote-tracking ref).
+// Scoping to ref *tips that changed*, rather than "any commit reachable from
+// any ref" (the previous `rev-list --all --not baseline` approach), avoids
+// counting commits that were already sitting on some other, pre-existing
+// branch as "landed work" from this session.
+function refsChanged(baselineRefsText, currentRefsText) {
+  const baseline = parseRefs(baselineRefsText);
+  const current = parseRefs(currentRefsText);
+  for (const [ref, sha] of current) {
+    if (baseline.get(ref) !== sha) return true;
+  }
+  return false;
+}
+
+// "Landed commits" is approximated as "some ref's tip differs now from the
+// session-start snapshot" — this covers a commit on the checked-out branch,
+// a commit on a freshly created branch, and a branch that was pushed (which
+// updates the local remote-tracking ref) for a PR, without needing a GitHub
+// API round-trip from inside the hook.
+function hasLandedCommits(cwd, baselineRefsText) {
   try {
-    const newCommitCount = execFileSync(
+    const currentRefsText = execFileSync(
       'git',
-      ['rev-list', '--count', '--all', '--not', baseline],
+      ['for-each-ref', '--format=%(objectname) %(refname)'],
       { cwd, encoding: 'utf8' }
-    ).trim();
-    return Number(newCommitCount) > 0;
+    );
+    return refsChanged(baselineRefsText, currentRefsText);
   } catch (err) {
     return true; // can't inspect git state reliably; fail open
   }
 }
 
+// Keeps only PRs created at/after session start, so an already-open PR from
+// a prior session on the same branch (the common case for a follow-up
+// dispatcher run) doesn't make every subsequent session look like it landed
+// work regardless of what actually happened.
+function filterPRsCreatedAfter(prs, sessionStartIso) {
+  if (!sessionStartIso) return prs; // no timestamp recorded; don't filter
+  const sessionStartMs = Date.parse(sessionStartIso);
+  if (Number.isNaN(sessionStartMs)) return prs;
+  return prs.filter((pr) => Date.parse(pr.createdAt) >= sessionStartMs);
+}
+
 // Belt-and-suspenders alternate signal for the case where a PR got opened
-// this session off commits that don't postdate the baseline SHA (e.g. reusing
-// an already-pushed branch) — a gray area worth allowing through rather than
-// forcing a pointless extra commit.
-function hasOpenPR(cwd) {
+// this session off commits that don't postdate the baseline ref snapshot
+// (e.g. reusing an already-pushed branch) — a gray area worth allowing
+// through rather than forcing a pointless extra commit.
+function hasOpenPR(cwd, sessionStartIso) {
   try {
     const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
       cwd,
@@ -115,25 +159,33 @@ function hasOpenPR(cwd) {
     if (!branch || branch === 'HEAD') return false; // detached HEAD; nothing to look up
     const out = execFileSync(
       'gh',
-      ['pr', 'list', '--head', branch, '--state', 'all', '--json', 'number', '--jq', 'length'],
+      ['pr', 'list', '--head', branch, '--state', 'all', '--json', 'number,createdAt'],
       { cwd, encoding: 'utf8', timeout: 10000 }
     ).trim();
-    return Number(out) > 0;
+    const prs = out ? JSON.parse(out) : [];
+    return filterPRsCreatedAfter(prs, sessionStartIso).length > 0;
   } catch (err) {
     return false; // gh unavailable/unauthenticated/no PR; don't treat as landed
   }
 }
 
 function hasLandedWork(cwd) {
-  let baseline = '';
+  let baselineRefsText = '';
   try {
-    baseline = fs.readFileSync(BASELINE_SHA_FILE, 'utf8').trim();
+    baselineRefsText = fs.readFileSync(BASELINE_REFS_FILE, 'utf8');
   } catch (err) {
     return true; // no baseline recorded; fail open rather than block blindly
   }
-  if (!baseline) return true;
+  if (!baselineRefsText.trim()) return true;
 
-  return hasLandedCommits(cwd, baseline) || hasOpenPR(cwd);
+  let sessionStartIso = '';
+  try {
+    sessionStartIso = fs.readFileSync(SESSION_START_FILE, 'utf8').trim();
+  } catch (err) {
+    // no session-start timestamp recorded; hasOpenPR falls back to unfiltered
+  }
+
+  return hasLandedCommits(cwd, baselineRefsText) || hasOpenPR(cwd, sessionStartIso);
 }
 
 function getGitStatusLines(cwd) {
@@ -260,6 +312,9 @@ module.exports = {
   hasLandedWork,
   hasLandedCommits,
   hasOpenPR,
+  parseRefs,
+  refsChanged,
+  filterPRsCreatedAfter,
   decideStopAction,
   buildReason,
 };

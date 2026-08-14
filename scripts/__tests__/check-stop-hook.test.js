@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { SUSPICIOUS_PATTERNS, MAX_BLOCKS, decideStopAction, buildReason } from '../check-stop-hook.js';
+import {
+  SUSPICIOUS_PATTERNS,
+  MAX_BLOCKS,
+  decideStopAction,
+  buildReason,
+  parseRefs,
+  refsChanged,
+  filterPRsCreatedAfter,
+} from '../check-stop-hook.js';
 
 function isSuspicious(message) {
   return SUSPICIOUS_PATTERNS.some((pattern) => pattern.test(message));
@@ -108,6 +116,67 @@ describe('check-stop-hook decideStopAction', () => {
     }
     const finalResult = decideStopAction({ message: stallMessage, statusLines: [], landedWork: false, blockCount });
     expect(finalResult.block).toBe(false);
+  });
+});
+
+describe('check-stop-hook refsChanged', () => {
+  const baseline = [
+    'aaa111 refs/heads/main',
+    'bbb222 refs/remotes/origin/some-other-old-branch',
+  ].join('\n');
+
+  it('does not treat a pre-existing divergent ref as landed work (CodeRabbit review #169)', () => {
+    // some-other-old-branch already existed at baseline with the same tip;
+    // nothing about it changed this session.
+    const current = baseline;
+    expect(refsChanged(baseline, current)).toBe(false);
+  });
+
+  it('flags a new commit on the checked-out branch', () => {
+    const current = ['ccc333 refs/heads/main', 'bbb222 refs/remotes/origin/some-other-old-branch'].join('\n');
+    expect(refsChanged(baseline, current)).toBe(true);
+  });
+
+  it('flags a freshly created local branch not present at baseline', () => {
+    const current = [baseline, 'ddd444 refs/heads/new-feature-branch'].join('\n');
+    expect(refsChanged(baseline, current)).toBe(true);
+  });
+
+  it('treats an empty baseline as changed (no snapshot to compare against)', () => {
+    expect(refsChanged('', 'aaa111 refs/heads/main')).toBe(true);
+  });
+});
+
+describe('check-stop-hook parseRefs', () => {
+  it('maps ref name to sha, ignoring blank lines', () => {
+    const parsed = parseRefs('aaa111 refs/heads/main\n\nbbb222 refs/heads/other\n');
+    expect(parsed.get('refs/heads/main')).toBe('aaa111');
+    expect(parsed.get('refs/heads/other')).toBe('bbb222');
+    expect(parsed.size).toBe(2);
+  });
+});
+
+describe('check-stop-hook filterPRsCreatedAfter', () => {
+  const sessionStart = '2026-08-14T22:06:36Z';
+
+  it('excludes an old open PR created before session start (CodeRabbit review #169)', () => {
+    const prs = [{ number: 169, createdAt: '2026-08-14T20:00:00Z' }];
+    expect(filterPRsCreatedAfter(prs, sessionStart)).toEqual([]);
+  });
+
+  it('excludes an old closed PR created before session start', () => {
+    const prs = [{ number: 42, createdAt: '2026-01-01T00:00:00Z' }];
+    expect(filterPRsCreatedAfter(prs, sessionStart)).toEqual([]);
+  });
+
+  it('includes a PR created during this session', () => {
+    const prs = [{ number: 200, createdAt: '2026-08-14T22:10:00Z' }];
+    expect(filterPRsCreatedAfter(prs, sessionStart)).toEqual(prs);
+  });
+
+  it('does not filter when no session-start timestamp is available', () => {
+    const prs = [{ number: 169, createdAt: '2026-01-01T00:00:00Z' }];
+    expect(filterPRsCreatedAfter(prs, '')).toEqual(prs);
   });
 });
 
