@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { execSync, execFileSync } from 'node:child_process';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import {
   getBranchName,
   collectWorkspaceState,
@@ -344,6 +344,166 @@ describe('manage-workspace-backup', () => {
       expect(diffPatch).toBe('');
       expect(commitsPatch).toContain('add large binary file');
       expect(commitsPatch.length).toBeGreaterThan(bytes.length);
+    });
+
+    // Regression test for issue #167: an implausible ahead-base (e.g. `@{u}`
+    // resolving somewhere unrelated) can produce a commits.patch far larger
+    // than the real session, which GitHub then rejects (GH001, >100MB) and
+    // pages the maintainer for a run that already succeeded. Rather than
+    // push a patch that size, collectWorkspaceState should skip it.
+    it('skips the commits backup when the patch exceeds the size sanity threshold', () => {
+      const work = newWorkDir('implausible-base-commit');
+      const baselineFile = path.join(tmpRoot, 'baseline-sha-implausible.txt');
+      fs.writeFileSync(baselineFile, sh('git rev-parse HEAD', work) + '\n');
+
+      process.chdir(work);
+      fs.writeFileSync(path.join(work, 'small.txt'), 'a real, tiny unpushed commit\n');
+      sh('git add small.txt', work);
+      sh('git commit -m "small unpushed commit"', work);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { diffPatch, commitsPatch } = collectWorkspaceState({
+          baselineShaFile: baselineFile,
+          maxCommitsPatchBytes: 1,
+        });
+
+        expect(diffPatch).toBe('');
+        expect(commitsPatch).toBe('');
+        expect(warnSpy.mock.calls.some(([msg]) => /commits\.patch would be/.test(msg))).toBe(true);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    // Regression test for the CodeRabbit follow-up on #167/#168:
+    // resolveAheadBase() must resolve @{u} to the immutable commit sha, not
+    // the symbolic `origin/main`-style ref name — rev-list and format-patch
+    // are two separate git invocations, and resolving the symbolic ref twice
+    // could let a concurrent fetch make them disagree about what "ahead"
+    // means. Asserting the logged ahead-base is a bare 40-char sha (not
+    // "origin/main") exercises the real @{u} upstream path end to end.
+    it('resolves the upstream base to an immutable commit sha, not a symbolic ref', () => {
+      const upstreamRemote = path.join(tmpRoot, 'upstream.git');
+      initBareRemote(upstreamRemote);
+
+      const work = newWorkDir('upstream-sha-base');
+      sh(`git remote add origin ${upstreamRemote}`, work);
+      sh('git push -u origin main', work);
+
+      process.chdir(work);
+      fs.writeFileSync(path.join(work, 'unpushed.txt'), 'ahead of the pushed upstream\n');
+      sh('git add unpushed.txt', work);
+      sh('git commit -m "commit ahead of upstream"', work);
+
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        const { commitsPatch } = collectWorkspaceState({});
+
+        expect(commitsPatch).toContain('commit ahead of upstream');
+        const aheadBaseLine = logSpy.mock.calls.map(([msg]) => msg).find((msg) => /ahead-base=/.test(msg));
+        expect(aheadBaseLine).toMatch(/ahead-base=[0-9a-f]{40}\s/);
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
+
+    // Debugging aid requested alongside issue #167: when there's an ahead
+    // base and/or untracked files, collectWorkspaceState should return which
+    // files (per commit, and untracked) are contributing to the backup, with
+    // sizes — not the file contents themselves — so a bad ahead-base is
+    // diagnosable from file-listing.txt on the-intern-data without fetching
+    // commits.patch at all. Routed there instead of the job log (issue
+    // #168 follow-up) so the listing isn't capped by job-log noise concerns.
+    it('collects per-commit and untracked file listings with sizes, not file contents', () => {
+      const work = newWorkDir('file-listing-debug');
+      const baselineFile = path.join(tmpRoot, 'baseline-sha-listing.txt');
+      fs.writeFileSync(baselineFile, sh('git rev-parse HEAD', work) + '\n');
+
+      process.chdir(work);
+      fs.writeFileSync(path.join(work, 'committed.txt'), 'twelve bytes\n');
+      sh('git add committed.txt', work);
+      sh('git commit -m "unpushed commit with a file"', work);
+      fs.writeFileSync(path.join(work, 'untracked.txt'), 'nine chars\n');
+
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        const { fileListing } = collectWorkspaceState({ baselineShaFile: baselineFile });
+
+        expect(fileListing).toMatch(/committed\.txt \(\d+ bytes\)/);
+        expect(fileListing).toMatch(/\[untracked\] untracked\.txt \(\d+ bytes\)/);
+        expect(fileListing).not.toContain('twelve bytes');
+        expect(fileListing).not.toContain('nine chars');
+
+        const messages = logSpy.mock.calls.map(([msg]) => msg).join('\n');
+        expect(messages).not.toMatch(/committed\.txt \(\d+ bytes\)/);
+        expect(messages).not.toMatch(/\[untracked\] untracked\.txt \(\d+ bytes\)/);
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
+
+    // Regression test for the CodeRabbit follow-up on #168: the per-commit
+    // file listing used to build a shell command string with the filename
+    // interpolated inside double quotes (`cat-file -s "sha:file"` via
+    // execSync), which does not stop `$(...)` command substitution. A commit
+    // containing a file whose name is a shell command-substitution payload
+    // must not execute that payload.
+    it('does not execute shell metacharacters in a committed filename', () => {
+      const work = newWorkDir('shell-metachar-filename');
+      const baselineFile = path.join(tmpRoot, 'baseline-sha-metachar.txt');
+      fs.writeFileSync(baselineFile, sh('git rev-parse HEAD', work) + '\n');
+
+      process.chdir(work);
+      const markerFile = path.join(work, 'pwned.txt');
+      const maliciousName = '$(touch pwned.txt)';
+      fs.writeFileSync(path.join(work, maliciousName), 'payload\n');
+      // execFileSync (not the shell-backed `sh` helper): the point of this
+      // fixture is a filename the shell would expand, so staging it must not
+      // itself go through a shell either.
+      execFileSync('git', ['add', '--', maliciousName], { cwd: work });
+      sh('git commit -m "commit with shell metacharacter filename"', work);
+
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        const { fileListing } = collectWorkspaceState({ baselineShaFile: baselineFile });
+        expect(fs.existsSync(markerFile)).toBe(false);
+        expect(fileListing).toContain(maliciousName);
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('saveBackup file-listing.txt', () => {
+    // The file listing moved from job-log console.log calls to a pushed file
+    // (issue #168 follow-up) so it's retrievable from the-intern-data instead
+    // of an ephemeral Actions log; assert it actually lands on the branch.
+    it('pushes fileListing as file-listing.txt on the backup branch', async () => {
+      const work = newWorkDir('file-listing-persisted');
+      process.chdir(work);
+      await saveBackup('acme/widgets', '9', {
+        diffPatch: '',
+        commitsPatch: '',
+        fileListing: 'untracked files:\n[untracked] secret-plan.txt (42 bytes)',
+      });
+
+      const branchName = getBranchName('acme/widgets', '9');
+      const content = sh(`git show ${branchName}:file-listing.txt`, dataRemoteDir);
+      expect(content).toContain('[untracked] secret-plan.txt (42 bytes)');
+    });
+
+    it('does not clear the backup when only fileListing is present', async () => {
+      const work = newWorkDir('file-listing-only-not-cleared');
+      process.chdir(work);
+      await saveBackup('acme/widgets', '10', {
+        diffPatch: '',
+        commitsPatch: '',
+        fileListing: 'ahead commits (base=abc, commits-ahead=1):\nabc1234 big.bin (999 bytes)',
+      });
+
+      const branches = sh('git ls-remote --heads .', dataRemoteDir);
+      expect(branches).toContain(getBranchName('acme/widgets', '10'));
     });
   });
 
