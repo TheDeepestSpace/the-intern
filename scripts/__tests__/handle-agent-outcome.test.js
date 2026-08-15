@@ -86,6 +86,8 @@ describe('main', () => {
       buildDispatchPayload: vi.fn(() => null),
       detectUsageLimit: vi.fn(() => null),
       saveCodexLog: vi.fn(() => Promise.resolve()),
+      countIssueComments: vi.fn(() => Promise.resolve(0)),
+      postIssueComment: vi.fn(() => Promise.resolve()),
       ...overrides,
     };
   }
@@ -109,6 +111,106 @@ describe('main', () => {
     await main(baseEnv, d);
 
     expect(d.sendTelegram).not.toHaveBeenCalled();
+  });
+
+  describe('silent-success fallback comment', () => {
+    const envWithIssue = {
+      ...baseEnv,
+      TARGET_REPO: 'owner/repo',
+      ISSUE_NUMBER: '42',
+      COMMENT_COUNT_BEFORE: '2',
+    };
+
+    it('posts the final answer as a fallback comment when no new comment landed', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+        countIssueComments: vi.fn(() => Promise.resolve(2)),
+      });
+
+      await main(envWithIssue, d);
+
+      expect(d.countIssueComments).toHaveBeenCalledWith('owner/repo', '42');
+      expect(d.postIssueComment).toHaveBeenCalledWith('owner/repo', '42', 'Here is the answer.');
+    });
+
+    it('does not post a fallback comment once a new comment already landed', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+        countIssueComments: vi.fn(() => Promise.resolve(3)),
+      });
+
+      await main(envWithIssue, d);
+
+      expect(d.postIssueComment).not.toHaveBeenCalled();
+    });
+
+    it('does not post a fallback comment when the session produced no text', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: '   ' })),
+        countIssueComments: vi.fn(() => Promise.resolve(2)),
+      });
+
+      await main(envWithIssue, d);
+
+      expect(d.countIssueComments).not.toHaveBeenCalled();
+      expect(d.postIssueComment).not.toHaveBeenCalled();
+    });
+
+    it('does not post a fallback comment when there is no baseline comment count (e.g. telegram calls)', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+        countIssueComments: vi.fn(() => Promise.resolve(0)),
+      });
+
+      await main(baseEnv, d);
+
+      expect(d.countIssueComments).not.toHaveBeenCalled();
+      expect(d.postIssueComment).not.toHaveBeenCalled();
+    });
+
+    it('does not post a fallback comment when the baseline count is an empty string (capture step skipped/failed)', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+        countIssueComments: vi.fn(() => Promise.resolve(0)),
+      });
+
+      await main({ ...envWithIssue, COMMENT_COUNT_BEFORE: '' }, d);
+
+      expect(d.countIssueComments).not.toHaveBeenCalled();
+      expect(d.postIssueComment).not.toHaveBeenCalled();
+    });
+
+    it('does not throw and skips posting when checking the comment count fails', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+        countIssueComments: vi.fn(() => Promise.reject(new Error('gh api failed'))),
+      });
+
+      await expect(main(envWithIssue, d)).resolves.not.toThrow();
+      expect(d.postIssueComment).not.toHaveBeenCalled();
+    });
+
+    it('does not throw when posting the fallback comment fails', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+        countIssueComments: vi.fn(() => Promise.resolve(2)),
+        postIssueComment: vi.fn(() => Promise.reject(new Error('gh api failed'))),
+      });
+
+      await expect(main(envWithIssue, d)).resolves.not.toThrow();
+    });
+
+    it('still posts a fallback comment when clearing the queued retry rejects', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+        updateEntries: vi.fn(() => Promise.reject(new Error('push rejected'))),
+        countIssueComments: vi.fn(() => Promise.resolve(2)),
+      });
+
+      await expect(main(envWithIssue, d)).resolves.not.toThrow();
+
+      expect(d.postIssueComment).toHaveBeenCalledWith('owner/repo', '42', 'Here is the answer.');
+    });
   });
 
   it('waits for updateEntries to resolve before pinging "resumed" on success', async () => {
