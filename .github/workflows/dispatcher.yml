@@ -315,6 +315,23 @@ jobs:
           # (issue #124) — the-intern-data is the sole workspace-backup store.
           DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
 
+      # Baseline for handle-agent-outcome.js's silent-success backstop (issue #170): a
+      # session can report is_error=false with a well-formed answer yet never actually
+      # call `gh` to post it. Comparing the comment count before vs. after the agent run
+      # is how that gets caught; captured here (rather than assumed to be 0) so a
+      # follow-up dispatch on an issue/PR that already has comments doesn't misread its
+      # own prior comments as "posted this session".
+      - name: Capture starting comment count
+        id: comment_baseline
+        if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
+        run: |
+          COUNT=$(gh api "repos/$TARGET_REPO/issues/$ISSUE_NUMBER/comments" --paginate --jq '.[] | .id' | wc -l | tr -d ' ')
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
       - name: Install script dependencies for Codex auth round-trip
         if: needs.detect-image.outputs.backend == 'codex'
         run: npm ci --omit=dev --include=prod --no-audit --no-fund
@@ -344,6 +361,7 @@ jobs:
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
+          COMMENT_COUNT_BEFORE: ${{ steps.comment_baseline.outputs.count }}
           CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
           SUMMARY_CONTEXT: ${{ steps.summary_context.outputs.summary }}
           WORKSPACE_RESTORED: ${{ steps.workspace_restore.outputs.restored }}
@@ -374,7 +392,7 @@ jobs:
             const style = process.env.STYLE_GUIDE || "";
             const workspaceRestored = process.env.WORKSPACE_RESTORED === "true";
 
-            let prompt = `You are @the-intern-bot working on repository ${repo}, issue/PR #${issue}.\nYou have access to the GitHub CLI (\x27gh\x27) and full git tools. Use \x27gh\x27 to post comments, inspect code, run tests, or open PRs as needed.\n\n`;
+            let prompt = `You are @the-intern-bot working on repository ${repo}, issue/PR #${issue}.\nYou have access to the GitHub CLI (\x27gh\x27) and full git tools. Use \x27gh\x27 to post comments, inspect code, run tests, or open PRs as needed.\n\nThis is a headless, single-shot session: your final message is never shown to anyone. If the request is a question or otherwise doesn\x27t land a PR/issue that already carries the answer, you must explicitly post your answer as a \x27gh\x27 comment on #${issue} before ending your turn, or it is lost.\n\n`;
             if (workspaceRestored) {
               prompt += `Work from a previous incomplete run on this issue was restored into this checkout. It may be local commits that were never pushed, uncommitted working-tree changes, or both. Run \x27git status\x27 and \x27git log\x27 first, then continue, commit, or discard as appropriate.\n\n`;
             }
