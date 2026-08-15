@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import {
   getBranchName,
@@ -433,6 +433,36 @@ describe('manage-workspace-backup', () => {
         expect(messages).toMatch(/\[untracked\] untracked\.txt \(\d+ bytes\)/);
         expect(messages).not.toContain('twelve bytes');
         expect(messages).not.toContain('nine chars');
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
+
+    // Regression test for the CodeRabbit follow-up on #168: the per-commit
+    // file listing used to build a shell command string with the filename
+    // interpolated inside double quotes (`cat-file -s "sha:file"` via
+    // execSync), which does not stop `$(...)` command substitution. A commit
+    // containing a file whose name is a shell command-substitution payload
+    // must not execute that payload.
+    it('does not execute shell metacharacters in a committed filename', () => {
+      const work = newWorkDir('shell-metachar-filename');
+      const baselineFile = path.join(tmpRoot, 'baseline-sha-metachar.txt');
+      fs.writeFileSync(baselineFile, sh('git rev-parse HEAD', work) + '\n');
+
+      process.chdir(work);
+      const markerFile = path.join(work, 'pwned.txt');
+      const maliciousName = '$(touch pwned.txt)';
+      fs.writeFileSync(path.join(work, maliciousName), 'payload\n');
+      // execFileSync (not the shell-backed `sh` helper): the point of this
+      // fixture is a filename the shell would expand, so staging it must not
+      // itself go through a shell either.
+      execFileSync('git', ['add', '--', maliciousName], { cwd: work });
+      sh('git commit -m "commit with shell metacharacter filename"', work);
+
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        collectWorkspaceState({ baselineShaFile: baselineFile });
+        expect(fs.existsSync(markerFile)).toBe(false);
       } finally {
         logSpy.mockRestore();
       }

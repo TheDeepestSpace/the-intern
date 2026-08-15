@@ -14,7 +14,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 const { resolveDataRepoRemoteUrl, redactUrl } = require('./data-repo-remote.js');
 
 const DIFF_FILE = 'diff.patch';
@@ -171,6 +171,20 @@ function resolveAheadBase(baselineShaFile) {
   return '';
 }
 
+// Filenames in logAheadCommitFiles below come from the commit history itself
+// (an attacker who can get a commit merged controls them), so they can't be
+// interpolated into a runGit() shell string the way `cat-file -s "sha:file"`
+// used to — double quotes don't stop `$(...)` command substitution. Passing
+// argv straight to execFileSync bypasses the shell entirely, so no quoting
+// can matter regardless of what the filename contains.
+function gitBlobSize(rev) {
+  try {
+    return execFileSync('git', ['cat-file', '-s', rev], { encoding: 'utf8' }).trim();
+  } catch {
+    return '';
+  }
+}
+
 // Bounds the per-file debug listings below so an implausible ahead-base
 // (potentially thousands of unrelated commits/files, exactly the failure
 // mode being diagnosed) can't turn a cheap logging aid into a job-log flood
@@ -192,7 +206,7 @@ function logAheadCommitFiles(base) {
     const files = runGit(`show --pretty=format: --name-only ${sha}`, { allowFailure: true });
     for (const file of files ? files.split('\n').filter(Boolean) : []) {
       if (listed >= MAX_LISTED_FILES) break;
-      const size = runGit(`cat-file -s "${sha}:${file}"`, { allowFailure: true });
+      const size = gitBlobSize(`${sha}:${file}`);
       console.log(`workspace-backup:   ${sha.slice(0, 7)} ${file} (${size || 'unknown'} bytes)`);
       listed++;
     }
