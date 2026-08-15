@@ -19,6 +19,7 @@ const { resolveDataRepoRemoteUrl, redactUrl } = require('./data-repo-remote.js')
 
 const DIFF_FILE = 'diff.patch';
 const COMMITS_FILE = 'commits.patch';
+const FILE_LISTING_FILE = 'file-listing.txt';
 const TRANSCRIPT_DIR = 'transcript';
 const LARGE_BUFFER = 1024 * 1024 * 50;
 // GitHub hard-rejects any pushed file over 100MB (GH001) — the exact
@@ -187,19 +188,22 @@ function gitBlobSize(rev) {
 
 // Bounds the per-file debug listings below so an implausible ahead-base
 // (potentially thousands of unrelated commits/files, exactly the failure
-// mode being diagnosed) can't turn a cheap logging aid into a job-log flood
-// or a slow `git cat-file`-per-file loop.
+// mode being diagnosed) can't turn a cheap logging aid into an unbounded
+// file-listing.txt or a slow `git cat-file`-per-file loop.
 const MAX_LISTED_FILES = 200;
 
-// Debugging aid for diagnosing an implausible ahead-base (issue #167): logs
-// which file(s) each ahead commit touches, with the file's blob size at that
-// commit, straight into the job log — never the file contents themselves.
-// The point is to see *what* is inflating commits.patch without pushing (or
-// even reading into memory) the bytes that did it.
+// Debugging aid for diagnosing an implausible ahead-base (issue #167):
+// returns which file(s) each ahead commit touches, with the file's blob size
+// at that commit — never the file contents themselves. The point is to see
+// *what* is inflating commits.patch without pushing (or even reading into
+// memory) the bytes that did it. Returned as lines rather than logged
+// directly so the caller can route them into file-listing.txt on the
+// backup branch (the-intern-data) instead of the job log.
 function logAheadCommitFiles(base) {
   const shas = runGit(`rev-list --reverse ${base}..HEAD`, { allowFailure: true });
-  if (!shas) return;
+  if (!shas) return [];
 
+  const lines = [];
   let listed = 0;
   for (const sha of shas.split('\n')) {
     if (listed >= MAX_LISTED_FILES) break;
@@ -207,13 +211,14 @@ function logAheadCommitFiles(base) {
     for (const file of files ? files.split('\n').filter(Boolean) : []) {
       if (listed >= MAX_LISTED_FILES) break;
       const size = gitBlobSize(`${sha}:${file}`);
-      console.log(`workspace-backup:   ${sha.slice(0, 7)} ${file} (${size || 'unknown'} bytes)`);
+      lines.push(`${sha.slice(0, 7)} ${file} (${size || 'unknown'} bytes)`);
       listed++;
     }
   }
   if (listed >= MAX_LISTED_FILES) {
-    console.log(`workspace-backup:   ... truncated after ${MAX_LISTED_FILES} files`);
+    lines.push(`... truncated after ${MAX_LISTED_FILES} files`);
   }
+  return lines;
 }
 
 // Same debugging aid as logAheadCommitFiles, for the other source of backup
@@ -222,8 +227,9 @@ function logAheadCommitFiles(base) {
 // file the moment it's staged.
 function logUntrackedFiles() {
   const untracked = runGit('ls-files --others --exclude-standard', { allowFailure: true });
-  if (!untracked) return;
+  if (!untracked) return [];
 
+  const lines = [];
   let listed = 0;
   for (const file of untracked.split('\n')) {
     if (listed >= MAX_LISTED_FILES) break;
@@ -233,12 +239,13 @@ function logUntrackedFiles() {
     } catch {
       // Deleted/renamed between ls-files and stat — fine, best-effort only.
     }
-    console.log(`workspace-backup:   [untracked] ${file} (${size} bytes)`);
+    lines.push(`[untracked] ${file} (${size} bytes)`);
     listed++;
   }
   if (listed >= MAX_LISTED_FILES) {
-    console.log(`workspace-backup:   ... truncated after ${MAX_LISTED_FILES} files`);
+    lines.push(`... truncated after ${MAX_LISTED_FILES} files`);
   }
+  return lines;
 }
 
 // Runs against whatever git repo is cwd (the target-repo checkout in
@@ -250,7 +257,12 @@ function logUntrackedFiles() {
 // would make the caller believe the tree is clean and delete any existing
 // backup instead of preserving it.
 function collectWorkspaceState({ baselineShaFile, maxCommitsPatchBytes = MAX_COMMITS_PATCH_BYTES } = {}) {
-  logUntrackedFiles();
+  const listingLines = [];
+  const untrackedLines = logUntrackedFiles();
+  if (untrackedLines.length > 0) {
+    listingLines.push('untracked files:', ...untrackedLines);
+  }
+
   const pathspec = ['.', ...EXCLUDED_PATHS.map(p => `":(exclude)${p}"`)].join(' ');
   runGit(`add -A -- ${pathspec}`);
   const diffPatch = runGitToFile(`diff --cached HEAD --binary`, { trim: false });
@@ -260,7 +272,11 @@ function collectWorkspaceState({ baselineShaFile, maxCommitsPatchBytes = MAX_COM
   if (base) {
     const commitCount = runGit(`rev-list --count ${base}..HEAD`, { allowFailure: true }) || '(unknown)';
     console.log(`workspace-backup: ahead-base=${base} commits-ahead=${commitCount}`);
-    logAheadCommitFiles(base);
+    const aheadFileLines = logAheadCommitFiles(base);
+    if (aheadFileLines.length > 0) {
+      if (listingLines.length > 0) listingLines.push('');
+      listingLines.push(`ahead commits (base=${base}, commits-ahead=${commitCount}):`, ...aheadFileLines);
+    }
 
     const { tooLarge, size, content } = runGitToFileSized(
       `format-patch ${base}..HEAD --binary --stdout`,
@@ -272,14 +288,15 @@ function collectWorkspaceState({ baselineShaFile, maxCommitsPatchBytes = MAX_COM
         `::warning::workspace-backup: commits.patch would be ${(size / (1024 * 1024)).toFixed(1)}MB ` +
         `(base=${base}, commits-ahead=${commitCount}), over the ${(maxCommitsPatchBytes / (1024 * 1024)).toFixed(0)}MB ` +
         `sanity threshold. This almost always means the ahead-base is wrong, not that there is really this much ` +
-        `unpushed work. Skipping the commits backup instead of pushing a patch that GitHub would reject.`
+        `unpushed work. Skipping the commits backup instead of pushing a patch that GitHub would reject. See ` +
+        `file-listing.txt on the backup branch for per-file detail.`
       );
     } else {
       commitsPatch = content;
     }
   }
 
-  return { diffPatch, commitsPatch };
+  return { diffPatch, commitsPatch, fileListing: listingLines.join('\n') };
 }
 
 // Best-effort: picks up the newest Claude session transcript (if any) plus
@@ -438,9 +455,9 @@ async function clearBackup(targetRepo, issueNumber) {
 // Pushes the collected diff/commits/transcript to the backup branch. Retries
 // on non-fast-forward like manage-summaries.js/manage-pending-retries.js —
 // a stray leftover branch from an ancient run and this run's write can race.
-async function saveBackup(targetRepo, issueNumber, { diffPatch, commitsPatch, transcriptFiles = [] }) {
+async function saveBackup(targetRepo, issueNumber, { diffPatch, commitsPatch, transcriptFiles = [], fileListing = '' }) {
   if (!targetRepo || !issueNumber) return;
-  if (!diffPatch && !commitsPatch) {
+  if (!diffPatch && !commitsPatch && !fileListing) {
     console.log('Nothing uncommitted or unpushed to back up; clearing any stale backup instead.');
     await clearBackup(targetRepo, issueNumber);
     return;
@@ -479,6 +496,7 @@ async function saveBackup(targetRepo, issueNumber, { diffPatch, commitsPatch, tr
 
       if (diffPatch) fs.writeFileSync(path.join(worktreeDir, DIFF_FILE), diffPatch, 'utf8');
       if (commitsPatch) fs.writeFileSync(path.join(worktreeDir, COMMITS_FILE), commitsPatch, 'utf8');
+      if (fileListing) fs.writeFileSync(path.join(worktreeDir, FILE_LISTING_FILE), fileListing, 'utf8');
       if (transcriptFiles.length > 0) {
         const transcriptDir = path.join(worktreeDir, TRANSCRIPT_DIR);
         fs.mkdirSync(transcriptDir, { recursive: true });
@@ -569,11 +587,11 @@ async function runBackupStep(env = process.env) {
   if (!targetRepo || !issueNumber) return;
 
   ensureSafeDirectory();
-  const { diffPatch, commitsPatch } = collectWorkspaceState({
+  const { diffPatch, commitsPatch, fileListing } = collectWorkspaceState({
     baselineShaFile: env.BASELINE_SHA_FILE || '/tmp/stop_hook_baseline_sha.txt',
   });
 
-  if (!diffPatch && !commitsPatch) {
+  if (!diffPatch && !commitsPatch && !fileListing) {
     console.log('Working tree is clean and there are no unpushed commits; clearing any stale backup.');
     await clearBackup(targetRepo, issueNumber);
     return;
@@ -584,7 +602,7 @@ async function runBackupStep(env = process.env) {
     codexEventsFile: env.CODEX_EVENTS_FILE,
   });
   console.log(`Backing up ${diffPatch ? 'uncommitted changes' : ''}${diffPatch && commitsPatch ? ' and ' : ''}${commitsPatch ? 'unpushed commits' : ''} for ${targetRepo}#${issueNumber}.`);
-  await saveBackup(targetRepo, issueNumber, { diffPatch, commitsPatch, transcriptFiles });
+  await saveBackup(targetRepo, issueNumber, { diffPatch, commitsPatch, transcriptFiles, fileListing });
 }
 
 // Orchestrates the pre-agent restore step: fetch, replay commits then apply

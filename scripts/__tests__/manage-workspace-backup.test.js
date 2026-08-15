@@ -409,11 +409,13 @@ describe('manage-workspace-backup', () => {
     });
 
     // Debugging aid requested alongside issue #167: when there's an ahead
-    // base and/or untracked files, the job log should show which files (per
-    // commit, and untracked) are contributing to the backup, with sizes —
-    // not the file contents themselves — so a bad ahead-base is diagnosable
-    // from the log without fetching commits.patch at all.
-    it('logs per-commit and untracked file listings with sizes, not file contents', () => {
+    // base and/or untracked files, collectWorkspaceState should return which
+    // files (per commit, and untracked) are contributing to the backup, with
+    // sizes — not the file contents themselves — so a bad ahead-base is
+    // diagnosable from file-listing.txt on the-intern-data without fetching
+    // commits.patch at all. Routed there instead of the job log (issue
+    // #168 follow-up) so the listing isn't capped by job-log noise concerns.
+    it('collects per-commit and untracked file listings with sizes, not file contents', () => {
       const work = newWorkDir('file-listing-debug');
       const baselineFile = path.join(tmpRoot, 'baseline-sha-listing.txt');
       fs.writeFileSync(baselineFile, sh('git rev-parse HEAD', work) + '\n');
@@ -426,13 +428,16 @@ describe('manage-workspace-backup', () => {
 
       const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       try {
-        collectWorkspaceState({ baselineShaFile: baselineFile });
+        const { fileListing } = collectWorkspaceState({ baselineShaFile: baselineFile });
+
+        expect(fileListing).toMatch(/committed\.txt \(\d+ bytes\)/);
+        expect(fileListing).toMatch(/\[untracked\] untracked\.txt \(\d+ bytes\)/);
+        expect(fileListing).not.toContain('twelve bytes');
+        expect(fileListing).not.toContain('nine chars');
 
         const messages = logSpy.mock.calls.map(([msg]) => msg).join('\n');
-        expect(messages).toMatch(/committed\.txt \(\d+ bytes\)/);
-        expect(messages).toMatch(/\[untracked\] untracked\.txt \(\d+ bytes\)/);
-        expect(messages).not.toContain('twelve bytes');
-        expect(messages).not.toContain('nine chars');
+        expect(messages).not.toMatch(/committed\.txt \(\d+ bytes\)/);
+        expect(messages).not.toMatch(/\[untracked\] untracked\.txt \(\d+ bytes\)/);
       } finally {
         logSpy.mockRestore();
       }
@@ -461,11 +466,44 @@ describe('manage-workspace-backup', () => {
 
       const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       try {
-        collectWorkspaceState({ baselineShaFile: baselineFile });
+        const { fileListing } = collectWorkspaceState({ baselineShaFile: baselineFile });
         expect(fs.existsSync(markerFile)).toBe(false);
+        expect(fileListing).toContain(maliciousName);
       } finally {
         logSpy.mockRestore();
       }
+    });
+  });
+
+  describe('saveBackup file-listing.txt', () => {
+    // The file listing moved from job-log console.log calls to a pushed file
+    // (issue #168 follow-up) so it's retrievable from the-intern-data instead
+    // of an ephemeral Actions log; assert it actually lands on the branch.
+    it('pushes fileListing as file-listing.txt on the backup branch', async () => {
+      const work = newWorkDir('file-listing-persisted');
+      process.chdir(work);
+      await saveBackup('acme/widgets', '9', {
+        diffPatch: '',
+        commitsPatch: '',
+        fileListing: 'untracked files:\n[untracked] secret-plan.txt (42 bytes)',
+      });
+
+      const branchName = getBranchName('acme/widgets', '9');
+      const content = sh(`git show ${branchName}:file-listing.txt`, dataRemoteDir);
+      expect(content).toContain('[untracked] secret-plan.txt (42 bytes)');
+    });
+
+    it('does not clear the backup when only fileListing is present', async () => {
+      const work = newWorkDir('file-listing-only-not-cleared');
+      process.chdir(work);
+      await saveBackup('acme/widgets', '10', {
+        diffPatch: '',
+        commitsPatch: '',
+        fileListing: 'ahead commits (base=abc, commits-ahead=1):\nabc1234 big.bin (999 bytes)',
+      });
+
+      const branches = sh('git ls-remote --heads .', dataRemoteDir);
+      expect(branches).toContain(getBranchName('acme/widgets', '10'));
     });
   });
 
