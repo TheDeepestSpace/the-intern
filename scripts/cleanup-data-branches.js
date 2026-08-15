@@ -10,10 +10,11 @@ const { execSync } = require('child_process');
 const { resolveDataRepoRemoteUrl, redactUrl } = require('./data-repo-remote.js');
 const { getInstallationToken, getPrivateKey } = require('./mint-installation-token.js');
 
-// The org owning every target repo the-intern dispatches into. Because it
-// contains no hyphen, `<org>-<repo-with-hyphens>` unambiguously reverses back
-// to `<org>/<repo>` by splitting on the first occurrence of this prefix —
-// no need to guess where the sanitized "/" landed.
+// The org owning every target repo the-intern dispatches into. slugToOwnerRepo
+// strips this exact, known string as a literal prefix rather than splitting
+// the slug on its first hyphen, so recovery stays unambiguous regardless of
+// hyphens in either the org or repo name — don't swap in a hyphen-split
+// shortcut, that's what would actually break if TARGET_ORG ever gets one.
 const TARGET_ORG = 'TheDeepestSpace';
 const BRANCH_KINDS = ['summaries', 'workspace'];
 const FETCH_TIMEOUT_MS = 30_000;

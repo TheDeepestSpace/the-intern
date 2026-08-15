@@ -47,6 +47,10 @@ describe('slugToOwnerRepo', () => {
   it('returns null for the bare org prefix with nothing after it', () => {
     expect(slugToOwnerRepo('TheDeepestSpace-')).toBeNull();
   });
+
+  it('recovers correctly even when the org itself contains a hyphen', () => {
+    expect(slugToOwnerRepo('The-Deepest-Space-widgets', 'The-Deepest-Space')).toBe('The-Deepest-Space/widgets');
+  });
 });
 
 describe('parseCandidates', () => {
