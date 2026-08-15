@@ -199,6 +199,18 @@ describe('main', () => {
 
       await expect(main(envWithIssue, d)).resolves.not.toThrow();
     });
+
+    it('still posts a fallback comment when clearing the queued retry rejects', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+        updateEntries: vi.fn(() => Promise.reject(new Error('push rejected'))),
+        countIssueComments: vi.fn(() => Promise.resolve(2)),
+      });
+
+      await expect(main(envWithIssue, d)).resolves.not.toThrow();
+
+      expect(d.postIssueComment).toHaveBeenCalledWith('owner/repo', '42', 'Here is the answer.');
+    });
   });
 
   it('waits for updateEntries to resolve before pinging "resumed" on success', async () => {

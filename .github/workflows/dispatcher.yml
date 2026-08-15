@@ -317,10 +317,12 @@ jobs:
 
       # Baseline for handle-agent-outcome.js's silent-success backstop (issue #170): a
       # session can report is_error=false with a well-formed answer yet never actually
-      # call `gh` to post it. Comparing the comment count before vs. after the agent run
-      # is how that gets caught; captured here (rather than assumed to be 0) so a
-      # follow-up dispatch on an issue/PR that already has comments doesn't misread its
-      # own prior comments as "posted this session".
+      # call `gh` to post it. Comparing the bot's own comment count before vs. after the
+      # agent run is how that gets caught (scoped to the bot's login, not the total
+      # count, so a concurrent human/other-bot comment can't mask a genuinely silent
+      # session); captured here (rather than assumed to be 0) so a follow-up dispatch on
+      # an issue/PR that already has comments doesn't misread its own prior comments as
+      # "posted this session".
       - name: Capture starting comment count
         id: comment_baseline
         if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.issue_number != ''
@@ -329,7 +331,11 @@ jobs:
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
         run: |
-          COUNT=$(gh api "repos/$TARGET_REPO/issues/$ISSUE_NUMBER/comments" --paginate --jq '.[] | .id' | wc -l | tr -d ' ')
+          if ! IDS=$(gh api "repos/$TARGET_REPO/issues/$ISSUE_NUMBER/comments" --paginate --jq '.[] | select(.user.login == "the-intern-bot[bot]") | .id'); then
+            echo "::warning::Could not capture starting comment count; fallback comment check will be skipped."
+            exit 0
+          fi
+          COUNT=$(printf '%s\n' "$IDS" | sed '/^$/d' | wc -l | tr -d ' ')
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
       - name: Install script dependencies for Codex auth round-trip

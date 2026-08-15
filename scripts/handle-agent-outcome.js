@@ -45,14 +45,28 @@ function sendTelegram(chatId, text) {
   }
 }
 
-// Total comment count on the issue/PR right now, via the same REST endpoint
-// GitHub uses for both (issues and PRs share the /issues/{n}/comments
-// collection). --paginate walks every page so a thread with >30 comments
-// (the default page size) still counts accurately.
+// Login the-intern-bot's GitHub App comments (and this fallback's own posts)
+// show up under — every comment counted here or posted below goes through the
+// same installation token, so this is the identity to filter on.
+const BOT_LOGIN = 'the-intern-bot[bot]';
+
+// Count of the bot's own comments on the issue/PR right now, via the same
+// REST endpoint GitHub uses for both (issues and PRs share the
+// /issues/{n}/comments collection). --paginate walks every page so a thread
+// with >30 comments (the default page size) still counts accurately. Scoped
+// to BOT_LOGIN (not every comment on the thread) so a human or another
+// integration commenting mid-session can't be mistaken for the agent having
+// posted its own answer.
 function countIssueComments(targetRepo, issueNumber) {
   const out = execFileSync(
     'gh',
-    ['api', `repos/${targetRepo}/issues/${issueNumber}/comments`, '--paginate', '--jq', '.[] | .id'],
+    [
+      'api',
+      `repos/${targetRepo}/issues/${issueNumber}/comments`,
+      '--paginate',
+      '--jq',
+      `.[] | select(.user.login == "${BOT_LOGIN}") | .id`,
+    ],
     { encoding: 'utf8', timeout: 30_000 }
   );
   return out.split('\n').filter(Boolean).length;
@@ -131,9 +145,9 @@ async function main(env = process.env, deps = {}) {
       ({ removed } = await updateEntriesFn((entries) => resolveEntry(entries, retryKey)));
     } catch (err) {
       // A pending-retries git failure here must not turn a successful agent
-      // session into a failed workflow step.
+      // session into a failed workflow step, and must not skip the
+      // silent-success fallback check below.
       console.error(`::error::Could not clear the queued usage-limit retry: ${err.message}`);
-      return;
     }
     if (removed) {
       console.log(`Resolved queued retry for ${retryKey} (had used ${removed.retryCount}/${removed.maxRetries} retries).`);
