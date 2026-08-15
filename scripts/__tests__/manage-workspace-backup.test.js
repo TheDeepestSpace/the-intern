@@ -407,6 +407,36 @@ describe('manage-workspace-backup', () => {
         logSpy.mockRestore();
       }
     });
+
+    // Debugging aid requested alongside issue #167: when there's an ahead
+    // base and/or untracked files, the job log should show which files (per
+    // commit, and untracked) are contributing to the backup, with sizes —
+    // not the file contents themselves — so a bad ahead-base is diagnosable
+    // from the log without fetching commits.patch at all.
+    it('logs per-commit and untracked file listings with sizes, not file contents', () => {
+      const work = newWorkDir('file-listing-debug');
+      const baselineFile = path.join(tmpRoot, 'baseline-sha-listing.txt');
+      fs.writeFileSync(baselineFile, sh('git rev-parse HEAD', work) + '\n');
+
+      process.chdir(work);
+      fs.writeFileSync(path.join(work, 'committed.txt'), 'twelve bytes\n');
+      sh('git add committed.txt', work);
+      sh('git commit -m "unpushed commit with a file"', work);
+      fs.writeFileSync(path.join(work, 'untracked.txt'), 'nine chars\n');
+
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        collectWorkspaceState({ baselineShaFile: baselineFile });
+
+        const messages = logSpy.mock.calls.map(([msg]) => msg).join('\n');
+        expect(messages).toMatch(/committed\.txt \(\d+ bytes\)/);
+        expect(messages).toMatch(/\[untracked\] untracked\.txt \(\d+ bytes\)/);
+        expect(messages).not.toContain('twelve bytes');
+        expect(messages).not.toContain('nine chars');
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
   });
 
   describe('runBackupStep clearing behavior', () => {

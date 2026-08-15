@@ -171,6 +171,62 @@ function resolveAheadBase(baselineShaFile) {
   return '';
 }
 
+// Bounds the per-file debug listings below so an implausible ahead-base
+// (potentially thousands of unrelated commits/files, exactly the failure
+// mode being diagnosed) can't turn a cheap logging aid into a job-log flood
+// or a slow `git cat-file`-per-file loop.
+const MAX_LISTED_FILES = 200;
+
+// Debugging aid for diagnosing an implausible ahead-base (issue #167): logs
+// which file(s) each ahead commit touches, with the file's blob size at that
+// commit, straight into the job log — never the file contents themselves.
+// The point is to see *what* is inflating commits.patch without pushing (or
+// even reading into memory) the bytes that did it.
+function logAheadCommitFiles(base) {
+  const shas = runGit(`rev-list --reverse ${base}..HEAD`, { allowFailure: true });
+  if (!shas) return;
+
+  let listed = 0;
+  for (const sha of shas.split('\n')) {
+    if (listed >= MAX_LISTED_FILES) break;
+    const files = runGit(`show --pretty=format: --name-only ${sha}`, { allowFailure: true });
+    for (const file of files ? files.split('\n').filter(Boolean) : []) {
+      if (listed >= MAX_LISTED_FILES) break;
+      const size = runGit(`cat-file -s "${sha}:${file}"`, { allowFailure: true });
+      console.log(`workspace-backup:   ${sha.slice(0, 7)} ${file} (${size || 'unknown'} bytes)`);
+      listed++;
+    }
+  }
+  if (listed >= MAX_LISTED_FILES) {
+    console.log(`workspace-backup:   ... truncated after ${MAX_LISTED_FILES} files`);
+  }
+}
+
+// Same debugging aid as logAheadCommitFiles, for the other source of backup
+// content: files `git add -A` is about to stage that aren't tracked yet.
+// Must run before that `git add -A` — `ls-files --others` stops seeing a
+// file the moment it's staged.
+function logUntrackedFiles() {
+  const untracked = runGit('ls-files --others --exclude-standard', { allowFailure: true });
+  if (!untracked) return;
+
+  let listed = 0;
+  for (const file of untracked.split('\n')) {
+    if (listed >= MAX_LISTED_FILES) break;
+    let size = 'unknown';
+    try {
+      size = fs.statSync(file).size;
+    } catch {
+      // Deleted/renamed between ls-files and stat — fine, best-effort only.
+    }
+    console.log(`workspace-backup:   [untracked] ${file} (${size} bytes)`);
+    listed++;
+  }
+  if (listed >= MAX_LISTED_FILES) {
+    console.log(`workspace-backup:   ... truncated after ${MAX_LISTED_FILES} files`);
+  }
+}
+
 // Runs against whatever git repo is cwd (the target-repo checkout in
 // production). Stages everything so the diff below also picks up untracked
 // files, same as the design in issue #115. Neither git call here is allowed
@@ -180,6 +236,7 @@ function resolveAheadBase(baselineShaFile) {
 // would make the caller believe the tree is clean and delete any existing
 // backup instead of preserving it.
 function collectWorkspaceState({ baselineShaFile, maxCommitsPatchBytes = MAX_COMMITS_PATCH_BYTES } = {}) {
+  logUntrackedFiles();
   const pathspec = ['.', ...EXCLUDED_PATHS.map(p => `":(exclude)${p}"`)].join(' ');
   runGit(`add -A -- ${pathspec}`);
   const diffPatch = runGitToFile(`diff --cached HEAD --binary`, { trim: false });
@@ -189,6 +246,7 @@ function collectWorkspaceState({ baselineShaFile, maxCommitsPatchBytes = MAX_COM
   if (base) {
     const commitCount = runGit(`rev-list --count ${base}..HEAD`, { allowFailure: true }) || '(unknown)';
     console.log(`workspace-backup: ahead-base=${base} commits-ahead=${commitCount}`);
+    logAheadCommitFiles(base);
 
     const { tooLarge, size, content } = runGitToFileSized(
       `format-patch ${base}..HEAD --binary --stdout`,
