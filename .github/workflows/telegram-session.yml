@@ -284,7 +284,7 @@ jobs:
           # on-disk store instead of a stale env var (gh prefers env vars over
           # stored credentials, which would otherwise shadow every refresh).
           if command -v gh >/dev/null 2>&1; then
-            su dev -c 'echo "$GH_TOKEN" | gh auth login --with-token && gh auth setup-git'
+            INIT_TOKEN="$GH_TOKEN" env -u GH_TOKEN -u GITHUB_TOKEN su dev -c 'echo "$INIT_TOKEN" | gh auth login --with-token && gh auth setup-git'
           fi
 
           # Runs as this step's own (root) user, not as dev, so
