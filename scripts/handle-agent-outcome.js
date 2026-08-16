@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { detectUsageLimit } = require('./detect-usage-limit');
+const { detectStalledWait } = require('./detect-stalled-wait');
 const { updateEntries, buildDispatchPayload } = require('./manage-pending-retries');
 const { upsertStall, resolveEntry } = require('./pending-retries-store');
 const { saveCodexLog } = require('./manage-codex-log');
@@ -99,6 +100,7 @@ async function main(env = process.env, deps = {}) {
     sendTelegram: sendTelegramFn = sendTelegram,
     buildDispatchPayload: buildDispatchPayloadFn = buildDispatchPayload,
     detectUsageLimit: detectUsageLimitFn = detectUsageLimit,
+    detectStalledWait: detectStalledWaitFn = detectStalledWait,
     readResultText: readResultTextFn = readResultText,
     saveCodexLog: saveCodexLogFn = saveCodexLog,
     countIssueComments: countIssueCommentsFn = countIssueComments,
@@ -177,6 +179,20 @@ async function main(env = process.env, deps = {}) {
           console.error(`::warning::Fallback comment post to ${label} failed: ${err.message}`);
         }
       }
+    }
+
+    // Backstop for issue #173: a session can end cleanly on its own "waiting
+    // on X to finish" / "will check back" message — not an error, just false
+    // reassurance, since nothing ever re-enters a one-shot session to check
+    // on X. Flag it to the maintainer so the stranded work gets picked up
+    // manually; this doesn't block or alter anything the session already did.
+    const stalledWait = detectStalledWaitFn(text);
+    if (stalledWait) {
+      console.log(`::warning::Session on ${label} ended on a "waiting for X" style message ("${stalledWait.matchedText}") that nothing will resume automatically.`);
+      sendTelegramFn(
+        adminChatId,
+        `⚠️ the-intern-bot: ${label} ended its turn on a "waiting" message ("${stalledWait.matchedText}") but this was a one-shot session — nothing will check back on its own. Manual follow-up needed. Run: ${runUrl}`
+      );
     }
 
     return;
