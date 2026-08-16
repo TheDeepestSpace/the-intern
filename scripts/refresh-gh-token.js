@@ -41,11 +41,12 @@ async function mintToken(env = process.env) {
 // leak via a `ps` listing of argv.
 function applyToken(token, { env = process.env, exec = execFileSync } = {}) {
   console.log(`::add-mask::${token}`);
+  const path = env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
   exec('su', ['dev', '-c', 'echo "$REFRESHED_GH_TOKEN" | gh auth login --with-token'], {
     // Allowlisted, not spread from `env` — `su` without `-` preserves the
     // caller's environment, so spreading root's env here would hand
     // APP_ID/APP_PRIVATE_KEY straight to the dev user.
-    env: { PATH: env.PATH, REFRESHED_GH_TOKEN: token },
+    env: { PATH: path, REFRESHED_GH_TOKEN: token },
     stdio: ['ignore', 'ignore', 'ignore'],
   });
 }

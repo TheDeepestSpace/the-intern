@@ -48,6 +48,24 @@ RUN npm install -g @anthropic-ai/claude-code
 ARG CODEX_VERSION=0.146.0
 RUN npm install -g @openai/codex@${CODEX_VERSION}
 
+# Pre-install GitHub CLI (gh)
+ARG GH_CLI_VERSION=2.63.2
+ARG GH_TARBALL_HASH_X64="912fdb1ca29cb005fb746fc5d2b787a289078923a29d0f9ec19a0b00272ded00  gh_${GH_CLI_VERSION}_linux_amd64.tar.gz"
+ARG GH_TARBALL_HASH_ARM64="0f31e2a8549c64b5c1679f0b99ce5e0dac7c91da9e86f6246adb8805b0f0b4bb  gh_${GH_CLI_VERSION}_linux_arm64.tar.gz"
+RUN ARCH="$(uname -m)"; \
+    case "$ARCH" in \
+      x86_64) GH_ARCH="amd64"; GH_HASH="${GH_TARBALL_HASH_X64}" ;; \
+      aarch64|arm64) GH_ARCH="arm64"; GH_HASH="${GH_TARBALL_HASH_ARM64}" ;; \
+      *) echo "Unsupported architecture for gh: $ARCH" >&2; exit 1 ;; \
+    esac; \
+    GH_DIR="gh_${GH_CLI_VERSION}_linux_${GH_ARCH}"; \
+    cd /tmp && \
+    wget "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/${GH_DIR}.tar.gz" && \
+    echo "${GH_HASH}" | sha256sum -c && \
+    tar -xzf "${GH_DIR}.tar.gz" && \
+    install -m 0755 "${GH_DIR}/bin/gh" /usr/local/bin/gh && \
+    rm -rf "${GH_DIR}.tar.gz" "${GH_DIR}"
+
 # Prepare temp and workspace directories with wide permissions for GHA runner
 RUN mkdir -p /__w /github/workspace /tmp && \
     chmod -R 777 /__w /github /tmp 2>/dev/null || true
