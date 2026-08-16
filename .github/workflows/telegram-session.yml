@@ -287,6 +287,18 @@ jobs:
             INIT_TOKEN="$GH_TOKEN" env -u GH_TOKEN -u GITHUB_TOKEN su dev -c 'echo "$INIT_TOKEN" | gh auth login --with-token && gh auth setup-git'
           fi
 
+          # Seed the dev user's own global git identity — distinct from the
+          # root-owned /root/.gitconfig set for the tg-state clone earlier in
+          # this job, which the agent below (running as dev via su) never
+          # sees. Unlike dispatcher.yml's single-target-repo runs, this
+          # session isn't scoped to one repo it can set local config on, so
+          # it needs a global default for any repo it clones/commits to
+          # mid-session. Without this, an unset identity has previously led
+          # to a session improvising one, producing a commit author
+          # (missing the required [bot] suffix) GitHub couldn't resolve to
+          # the bot's account.
+          su dev -c 'git config --global user.name "the-intern-bot[bot]" && git config --global user.email "the-intern-bot[bot]@users.noreply.github.com"'
+
           # Runs as this step's own (root) user, not as dev, so
           # APP_ID/APP_PRIVATE_KEY never reach the dev user — the same
           # untrusted context the agent CLI runs in. Killed by PID as soon as
