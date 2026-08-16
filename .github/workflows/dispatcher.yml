@@ -365,6 +365,12 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ needs.detect-image.outputs.backend != 'codex' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          # Let the background token refresher below (issue #145) re-mint with
+          # the same scoping the initial "Mint installation token" step above
+          # used, once the token it minted expires past its fixed 1hr cap.
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          INSTALLATION_ID: ${{ needs.detect-image.outputs.installation_id }}
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
           COMMENT_COUNT_BEFORE: ${{ steps.comment_baseline.outputs.count }}
@@ -528,7 +534,35 @@ jobs:
           '
           chown dev:dev /tmp/run_as_dev.sh /tmp/extract-result.js /tmp/normalize-codex-result.js
 
-          env -u TG_BOT_TOKEN -u TG_ADMIN_CHAT_ID -u DATA_REPO_TOKEN su dev -c /tmp/run_as_dev.sh
+          # Authenticate the dev user's gh/git credential store once with the
+          # token minted above (issue #145) — separate from GH_TOKEN/GITHUB_TOKEN,
+          # which the su call below now strips before the agent CLI runs. `gh`
+          # and git (via `gh auth setup-git`'s credential helper) both re-read
+          # this on-disk store fresh on every invocation, so the background
+          # refresher below can keep it valid past GitHub's fixed 1hr
+          # installation-token cap without needing to reach the already-running
+          # agent process (re-exporting env vars mid-step doesn't propagate to
+          # an already-spawned process or its children).
+          su dev -c 'echo "$GH_TOKEN" | gh auth login --with-token && gh auth setup-git'
+
+          # Re-mints a token and rewrites that credential store every ~45min
+          # for the duration of the agent run below. Runs as this step's own
+          # (root) user, not as dev, so APP_ID/APP_PRIVATE_KEY never reach the
+          # dev user — the same untrusted context the agent CLI runs in.
+          # Killed by PID as soon as the agent process exits, before any
+          # always() cleanup steps.
+          node "$GITHUB_WORKSPACE/scripts/refresh-gh-token.js" &
+          REFRESHER_PID=$!
+          # su dev -c below runs under this step's default set -e, so a
+          # non-zero exit (e.g. the agent CLI failing) would skip straight
+          # past the kill/wait further down and leak the refresher process.
+          trap 'kill "$REFRESHER_PID" 2>/dev/null || true; wait "$REFRESHER_PID" 2>/dev/null || true' EXIT
+
+          env -u TG_BOT_TOKEN -u TG_ADMIN_CHAT_ID -u DATA_REPO_TOKEN -u APP_ID -u APP_PRIVATE_KEY -u GH_TOKEN -u GITHUB_TOKEN su dev -c /tmp/run_as_dev.sh
+
+          kill "$REFRESHER_PID" 2>/dev/null || true
+          wait "$REFRESHER_PID" 2>/dev/null || true
+          trap - EXIT
 
           # the agent's own gh calls are how it normally reports back; if the session
           # crashed or produced nothing usable, that never happens, so detect that
