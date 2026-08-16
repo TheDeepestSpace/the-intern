@@ -283,7 +283,9 @@ jobs:
           # (`env -u`) so its gh/git calls fall through to this refreshed
           # on-disk store instead of a stale env var (gh prefers env vars over
           # stored credentials, which would otherwise shadow every refresh).
-          su dev -c 'echo "$GH_TOKEN" | gh auth login --with-token && gh auth setup-git'
+          if command -v gh >/dev/null 2>&1; then
+            su dev -c 'echo "$GH_TOKEN" | gh auth login --with-token && gh auth setup-git'
+          fi
 
           # Runs as this step's own (root) user, not as dev, so
           # APP_ID/APP_PRIVATE_KEY never reach the dev user — the same
