@@ -544,7 +544,7 @@ jobs:
           # agent process (re-exporting env vars mid-step doesn't propagate to
           # an already-spawned process or its children).
           if command -v gh >/dev/null 2>&1; then
-            su dev -c 'echo "$GH_TOKEN" | gh auth login --with-token && gh auth setup-git'
+            INIT_TOKEN="$GH_TOKEN" env -u GH_TOKEN -u GITHUB_TOKEN su dev -c 'echo "$INIT_TOKEN" | gh auth login --with-token && gh auth setup-git'
           fi
 
           # Re-mints a token and rewrites that credential store every ~45min
