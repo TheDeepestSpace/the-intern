@@ -85,6 +85,7 @@ describe('main', () => {
       sendTelegram: vi.fn(),
       buildDispatchPayload: vi.fn(() => null),
       detectUsageLimit: vi.fn(() => null),
+      detectStalledWait: vi.fn(() => null),
       saveCodexLog: vi.fn(() => Promise.resolve()),
       countIssueComments: vi.fn(() => Promise.resolve(0)),
       postIssueComment: vi.fn(() => Promise.resolve()),
@@ -210,6 +211,67 @@ describe('main', () => {
       await expect(main(envWithIssue, d)).resolves.not.toThrow();
 
       expect(d.postIssueComment).toHaveBeenCalledWith('owner/repo', '42', 'Here is the answer.');
+    });
+  });
+
+  describe('stalled-wait backstop', () => {
+    it('pings the maintainer when the final text reads as a "waiting for X" message', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Waiting on the Playwright run to finish generating baselines.' })),
+        detectStalledWait: vi.fn(() => ({ matchedText: 'Waiting on' })),
+      });
+
+      await main(baseEnv, d);
+
+      expect(d.sendTelegram).toHaveBeenCalledTimes(1);
+      expect(d.sendTelegram.mock.calls[0][1]).toMatch(/ended its turn on a "waiting" message/);
+      expect(d.sendTelegram.mock.calls[0][1]).toContain('Waiting on');
+    });
+
+    it('does not ping when the final text does not match a stalled-wait pattern', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Opened PR #12.' })),
+        detectStalledWait: vi.fn(() => null),
+      });
+
+      await main(baseEnv, d);
+
+      expect(d.sendTelegram).not.toHaveBeenCalled();
+    });
+
+    it('still pings even when a new comment already landed on the issue/PR', async () => {
+      const envWithIssue = {
+        ...baseEnv,
+        TARGET_REPO: 'owner/repo',
+        ISSUE_NUMBER: '42',
+        COMMENT_COUNT_BEFORE: '2',
+      };
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Waiting on CI to finish.' })),
+        detectStalledWait: vi.fn(() => ({ matchedText: 'Waiting on' })),
+        countIssueComments: vi.fn(() => Promise.resolve(3)),
+      });
+
+      await main(envWithIssue, d);
+
+      expect(d.postIssueComment).not.toHaveBeenCalled();
+      expect(d.sendTelegram).toHaveBeenCalledTimes(1);
+      expect(d.sendTelegram.mock.calls[0][1]).toMatch(/ended its turn on a "waiting" message/);
+    });
+
+    it('also pings alongside the "resumed" ping when both a queued retry clears and the text stalls', async () => {
+      const entries = [{ key: baseEnv.RETRY_KEY, retryCount: 1, maxRetries: 3 }];
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Will check back once the build finishes.' })),
+        detectStalledWait: vi.fn(() => ({ matchedText: 'Will check back' })),
+        updateEntries: fakeUpdateEntries(entries),
+      });
+
+      await main(baseEnv, d);
+
+      expect(d.sendTelegram).toHaveBeenCalledTimes(2);
+      expect(d.sendTelegram.mock.calls[0][1]).toMatch(/resumed/);
+      expect(d.sendTelegram.mock.calls[1][1]).toMatch(/ended its turn on a "waiting" message/);
     });
   });
 
