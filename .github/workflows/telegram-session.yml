@@ -327,7 +327,7 @@ jobs:
               node /tmp/normalize-codex-result.js "$CODEX_EXIT" || true
               cp /tmp/result.json result.json 2>/dev/null || true
             else
-              claude -p "$PROMPT" --append-system-prompt "This is a one-shot headless run: no later turn will ever re-invoke you. Any background or async tool result you need must be polled to completion within this same turn, or it and the original request are permanently lost." --output-format json --dangerously-skip-permissions 2>&1 | tee result.json || true
+              claude -p "$PROMPT" --append-system-prompt "This is a one-shot headless run: no later turn will ever re-invoke you. Any background or async tool result you need must be polled to completion within this same turn, or it and the original request are permanently lost." --disallowedTools "Monitor,ScheduleWakeup,CronCreate,CronList,CronDelete" --output-format json --dangerously-skip-permissions 2>&1 | tee result.json || true
             fi
           '
 
