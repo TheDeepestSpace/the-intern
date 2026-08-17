@@ -72,6 +72,20 @@ export function telegramRequest({ update, headers = {} } = {}) {
   });
 }
 
+export function scheduledEvent(overrides = {}) {
+  return { cron: '*/5 * * * *', scheduledTime: 1234567890000, ...overrides };
+}
+
+// waitUntil just needs to capture the promise so tests can await it directly,
+// mirroring how Cloudflare keeps the Worker alive until it settles.
+export function fakeScheduledCtx() {
+  const promises = [];
+  return {
+    waitUntil: promise => promises.push(promise),
+    settled: () => Promise.all(promises),
+  };
+}
+
 // Shared handler for the access-token and dispatch branches used by both
 // mockGithubDispatchFlow and mockInstallationLookupAndDispatchFlow below.
 // When installationId is set, also serves the installation-id lookup
