@@ -493,7 +493,7 @@ jobs:
                   "node /tmp/normalize-codex-result.js \"$CODEX_EXIT\" || true",
                 ]
               : [
-                  "claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions 2>&1 | tee /tmp/result.json",
+                  "claude -p \"$PROMPT\" --append-system-prompt \"This is a one-shot headless run: no later turn will ever re-invoke you. Any background or async tool result you need must be polled to completion within this same turn, or it and the original request are permanently lost.\" --output-format json --dangerously-skip-permissions 2>&1 | tee /tmp/result.json",
                   "set -e",
                 ];
             // Stop-hook backstop (issue #69): wired via a per-user settings.json rather than a
