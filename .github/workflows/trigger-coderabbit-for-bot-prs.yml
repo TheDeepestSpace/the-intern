@@ -4,14 +4,22 @@ on:
   pull_request_target:
     types: [opened, ready_for_review]
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   trigger-review:
-    if: github.event.pull_request.user.type == 'Bot' && github.event.pull_request.draft == false
+    # Dependabot-triggered runs never receive repository secrets (only a
+    # read-only GITHUB_TOKEN), so CODERABBIT_TRIGGER_PAT wouldn't be
+    # available even if we let it through here.
+    if: |
+      github.event.pull_request.user.type == 'Bot' &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    concurrency:
+      group: trigger-coderabbit-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     steps:
       - name: Give CodeRabbit a moment to ingest the PR
         run: sleep 20
@@ -21,6 +29,18 @@ jobs:
         with:
           github-token: ${{ secrets.CODERABBIT_TRIGGER_PAT }}
           script: |
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const alreadyTriggered = comments.some(
+              (comment) => comment.body.trim() === '@coderabbitai full review'
+            );
+            if (alreadyTriggered) {
+              console.log('Review already requested for this PR, skipping.');
+              return;
+            }
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
