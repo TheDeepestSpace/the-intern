@@ -84,13 +84,17 @@ describe('parse-trigger', () => {
   });
 
   describe('repository_dispatch: pull_request_review_comment shape', () => {
-    it('extracts repo, PR number, and comment body', () => {
+    it('extracts repo, PR number, comment body, comment id, and event type', () => {
       process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
       process.env.GITHUB_EVENT_PATH = writeEventPayload({
+        action: 'pull_request_review_comment',
         client_payload: {
-          repository: { full_name: 'acme/widgets' },
-          pull_request: { number: 3 },
-          comment: { body: '@the-intern-bot agy address this' },
+          raw: {
+            action: 'pull_request_review_comment',
+            repository: { full_name: 'acme/widgets' },
+            pull_request: { number: 3 },
+            comment: { id: 555666777, body: '@the-intern-bot agy address this' },
+          },
         },
       });
 
@@ -98,6 +102,8 @@ describe('parse-trigger', () => {
 
       expect(result.issue_number).toBe('3');
       expect(result.comment_body).toBe('@the-intern-bot agy address this');
+      expect(result.comment_id).toBe('555666777');
+      expect(result.event_type).toBe('pull_request_review_comment');
     });
   });
 

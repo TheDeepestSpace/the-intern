@@ -30,6 +30,8 @@ jobs:
       clean_prompt: ${{ steps.parse.outputs.clean_prompt }}
       installation_id: ${{ steps.parse.outputs.installation_id }}
       backend: ${{ steps.resolve_backend.outputs.backend }}
+      event_type: ${{ steps.parse.outputs.event_type }}
+      comment_id: ${{ steps.parse.outputs.comment_id }}
       model: ${{ steps.parse.outputs.model }}
     steps:
       - name: Checkout agent-infra
@@ -377,6 +379,8 @@ jobs:
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
           COMMENT_COUNT_BEFORE: ${{ steps.comment_baseline.outputs.count }}
           CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
+          EVENT_TYPE: ${{ needs.detect-image.outputs.event_type }}
+          COMMENT_ID: ${{ needs.detect-image.outputs.comment_id }}
           SUMMARY_CONTEXT: ${{ steps.summary_context.outputs.summary }}
           WORKSPACE_RESTORED: ${{ steps.workspace_restore.outputs.restored }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
@@ -405,10 +409,15 @@ jobs:
             const comment = process.env.COMMENT_BODY || "";
             const style = process.env.STYLE_GUIDE || "";
             const workspaceRestored = process.env.WORKSPACE_RESTORED === "true";
+            const eventType = process.env.EVENT_TYPE || "";
+            const commentId = process.env.COMMENT_ID || "";
 
             let prompt = `You are @the-intern-bot working on repository ${repo}, issue/PR #${issue}.\nYou have access to the GitHub CLI (\x27gh\x27) and full git tools. Use \x27gh\x27 to post comments, inspect code, run tests, or open PRs as needed.\n\nThis is a headless, single-shot session: your final message is never shown to anyone. If the request is a question or otherwise doesn\x27t land a PR/issue that already carries the answer, you must explicitly post your answer as a \x27gh\x27 comment on #${issue} before ending your turn, or it is lost.\n\n`;
             if (workspaceRestored) {
               prompt += `Work from a previous incomplete run on this issue was restored into this checkout. It may be local commits that were never pushed, uncommitted working-tree changes, or both. Run \x27git status\x27 and \x27git log\x27 first, then continue, commit, or discard as appropriate.\n\n`;
+            }
+            if (eventType === "pull_request_review_comment" && commentId) {
+              prompt += `This request came from an inline PR review comment that is part of a review thread (comment id ${commentId}). You must reply within that same thread using:\ngh api -X POST repos/${repo}/pulls/${issue}/comments/${commentId}/replies -f body="..."\nrather than \x27gh pr comment\x27 / \x27gh issue comment\x27, which posts a new general PR comment and breaks thread continuity.\n\n`;
             }
             if (style) {
               prompt += `${style}\n\n`;
