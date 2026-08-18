@@ -1,0 +1,35 @@
+name: update Claude model list
+
+on:
+  schedule:
+    # Nightly. The model list changes at most a few times a month, so once a
+    # day is plenty — offset from ci.yaml's '0 6 * * *' and
+    # cleanup-data-branches.yml's '0 7 * * *' so the three nightly jobs don't
+    # collide on the same runner pool.
+    - cron: '0 8 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the-intern
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Update the-intern-data's model list
+        run: node scripts/update-model-list.js
+        env:
+          # Source of truth for the model table (issue #191) — must NOT be
+          # used to run a `claude -p` session that reasons about what models
+          # exist, only to call GET /v1/models directly.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Pushes the update to the-intern-data (issue #124's static PAT),
+          # and — if the-intern-data's default branch turns out to be
+          # protected against direct pushes — authenticates the fallback
+          # PR-create/merge calls too.
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}

@@ -30,6 +30,9 @@ jobs:
       clean_prompt: ${{ steps.parse.outputs.clean_prompt }}
       installation_id: ${{ steps.parse.outputs.installation_id }}
       backend: ${{ steps.resolve_backend.outputs.backend }}
+      event_type: ${{ steps.parse.outputs.event_type }}
+      comment_id: ${{ steps.parse.outputs.comment_id }}
+      model: ${{ steps.parse.outputs.model }}
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -362,6 +365,7 @@ jobs:
         working-directory: target
         env:
           BACKEND: ${{ needs.detect-image.outputs.backend }}
+          MODEL: ${{ needs.detect-image.outputs.model }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ needs.detect-image.outputs.backend != 'codex' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
@@ -375,6 +379,8 @@ jobs:
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
           COMMENT_COUNT_BEFORE: ${{ steps.comment_baseline.outputs.count }}
           CLEAN_PROMPT: ${{ needs.detect-image.outputs.clean_prompt }}
+          EVENT_TYPE: ${{ needs.detect-image.outputs.event_type }}
+          COMMENT_ID: ${{ needs.detect-image.outputs.comment_id }}
           SUMMARY_CONTEXT: ${{ steps.summary_context.outputs.summary }}
           WORKSPACE_RESTORED: ${{ steps.workspace_restore.outputs.restored }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
@@ -403,10 +409,15 @@ jobs:
             const comment = process.env.COMMENT_BODY || "";
             const style = process.env.STYLE_GUIDE || "";
             const workspaceRestored = process.env.WORKSPACE_RESTORED === "true";
+            const eventType = process.env.EVENT_TYPE || "";
+            const commentId = process.env.COMMENT_ID || "";
 
             let prompt = `You are @the-intern-bot working on repository ${repo}, issue/PR #${issue}.\nYou have access to the GitHub CLI (\x27gh\x27) and full git tools. Use \x27gh\x27 to post comments, inspect code, run tests, or open PRs as needed.\n\nThis is a headless, single-shot session: your final message is never shown to anyone. If the request is a question or otherwise doesn\x27t land a PR/issue that already carries the answer, you must explicitly post your answer as a \x27gh\x27 comment on #${issue} before ending your turn, or it is lost.\n\n`;
             if (workspaceRestored) {
               prompt += `Work from a previous incomplete run on this issue was restored into this checkout. It may be local commits that were never pushed, uncommitted working-tree changes, or both. Run \x27git status\x27 and \x27git log\x27 first, then continue, commit, or discard as appropriate.\n\n`;
+            }
+            if (eventType === "pull_request_review_comment" && commentId) {
+              prompt += `This request came from an inline PR review comment that is part of a review thread (comment id ${commentId}). You must reply within that same thread using:\ngh api -X POST repos/${repo}/pulls/${issue}/comments/${commentId}/replies -f body="..."\nrather than \x27gh pr comment\x27 / \x27gh issue comment\x27, which posts a new general PR comment and breaks thread continuity.\n\n`;
             }
             if (style) {
               prompt += `${style}\n\n`;
@@ -416,6 +427,12 @@ jobs:
             }
             prompt += `New request:\n${comment}`;
             fs.writeFileSync("/tmp/prompt.txt", prompt);
+            // Raw MODEL value, written here (trusted root context, before
+            // run_as_dev.sh is generated) so the generated script can read it
+            // into a shell variable rather than the value ever being
+            // interpolated directly into a command string — same reasoning as
+            // /tmp/prompt.txt above.
+            fs.writeFileSync("/tmp/model.txt", process.env.MODEL || "");
           '
 
           # Extraction logic written to its own file (not inlined via jq, which isn't guaranteed to
@@ -485,6 +502,27 @@ jobs:
             const fs = require("fs");
             const path = require("path");
             const backend = process.env.BACKEND === "codex" ? "codex" : "claude";
+            const agentInfraDir = path.dirname(process.env.TARGET_DIR || "");
+
+            // model= is free text from an issue/PR comment (parse-trigger.js). Only the
+            // claude branch supports it (codex'\''s model is hardcoded, out of scope);
+            // buildModelFlag allowlist-checks it and hands back a flag that references a
+            // shell variable rather than the raw value, so nothing gets interpolated
+            // straight into the command string below even after the allowlist check.
+            let claudeModelFlag = "";
+            let modelSetupLine = null;
+            if (backend === "claude") {
+              const { buildModelFlag } = require(path.join(agentInfraDir, "scripts", "build-model-flag.js"));
+              const modelResult = buildModelFlag(process.env.MODEL);
+              if (modelResult.warning) {
+                console.log(modelResult.warning);
+              }
+              if (modelResult.valid) {
+                claudeModelFlag = " " + modelResult.flag;
+                modelSetupLine = "MODEL=\"$(cat /tmp/model.txt)\"";
+              }
+            }
+
             const runLines = backend === "codex"
               ? [
                   "codex exec --dangerously-bypass-approvals-and-sandbox -c model=\\\"gpt-5.6-sol\\\" -c model_reasoning_effort=\\\"xhigh\\\" --json --output-last-message /tmp/codex-final.txt \"$PROMPT\" > /tmp/codex-events.jsonl 2>&1",
@@ -493,13 +531,12 @@ jobs:
                   "node /tmp/normalize-codex-result.js \"$CODEX_EXIT\" || true",
                 ]
               : [
-                  "claude -p \"$PROMPT\" --output-format json --dangerously-skip-permissions 2>&1 | tee /tmp/result.json",
+                  `claude -p \"$PROMPT\" --append-system-prompt \"This is a one-shot headless run: no later turn will ever re-invoke you. Any background or async tool result you need must be polled to completion within this same turn, or it and the original request are permanently lost.\" --disallowedTools \"Monitor,ScheduleWakeup,CronCreate,CronList,CronDelete\" --output-format json --dangerously-skip-permissions${claudeModelFlag} 2>&1 | tee /tmp/result.json`,
                   "set -e",
                 ];
             // Stop-hook backstop (issue #69): wired via a per-user settings.json rather than a
             // .claude/settings.json committed to the target repo, since the target checkout is
             // untrusted and this container is torn down after the run anyway.
-            const agentInfraDir = path.dirname(process.env.TARGET_DIR || "");
             const stopHookScript = path.join(agentInfraDir, "scripts", "check-stop-hook.js");
             const stopHookSettings = JSON.stringify({
               hooks: { Stop: [{ hooks: [{ type: "command", command: `node ${stopHookScript}`, timeout: 30 }] }] },
@@ -525,6 +562,7 @@ jobs:
               "git for-each-ref --format=\"%(objectname) %(refname)\" > /tmp/stop_hook_baseline_refs.txt 2>/dev/null || true",
               "date -u +%Y-%m-%dT%H:%M:%SZ > /tmp/stop_hook_session_start.txt 2>/dev/null || true",
               "PROMPT=\"$(cat /tmp/prompt.txt)\"",
+              ...(modelSetupLine ? [modelSetupLine] : []),
               "set +e",
               ...runLines,
               "node /tmp/extract-result.js || true",

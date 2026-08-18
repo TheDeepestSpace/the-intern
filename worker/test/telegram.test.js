@@ -55,6 +55,18 @@ describe('handleTelegram gating', () => {
     expect(await res.text()).toBe('ok');
   });
 
+  it('returns ok without dispatching for a non-image document with no text or caption', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const message = baseMessage({
+      text: undefined,
+      document: { file_id: 'doc-1', mime_type: 'application/pdf' },
+    });
+    const res = await worker.fetch(telegramRequest({ update: { message } }), baseTelegramEnv());
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('rejects requests with a bad secret token when TG_WEBHOOK_SECRET is configured', async () => {
     const res = await worker.fetch(
       telegramRequest({
@@ -155,6 +167,21 @@ describe('handleTelegram client_payload construction', () => {
     expect(payload).not.toHaveProperty('photo_file_id');
   });
 
+  it('sets photo_file_id from an image document sent without compression', async () => {
+    const fetchSpy = mockGithubDispatchFlow();
+    const message = baseMessage({
+      text: undefined,
+      caption: 'uncompressed image',
+      document: { file_id: 'doc-image', mime_type: 'image/jpeg' },
+    });
+    const res = await worker.fetch(telegramRequest({ update: { message } }), baseTelegramEnv());
+    expect(res.status).toBe(200);
+
+    const payload = await dispatchedClientPayload(fetchSpy);
+    expect(payload.photo_file_id).toBe('doc-image');
+    expect(payload.text).toBe('uncompressed image');
+  });
+
   it('includes reply_to_message fields, preferring reply text over reply caption', async () => {
     const fetchSpy = mockGithubDispatchFlow();
     const message = baseMessage({
@@ -182,6 +209,21 @@ describe('handleTelegram client_payload construction', () => {
     const payload = await dispatchedClientPayload(fetchSpy);
     expect(payload.reply_to_text).toBe('reply caption');
     expect(payload.reply_to_photo_file_id).toBe('r-largest');
+  });
+
+  it('sets reply_to_photo_file_id from an image document reply', async () => {
+    const fetchSpy = mockGithubDispatchFlow();
+    const message = baseMessage({
+      reply_to_message: {
+        message_id: 42,
+        caption: 'reply caption',
+        document: { file_id: 'r-doc-image', mime_type: 'image/png' },
+      },
+    });
+    await worker.fetch(telegramRequest({ update: { message } }), baseTelegramEnv());
+
+    const payload = await dispatchedClientPayload(fetchSpy);
+    expect(payload.reply_to_photo_file_id).toBe('r-doc-image');
   });
 
   it('omits reply_to_* fields when there is no reply_to_message', async () => {

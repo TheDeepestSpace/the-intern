@@ -9,6 +9,7 @@ function parseTrigger() {
   let commentBody = '';
   let installationId = '';
   let eventType = '';
+  let commentId = '';
 
   if (eventName === 'repository_dispatch') {
     let payload = {};
@@ -35,6 +36,7 @@ function parseTrigger() {
       targetRepo = payload.repository?.full_name || '';
       issueNumber = String(payload.pull_request.number || '');
       commentBody = payload.comment.body || '';
+      commentId = String(payload.comment?.id || '');
     } else if (payload.pull_request && payload.check_suite) {
       // ci_failure: synthesized instruction, no @the-intern-bot mention needed
       // since this bypasses the mention gate entirely (the stripping regex
@@ -122,6 +124,7 @@ function parseTrigger() {
     model,
     effort,
     event_type: eventType,
+    comment_id: commentId,
   };
 
   console.log('Parsed trigger:', JSON.stringify(result, null, 2));

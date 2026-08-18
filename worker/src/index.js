@@ -392,7 +392,8 @@ async function handleTelegram(request, env) {
 
   const update = await request.json();
   const message = update.message;
-  if (!message || (!message.text && !message.photo?.length)) {
+  const hasImageDocument = message?.document?.mime_type?.startsWith('image/');
+  if (!message || (!message.text && !message.photo?.length && !hasImageDocument)) {
     return new Response('ok', { status: 200 });
   }
 
@@ -439,6 +440,8 @@ async function handleTelegram(request, env) {
     if (message.photo && message.photo.length > 0) {
       // PhotoSize array is ordered smallest to largest.
       clientPayload.photo_file_id = message.photo[message.photo.length - 1].file_id;
+    } else if (hasImageDocument) {
+      clientPayload.photo_file_id = message.document.file_id;
     }
     if (message.reply_to_message) {
       const replyTo = message.reply_to_message;
@@ -447,6 +450,8 @@ async function handleTelegram(request, env) {
       if (replyTo.photo && replyTo.photo.length > 0) {
         // PhotoSize array is ordered smallest to largest.
         clientPayload.reply_to_photo_file_id = replyTo.photo[replyTo.photo.length - 1].file_id;
+      } else if (replyTo.document?.mime_type?.startsWith('image/')) {
+        clientPayload.reply_to_photo_file_id = replyTo.document.file_id;
       }
     }
 
