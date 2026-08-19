@@ -73,6 +73,27 @@ function countIssueComments(targetRepo, issueNumber) {
   return out.split('\n').filter(Boolean).length;
 }
 
+// A review-thread reply (gh api .../pulls/{n}/comments/{commentId}/replies)
+// lands in the pulls/{n}/comments collection, not issues/{n}/comments — so
+// countIssueComments above can't see it. When the triggering event was a
+// review comment, this checks for the bot's reply directly via
+// in_reply_to_id, so the silent-success backstop doesn't mistake a correctly
+// in-thread reply for a missing one and post a duplicate top-level comment.
+function countReviewCommentReplies(targetRepo, issueNumber, commentId) {
+  const out = execFileSync(
+    'gh',
+    [
+      'api',
+      `repos/${targetRepo}/pulls/${issueNumber}/comments`,
+      '--paginate',
+      '--jq',
+      `.[] | select(.user.login == "${BOT_LOGIN}" and .in_reply_to_id == ${Number(commentId)}) | .id`,
+    ],
+    { encoding: 'utf8', timeout: 30_000 }
+  );
+  return out.split('\n').filter(Boolean).length;
+}
+
 // Posts via `gh api` (not `gh issue comment`/`gh pr comment`) since the same
 // REST call works whether issueNumber is an issue or a PR — no need to know
 // which one it is. Passed as a single execFileSync argv entry, not through a
@@ -104,6 +125,7 @@ async function main(env = process.env, deps = {}) {
     readResultText: readResultTextFn = readResultText,
     saveCodexLog: saveCodexLogFn = saveCodexLog,
     countIssueComments: countIssueCommentsFn = countIssueComments,
+    countReviewCommentReplies: countReviewCommentRepliesFn = countReviewCommentReplies,
     postIssueComment: postIssueCommentFn = postIssueComment,
   } = deps;
 
@@ -116,6 +138,8 @@ async function main(env = process.env, deps = {}) {
   const adminChatId = env.TG_ADMIN_CHAT_ID || '';
   const maxRetries = resolveMaxRetries(env.MAX_RETRIES);
   const runUrl = env.RUN_URL || '';
+  const eventType = env.EVENT_TYPE || '';
+  const commentId = env.COMMENT_ID || '';
   // Number('') is 0, not NaN — guard explicitly so a skipped/failed baseline-capture
   // step (empty string) reads as "unknown" rather than a false "0 comments before".
   const commentCountBefore = env.COMMENT_COUNT_BEFORE ? Number(env.COMMENT_COUNT_BEFORE) : NaN;
@@ -165,18 +189,29 @@ async function main(env = process.env, deps = {}) {
     // against; skipped otherwise (e.g. telegram-session.yml calls, which don't
     // set TARGET_REPO/ISSUE_NUMBER here).
     if (targetRepo && issueNumber && text.trim() && Number.isFinite(commentCountBefore)) {
-      let commentCountAfter = null;
-      try {
-        commentCountAfter = await countIssueCommentsFn(targetRepo, issueNumber);
-      } catch (err) {
-        console.error(`::warning::Could not check whether ${label} received a comment this session: ${err.message}`);
-      }
-      if (commentCountAfter !== null && commentCountAfter <= commentCountBefore) {
-        console.log(`No new comment on ${label} after a successful session; posting the session's final answer as a fallback comment.`);
+      let repliedInThread = false;
+      if (eventType === 'pull_request_review_comment' && commentId) {
         try {
-          await postIssueCommentFn(targetRepo, issueNumber, text);
+          repliedInThread = (await countReviewCommentRepliesFn(targetRepo, issueNumber, commentId)) > 0;
         } catch (err) {
-          console.error(`::warning::Fallback comment post to ${label} failed: ${err.message}`);
+          console.error(`::warning::Could not check whether ${label} replied in its review thread: ${err.message}`);
+        }
+      }
+
+      if (!repliedInThread) {
+        let commentCountAfter = null;
+        try {
+          commentCountAfter = await countIssueCommentsFn(targetRepo, issueNumber);
+        } catch (err) {
+          console.error(`::warning::Could not check whether ${label} received a comment this session: ${err.message}`);
+        }
+        if (commentCountAfter !== null && commentCountAfter <= commentCountBefore) {
+          console.log(`No new comment on ${label} after a successful session; posting the session's final answer as a fallback comment.`);
+          try {
+            await postIssueCommentFn(targetRepo, issueNumber, text);
+          } catch (err) {
+            console.error(`::warning::Fallback comment post to ${label} failed: ${err.message}`);
+          }
         }
       }
     }
@@ -287,4 +322,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { readResultText, countIssueComments, postIssueComment, main };
+module.exports = { readResultText, countIssueComments, countReviewCommentReplies, postIssueComment, main };
