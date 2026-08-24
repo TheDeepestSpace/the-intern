@@ -88,6 +88,7 @@ describe('main', () => {
       detectStalledWait: vi.fn(() => null),
       saveCodexLog: vi.fn(() => Promise.resolve()),
       countIssueComments: vi.fn(() => Promise.resolve(0)),
+      countReviewCommentReplies: vi.fn(() => Promise.resolve(0)),
       postIssueComment: vi.fn(() => Promise.resolve()),
       ...overrides,
     };
@@ -211,6 +212,59 @@ describe('main', () => {
       await expect(main(envWithIssue, d)).resolves.not.toThrow();
 
       expect(d.postIssueComment).toHaveBeenCalledWith('owner/repo', '42', 'Here is the answer.');
+    });
+
+    describe('review-thread replies', () => {
+      const envFromReviewComment = { ...envWithIssue, EVENT_TYPE: 'pull_request_review_comment', COMMENT_ID: '999' };
+
+      it('does not post a duplicate top-level comment when the agent already replied in the review thread', async () => {
+        const d = deps({
+          readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+          countReviewCommentReplies: vi.fn(() => Promise.resolve(1)),
+        });
+
+        await main(envFromReviewComment, d);
+
+        expect(d.countReviewCommentReplies).toHaveBeenCalledWith('owner/repo', '42', '999');
+        expect(d.countIssueComments).not.toHaveBeenCalled();
+        expect(d.postIssueComment).not.toHaveBeenCalled();
+      });
+
+      it('falls back to the issue-comment count check when there is no reply in the review thread', async () => {
+        const d = deps({
+          readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+          countReviewCommentReplies: vi.fn(() => Promise.resolve(0)),
+          countIssueComments: vi.fn(() => Promise.resolve(2)),
+        });
+
+        await main(envFromReviewComment, d);
+
+        expect(d.postIssueComment).toHaveBeenCalledWith('owner/repo', '42', 'Here is the answer.');
+      });
+
+      it('falls back to the issue-comment count check when checking for a reply fails', async () => {
+        const d = deps({
+          readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+          countReviewCommentReplies: vi.fn(() => Promise.reject(new Error('gh api failed'))),
+          countIssueComments: vi.fn(() => Promise.resolve(2)),
+        });
+
+        await expect(main(envFromReviewComment, d)).resolves.not.toThrow();
+
+        expect(d.postIssueComment).toHaveBeenCalledWith('owner/repo', '42', 'Here is the answer.');
+      });
+
+      it('does not check for a review-thread reply for other event types', async () => {
+        const d = deps({
+          readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+          countIssueComments: vi.fn(() => Promise.resolve(2)),
+        });
+
+        await main({ ...envWithIssue, EVENT_TYPE: 'issue_comment' }, d);
+
+        expect(d.countReviewCommentReplies).not.toHaveBeenCalled();
+        expect(d.postIssueComment).toHaveBeenCalledWith('owner/repo', '42', 'Here is the answer.');
+      });
     });
   });
 
