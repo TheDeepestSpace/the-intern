@@ -8,7 +8,7 @@
   "devDependencies": {
     "undici": "^7.29.0",
     "vitest": "^4.1.10",
-    "wrangler": "^4.118.0"
+    "wrangler": "^4.125.0"
   },
   "overrides": {
     "undici": "^7.29.0",
