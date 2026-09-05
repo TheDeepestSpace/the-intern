@@ -543,6 +543,27 @@ describe('handleGitHub check_suite handling', () => {
     expect(dispatchCalls(fetchSpy)).toHaveLength(1);
   });
 
+  it('retries on the next delivery after a failed dispatch instead of deduping it', async () => {
+    const env = baseGithubEnv();
+    mockCheckSuiteDispatchFlow({ dispatchOk: false });
+
+    const first = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      env
+    );
+    expect(first.status).toBe(502);
+
+    const fetchSpy = mockCheckSuiteDispatchFlow();
+    fetchSpy.mockClear();
+    const second = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      env
+    );
+    expect(second.status).toBe(200);
+    expect(await second.text()).toBe('ok');
+    expect(dispatchCalls(fetchSpy)).toHaveLength(1);
+  });
+
   it('dispatches again for the same PR when a different commit sha fails', async () => {
     const fetchSpy = mockCheckSuiteDispatchFlow();
     const env = baseGithubEnv();

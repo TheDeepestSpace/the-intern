@@ -214,7 +214,6 @@ async function handleCheckSuite(payload, env) {
         deduped++;
         continue;
       }
-      await env.CI_FAILURE_DEDUP.put(dedupKey, '1', { expirationTtl: 60 * 60 * 24 * 14 });
 
       const dispatchRes = await dispatchRepoEvent(env, token, 'ci_failure', {
         repository: payload.repository,
@@ -227,6 +226,10 @@ async function handleCheckSuite(payload, env) {
         const errorText = await dispatchRes.text();
         return new Response(`dispatch failed: ${errorText}`, { status: 502 });
       }
+      // Marked only after a successful dispatch, so a failed delivery leaves
+      // the key unset and a subsequent retry (e.g. GitHub webhook redelivery)
+      // can still go through instead of being permanently deduped.
+      await env.CI_FAILURE_DEDUP.put(dedupKey, '1', { expirationTtl: 60 * 60 * 24 * 14 });
       dispatched++;
     }
 
