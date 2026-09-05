@@ -38,7 +38,24 @@ export function baseGithubEnv(overrides = {}) {
     APP_PRIVATE_KEY: TEST_PRIVATE_KEY,
     AGENT_INFRA_OWNER: 'TheDeepestSpace',
     AGENT_INFRA_REPO: 'the-intern',
+    CI_FAILURE_DEDUP: createFakeKvNamespace(),
     ...overrides,
+  };
+}
+
+// Minimal Map-backed stand-in for the CI_FAILURE_DEDUP Workers KV binding —
+// just enough of the {get, put} surface for handleCheckSuite's dedup check.
+// Reuse the same instance across calls (e.g. via a shared env object) to
+// exercise dedup persisting across separate webhook deliveries.
+export function createFakeKvNamespace() {
+  const store = new Map();
+  return {
+    async get(key) {
+      return store.has(key) ? store.get(key) : null;
+    },
+    async put(key, value) {
+      store.set(key, value);
+    },
   };
 }
 

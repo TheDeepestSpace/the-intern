@@ -152,8 +152,13 @@ async function handleGitHub(request, env) {
 
 // Auto-queues a fix-CI dispatch when a check suite fails on a PR the bot
 // itself opened, so it can fix its own broken PRs without a human comment.
-// No dedup/KV: a re-failing run on the same PR just re-dispatches, which is
-// the desired retry-until-fixed behavior.
+// Deduped per (PR, head commit sha) via the CI_FAILURE_DEDUP KV namespace,
+// since a same-repo bot PR commonly triggers both a `push` and a
+// `pull_request` Actions run for the identical head sha, producing two
+// check suites that would otherwise each fire their own ci_failure dispatch.
+// A *new* commit on the same PR still dispatches normally — retry-until-fixed
+// across distinct commits is preserved, only the same-commit double-fire is
+// suppressed. (handlePush below has no such double-trigger and stays KV-free.)
 async function handleCheckSuite(payload, env) {
   const checkSuite = payload.check_suite;
   const pullRequests = checkSuite?.pull_requests || [];
@@ -174,11 +179,20 @@ async function handleCheckSuite(payload, env) {
   const botLogin = (env.BOT_LOGIN || 'the-intern-bot[bot]').toLowerCase();
   const sourceOwner = payload.repository?.owner?.login;
   const sourceRepo = payload.repository?.name;
+  // checkSuite.head_sha is the commit this specific check suite actually ran
+  // against and just failed for. The freshly-fetched pullRequest.head.sha
+  // below reflects the PR's *current* head as of the API call, which can
+  // already be a newer commit if the bot pushed again in between — keying on
+  // that would misattribute (or wrongly dedupe) against a commit that hasn't
+  // even finished CI yet. checkSuite.head_sha is the authoritative "commit
+  // currently failing".
+  const sha = checkSuite.head_sha;
 
   try {
     const token = await getInstallationToken(env, installationId);
 
     let dispatched = 0;
+    let deduped = 0;
     for (const { number } of pullRequests) {
       const prRes = await fetch(
         `https://api.github.com/repos/${sourceOwner}/${sourceRepo}/pulls/${number}`,
@@ -195,6 +209,13 @@ async function handleCheckSuite(payload, env) {
 
       if ((pullRequest.user?.login || '').toLowerCase() !== botLogin) continue;
 
+      const dedupKey = `ci_failure:${sourceOwner}/${sourceRepo}#${number}@${sha}`;
+      if (await env.CI_FAILURE_DEDUP.get(dedupKey)) {
+        deduped++;
+        continue;
+      }
+      await env.CI_FAILURE_DEDUP.put(dedupKey, '1', { expirationTtl: 60 * 60 * 24 * 14 });
+
       const dispatchRes = await dispatchRepoEvent(env, token, 'ci_failure', {
         repository: payload.repository,
         pull_request: pullRequest,
@@ -209,10 +230,13 @@ async function handleCheckSuite(payload, env) {
       dispatched++;
     }
 
-    return new Response(
-      dispatched > 0 ? 'ok' : 'ignored: no bot-authored pull requests',
-      { status: 200 }
-    );
+    if (dispatched > 0) {
+      return new Response('ok', { status: 200 });
+    }
+    if (deduped > 0) {
+      return new Response('ignored: ci_failure already dispatched for this PR+commit', { status: 200 });
+    }
+    return new Response('ignored: no bot-authored pull requests', { status: 200 });
   } catch (err) {
     return new Response(`internal error: ${err.message}`, { status: 500 });
   }
@@ -222,8 +246,10 @@ async function handleCheckSuite(payload, env) {
 // leaves an open bot-authored PR unmergeable. GitHub has no webhook for "PR
 // became unmergeable" — mergeable_state is computed asynchronously and only
 // exposed by polling GET /pulls/{n}, which can return null mid-computation
-// (see pollMergeableState). No dedup/KV: a PR that's still dirty on the next
-// push just re-dispatches, same retry-until-fixed shape as handleCheckSuite.
+// (see pollMergeableState). No dedup/KV: a push only fires this once per PR
+// per push (unlike handleCheckSuite's push+pull_request double check-suite),
+// and a PR that's still dirty on the next push just re-dispatches, which is
+// the intended retry-until-fixed behavior.
 async function handlePush(payload, env) {
   const defaultBranch = payload.repository?.default_branch;
   const pushedBranch = (payload.ref || '').replace(/^refs\/heads\//, '');
