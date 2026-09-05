@@ -62,6 +62,49 @@ describe('data-repo-remote', () => {
       warnSpy.mockRestore();
     });
 
+    it('reuses the same url across retries on a transient "Internal Server Error", then succeeds', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const run = vi.fn()
+        .mockRejectedValueOnce(new Error('remote: Internal Server Error.'))
+        .mockImplementationOnce((url) => url);
+
+      const result = await runWithRetryOnNotFound('https://x-access-token:ghs_first@github.com/x.git', run, { retries: 3, retryBaseDelayMs: 0 });
+
+      expect(result).toBe('https://x-access-token:ghs_first@github.com/x.git');
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).toMatch(/transient error/);
+
+      warnSpy.mockRestore();
+    });
+
+    it.each([500, 502, 503])('reuses the same url across retries on a transient GitHub %i, then succeeds', async (status) => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const run = vi.fn()
+        .mockRejectedValueOnce(new Error(`fatal: unable to access 'https://github.com/x.git/': The requested URL returned error: ${status}`))
+        .mockImplementationOnce((url) => url);
+
+      const result = await runWithRetryOnNotFound('https://x-access-token:ghs_first@github.com/x.git', run, { retries: 3, retryBaseDelayMs: 0 });
+
+      expect(result).toBe('https://x-access-token:ghs_first@github.com/x.git');
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).toMatch(/transient error/);
+
+      warnSpy.mockRestore();
+    });
+
+    it('does not retry a permanent error that merely contains "500" as unrelated diagnostic text', async () => {
+      const run = vi.fn().mockRejectedValue(new Error("fatal: repository 'the-intern-data-500' does not exist"));
+
+      await expect(
+        runWithRetryOnNotFound('https://x-access-token:ghs_first@github.com/x.git', run, { retryBaseDelayMs: 0 })
+      ).rejects.toThrow(/does not exist/);
+      expect(run).toHaveBeenCalledTimes(1);
+    });
+
     it('gives up and throws the last error after exhausting retries on a persistent "Repository not found"', async () => {
       vi.spyOn(console, 'warn').mockImplementation(() => {});
 
