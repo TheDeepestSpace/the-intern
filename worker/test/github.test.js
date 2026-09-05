@@ -64,6 +64,7 @@ function checkSuitePayload(overrides = {}) {
       conclusion: 'failure',
       html_url: 'https://github.com/TheDeepestSpace/the-intern/pull/7/checks',
       pull_requests: [{ number: 7 }],
+      head_sha: 'head-sha',
     },
     ...overrides,
   };
@@ -513,6 +514,100 @@ describe('handleGitHub check_suite handling', () => {
     );
     expect(res.status).toBe(200);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('skips the dispatch when every failing check on head already fails on base', async () => {
+    const fetchSpy = mockCheckSuiteDispatchFlow({
+      checkRunsByRef: {
+        'head-sha': [{ name: 'lint', status: 'completed', conclusion: 'failure' }],
+        'base-sha': [{ name: 'lint', status: 'completed', conclusion: 'failure' }],
+      },
+    });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ignored: all failures pre-existing on base branch');
+
+    const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+    expect(dispatchCall).toBeUndefined();
+  });
+
+  it('dispatches when a failing check on head is new (not failing on base)', async () => {
+    const fetchSpy = mockCheckSuiteDispatchFlow({
+      checkRunsByRef: {
+        'head-sha': [
+          { name: 'lint', status: 'completed', conclusion: 'failure' },
+          { name: 'build', status: 'completed', conclusion: 'failure' },
+        ],
+        'base-sha': [{ name: 'lint', status: 'completed', conclusion: 'failure' }],
+      },
+    });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+
+    const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+    expect(dispatchCall).toBeTruthy();
+  });
+
+  it('fails open and dispatches when the check-runs lookup errors', async () => {
+    // No entries in checkRunsByRef means every check-runs GET 404s, so
+    // getFailingCheckNames returns null (unknown) and the guardrail must not
+    // block the dispatch.
+    const fetchSpy = mockCheckSuiteDispatchFlow({ checkRunsByRef: {} });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+
+    const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+    expect(dispatchCall).toBeTruthy();
+  });
+
+  it('fails open and dispatches when the head check-runs fetch rejects', async () => {
+    const fetchSpy = mockCheckSuiteDispatchFlow({ checkRunsThrowRefs: ['head-sha'] });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+
+    const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+    expect(dispatchCall).toBeTruthy();
+  });
+
+  it('fails open and dispatches when the base check-runs fetch rejects', async () => {
+    const fetchSpy = mockCheckSuiteDispatchFlow({
+      checkRunsByRef: { 'head-sha': [{ name: 'lint', status: 'completed', conclusion: 'failure' }] },
+      checkRunsThrowRefs: ['base-sha'],
+    });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+
+    const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+    expect(dispatchCall).toBeTruthy();
   });
 });
 
