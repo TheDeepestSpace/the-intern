@@ -74,6 +74,17 @@ function markSent() {
   }
 }
 
+// Telegram can return HTTP 200 with a body of { ok: false } for
+// application-level errors (e.g. bad chat_id), so res.ok (HTTP status alone)
+// isn't sufficient to confirm delivery before markSent().
+function isTelegramOk(resText) {
+  try {
+    return JSON.parse(resText).ok === true;
+  } catch {
+    return false;
+  }
+}
+
 async function postToTelegram(botToken, payload) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -130,11 +141,10 @@ async function sendTelegramMessage() {
   }
 
   const res = await postToTelegram(botToken, payload);
+  const resText = await res.text();
 
-  if (!res.ok) {
-    const errText = await res.text();
-
-    if (res.status === 400 && /can't parse entities/i.test(errText)) {
+  if (!res.ok || !isTelegramOk(resText)) {
+    if (res.status === 400 && /can't parse entities/i.test(resText)) {
       // Converter missed an edge case — fall back to a plain send rather
       // than dropping the message.
       const plainPayload = { chat_id: chatId, text: messageText };
@@ -142,17 +152,17 @@ async function sendTelegramMessage() {
         plainPayload.reply_parameters = replyParameters;
       }
       const plainRes = await postToTelegram(botToken, plainPayload);
-      if (plainRes.ok) {
+      const plainText = await plainRes.text();
+      if (plainRes.ok && isTelegramOk(plainText)) {
         markSent();
         console.log('Telegram message sent successfully (plain fallback).');
         return;
       }
-      const plainErrText = await plainRes.text();
-      console.error(`Telegram send failed (${plainRes.status}):`, plainErrText);
+      console.error(`Telegram send failed (${plainRes.status}):`, plainText);
       process.exit(1);
     }
 
-    console.error(`Telegram send failed (${res.status}):`, errText);
+    console.error(`Telegram send failed (${res.status}):`, resText);
     process.exit(1);
   }
 

@@ -82,6 +82,31 @@ describe('send-telegram', () => {
     expect(fs.existsSync(sentinel)).toBe(false);
   });
 
+  it('does not write the sentinel and exits 1 on HTTP 200 with ok: false', () => {
+    const sentinel = freshSentinelPath();
+    const { status, stderr } = runScript('send-telegram.js', {
+      env: {
+        TG_BOT_TOKEN: 'TESTTOKEN',
+        CHAT_ID: '555',
+        MESSAGE_TEXT: 'hello there',
+        TELEGRAM_SENT_SENTINEL_PATH: sentinel,
+      },
+      mockHttp: [
+        {
+          origin: 'https://api.telegram.org',
+          method: 'POST',
+          path: '/botTESTTOKEN/sendMessage',
+          statusCode: 200,
+          body: { ok: false, description: 'chat not found' },
+        },
+      ],
+    });
+
+    expect(status).toBe(1);
+    expect(stderr).toContain('chat not found');
+    expect(fs.existsSync(sentinel)).toBe(false);
+  });
+
   it('includes reply_parameters with allow_sending_without_reply when REPLY_TO_MESSAGE_ID is set', () => {
     let capturedBody = null;
     // MockAgent's reply() can be a function receiving the request; use it to
