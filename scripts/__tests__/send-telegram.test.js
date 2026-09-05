@@ -1,7 +1,21 @@
-import { describe, it, expect } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { describe, it, expect, afterEach } from 'vitest';
 import { runScript } from './helpers/run-script.js';
 
 describe('send-telegram', () => {
+  let sentinelPath;
+
+  afterEach(() => {
+    if (sentinelPath && fs.existsSync(sentinelPath)) fs.rmSync(sentinelPath);
+  });
+
+  function freshSentinelPath() {
+    sentinelPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-sent-')), 'telegram-sent');
+    return sentinelPath;
+  }
+
   it('sends a plain message and exits 0', () => {
     const { status, stdout } = runScript('send-telegram.js', {
       env: { TG_BOT_TOKEN: 'TESTTOKEN', CHAT_ID: '555', MESSAGE_TEXT: 'hello there' },
@@ -18,6 +32,54 @@ describe('send-telegram', () => {
 
     expect(status).toBe(0);
     expect(stdout).toContain('Telegram message sent successfully.');
+  });
+
+  it('writes the sentinel file on a successful send', () => {
+    const sentinel = freshSentinelPath();
+    const { status } = runScript('send-telegram.js', {
+      env: {
+        TG_BOT_TOKEN: 'TESTTOKEN',
+        CHAT_ID: '555',
+        MESSAGE_TEXT: 'hello there',
+        TELEGRAM_SENT_SENTINEL_PATH: sentinel,
+      },
+      mockHttp: [
+        {
+          origin: 'https://api.telegram.org',
+          method: 'POST',
+          path: '/botTESTTOKEN/sendMessage',
+          statusCode: 200,
+          body: { ok: true },
+        },
+      ],
+    });
+
+    expect(status).toBe(0);
+    expect(fs.existsSync(sentinel)).toBe(true);
+  });
+
+  it('does not write the sentinel file when the send fails', () => {
+    const sentinel = freshSentinelPath();
+    const { status } = runScript('send-telegram.js', {
+      env: {
+        TG_BOT_TOKEN: 'TESTTOKEN',
+        CHAT_ID: '555',
+        MESSAGE_TEXT: 'hello there',
+        TELEGRAM_SENT_SENTINEL_PATH: sentinel,
+      },
+      mockHttp: [
+        {
+          origin: 'https://api.telegram.org',
+          method: 'POST',
+          path: '/botTESTTOKEN/sendMessage',
+          statusCode: 401,
+          body: { ok: false, description: 'Unauthorized' },
+        },
+      ],
+    });
+
+    expect(status).toBe(1);
+    expect(fs.existsSync(sentinel)).toBe(false);
   });
 
   it('includes reply_parameters with allow_sending_without_reply when REPLY_TO_MESSAGE_ID is set', () => {

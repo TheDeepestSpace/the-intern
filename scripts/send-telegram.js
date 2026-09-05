@@ -58,6 +58,22 @@ function convertToken(token) {
 // send and plain-text fallback indefinitely.
 const REQUEST_TIMEOUT_MS = Number(process.env.TELEGRAM_REQUEST_TIMEOUT_MS) || 10_000;
 
+// Overridable via env for tests. telegram-session.yml's "Run agent" step
+// checks for this file after the agent exits to detect a forgotten/failed
+// send and fall back to delivering the session's final answer itself
+// (issue #201) — written on every successful send (including the plain-text
+// fallback below) so that backstop doesn't fire on top of a send that
+// already succeeded.
+const SENT_SENTINEL_PATH = process.env.TELEGRAM_SENT_SENTINEL_PATH || '/tmp/telegram-sent';
+
+function markSent() {
+  try {
+    fs.writeFileSync(SENT_SENTINEL_PATH, '');
+  } catch (err) {
+    console.error(`Warning: could not write sentinel file ${SENT_SENTINEL_PATH}: ${err.message}`);
+  }
+}
+
 async function postToTelegram(botToken, payload) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -127,6 +143,7 @@ async function sendTelegramMessage() {
       }
       const plainRes = await postToTelegram(botToken, plainPayload);
       if (plainRes.ok) {
+        markSent();
         console.log('Telegram message sent successfully (plain fallback).');
         return;
       }
@@ -139,6 +156,7 @@ async function sendTelegramMessage() {
     process.exit(1);
   }
 
+  markSent();
   console.log('Telegram message sent successfully.');
 }
 
