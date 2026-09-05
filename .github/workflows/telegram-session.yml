@@ -299,6 +299,12 @@ jobs:
           # the bot's account.
           su dev -c 'git config --global user.name "the-intern-bot[bot]" && git config --global user.email "the-intern-bot[bot]@users.noreply.github.com"'
 
+          # Reset the safety-net sentinel send-telegram.js writes on a
+          # successful send (issue #201) — the fallback check below only
+          # means anything if this run's own agent invocation had a chance to
+          # set it fresh, not a leftover from something earlier in the job.
+          rm -f /tmp/telegram-sent
+
           # Runs as this step's own (root) user, not as dev, so
           # APP_ID/APP_PRIVATE_KEY never reach the dev user — the same
           # untrusted context the agent CLI runs in. Killed by PID as soon as
@@ -334,6 +340,23 @@ jobs:
           kill "$REFRESHER_PID" 2>/dev/null || true
           wait "$REFRESHER_PID" 2>/dev/null || true
           trap - EXIT
+
+          # Safety net for a session that computed a full answer but forgot
+          # (or failed) to call send-telegram.js itself before its turn ended
+          # (issue #201) — that leaves the job exiting 0 with nothing ever
+          # reaching the user. send-telegram.js writes /tmp/telegram-sent on
+          # every successful send it makes (including mid-session ones), so
+          # its absence here means no send happened at all this run. Deliberately
+          # not trying to tell "sent something, but not the final answer" apart
+          # from "sent nothing" — any prior send is treated as sufficient.
+          if [ ! -f /tmp/telegram-sent ] && [ -n "$CHAT_ID" ]; then
+            IS_ERROR="$(jq -r 'if .is_error then "true" else "false" end' result.json 2>/dev/null || echo true)"
+            RESULT_TEXT="$(jq -r '.result // empty' result.json 2>/dev/null || true)"
+            if [ "$IS_ERROR" = "false" ] && [ -n "$RESULT_TEXT" ]; then
+              echo "::warning::No Telegram send detected during the session; sending its final answer as a fallback."
+              MESSAGE_TEXT="$RESULT_TEXT" node "$GITHUB_WORKSPACE/scripts/send-telegram.js" || echo "::warning::Fallback Telegram send failed."
+            fi
+          fi
 
           # See dispatcher.yml's matching step: detects a Claude usage-limit stall
           # (issue #100) and queues a pending-retries.json entry instead of leaving
