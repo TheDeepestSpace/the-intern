@@ -11,9 +11,4 @@ AGENT_INFRA_REPO = "the-intern"
 
 [[kv_namespaces]]
 binding = "CI_FAILURE_DEDUP"
-# PLACEHOLDER: run, once, from worker/ using the same Cloudflare account as
-# CLOUDFLARE_API_TOKEN/CLOUDFLARE_ACCOUNT_ID in .github/workflows/deploy-worker.yml:
-#   npx wrangler kv namespace create CI_FAILURE_DEDUP
-# then replace this id with the one it prints. Deploys will fail until this
-# placeholder is replaced with a real namespace id.
-id = "REPLACE_WITH_REAL_NAMESPACE_ID"
+id = "fcf245f1528e47f7a38215cc678977ba"
