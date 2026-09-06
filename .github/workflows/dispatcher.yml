@@ -345,21 +345,6 @@ jobs:
         if: needs.detect-image.outputs.backend == 'codex'
         run: npm ci --omit=dev --include=prod --no-audit --no-fund
 
-      # Personal-account Codex login (~/.codex/auth.json) is the only supported auth
-      # path for backend=codex — no API-key fallback. Restores the last-known-good
-      # auth.json from the CODEX_AUTH_JSON secret before the run; the matching
-      # write-back happens in "Persist refreshed Codex auth.json" below, after codex
-      # has had a chance to rotate it. See rotate-codex-auth.js for the full
-      # rationale and the log-masking measures — nothing in either step ever echoes
-      # token contents. Restore failures are logged but non-fatal so the job still
-      # reaches "Run agent" (which then fails cleanly on missing credentials) instead
-      # of aborting silently and skipping the failure-notification flow below.
-      - name: Restore Codex auth.json from secret
-        if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.backend == 'codex'
-        run: node scripts/rotate-codex-auth.js restore || echo "::warning::Codex auth.json restore failed; codex exec will fail without valid credentials"
-        env:
-          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
-
       # Factored out of "Run agent" (which used to do this inline, right before its
       # own su-to-dev calls) so this same dev:dev ownership can also be relied on by
       # the devcontainer postStartCommand step below (issue #207) — without either
@@ -398,6 +383,34 @@ jobs:
         timeout-minutes: 10
         continue-on-error: true
         run: TARGET_DIR="$(pwd)" node "$GITHUB_WORKSPACE/scripts/run-devcontainer-poststart.js"
+
+      # Personal-account Codex login (~/.codex/auth.json) is the only supported auth
+      # path for backend=codex — no API-key fallback. Restores the last-known-good
+      # auth.json from the CODEX_AUTH_JSON secret; the matching write-back happens in
+      # "Persist refreshed Codex auth.json" below, after codex has had a chance to
+      # rotate it. See rotate-codex-auth.js for the full rationale and the
+      # log-masking measures — nothing in either step ever echoes token contents.
+      #
+      # Deliberately placed after "Run devcontainer postStartCommand", not before
+      # (PR #208 review): postStartCommand runs arbitrary target-repo code as the
+      # dev user, and the earlier "Ensure dev user and workspace ownership" chown
+      # already made /home/dev (and everything under it) dev-owned before that step
+      # ran. Restoring auth.json only now — after postStartCommand has already run —
+      # means there's nothing under dev's ownership for it to read; the chown here
+      # then grants dev access to just this one file, immediately before "Run agent"
+      # (the only step that needs to read it) rather than for postStartCommand's
+      # entire runtime. Restore/chown failures are logged but non-fatal so the job
+      # still reaches "Run agent" (which then fails cleanly on missing credentials)
+      # instead of aborting silently and skipping the failure-notification flow below.
+      - name: Restore Codex auth.json from secret
+        if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.backend == 'codex'
+        run: |
+          node scripts/rotate-codex-auth.js restore || echo "::warning::Codex auth.json restore failed; codex exec will fail without valid credentials"
+          if [ -f "$CODEX_HOME/auth.json" ]; then
+            chown dev:dev "$CODEX_HOME/auth.json" || echo "::warning::Failed to chown Codex auth.json to dev; codex exec will fail to read it"
+          fi
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
 
       - name: Run agent (fresh session per trigger, as non-root user)
         if: needs.detect-image.outputs.target_repo != ''
