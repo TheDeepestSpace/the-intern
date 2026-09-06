@@ -84,13 +84,17 @@ describe('parse-trigger', () => {
   });
 
   describe('repository_dispatch: pull_request_review_comment shape', () => {
-    it('extracts repo, PR number, and comment body', () => {
+    it('extracts repo, PR number, comment body, comment id, and event type', () => {
       process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
       process.env.GITHUB_EVENT_PATH = writeEventPayload({
+        action: 'pull_request_review_comment',
         client_payload: {
-          repository: { full_name: 'acme/widgets' },
-          pull_request: { number: 3 },
-          comment: { body: '@the-intern-bot agy address this' },
+          raw: {
+            action: 'pull_request_review_comment',
+            repository: { full_name: 'acme/widgets' },
+            pull_request: { number: 3 },
+            comment: { id: 555666777, body: '@the-intern-bot agy address this' },
+          },
         },
       });
 
@@ -98,6 +102,8 @@ describe('parse-trigger', () => {
 
       expect(result.issue_number).toBe('3');
       expect(result.comment_body).toBe('@the-intern-bot agy address this');
+      expect(result.comment_id).toBe('555666777');
+      expect(result.event_type).toBe('pull_request_review_comment');
     });
   });
 
@@ -157,6 +163,34 @@ describe('parse-trigger', () => {
       expect(result.event_type).toBe('coderabbit_review');
       expect(result.comment_body).toBe(
         'CodeRabbit posted a review on PR #9 (https://github.com/acme/widgets/pull/9#pullrequestreview-1). Read it and address any actionable feedback.'
+      );
+      expect(result.clean_prompt).toBe(result.comment_body);
+    });
+  });
+
+  describe('repository_dispatch: merge_conflict shape', () => {
+    it('synthesizes a comment body from the mergeable_state and base ref', () => {
+      process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
+      process.env.GITHUB_EVENT_PATH = writeEventPayload({
+        action: 'merge_conflict',
+        client_payload: {
+          raw: {
+            installation: { id: 4242 },
+            repository: { full_name: 'acme/widgets' },
+            pull_request: { number: 9 },
+            merge_conflict: { mergeable_state: 'dirty', base_ref: 'main' },
+          },
+        },
+      });
+
+      const result = parseTrigger();
+
+      expect(result.target_repo).toBe('acme/widgets');
+      expect(result.issue_number).toBe('9');
+      expect(result.installation_id).toBe('4242');
+      expect(result.event_type).toBe('merge_conflict');
+      expect(result.comment_body).toBe(
+        "A push to main left this PR unmergeable (mergeable_state: dirty). Merge or rebase the latest default branch into this PR's branch, resolve the conflicts, and push the fix."
       );
       expect(result.clean_prompt).toBe(result.comment_body);
     });

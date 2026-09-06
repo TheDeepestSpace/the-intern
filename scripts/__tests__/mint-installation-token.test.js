@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { MockAgent, setGlobalDispatcher, getGlobalDispatcher } from 'undici';
-import { getInstallationToken, mintAppJwt, getPrivateKey } from '../mint-installation-token.js';
+import { getInstallationToken, mintAppJwt, getPrivateKey, parsePermissions } from '../mint-installation-token.js';
 
 // A throwaway RSA key generated fresh per test run; only used to exercise the
 // signing code path, never a real credential.
@@ -117,22 +117,237 @@ describe('mint-installation-token', () => {
       const client = agent.get('https://api.github.com');
       client
         .intercept({ method: 'GET', path: '/repos/acme/missing/installation' })
-        .reply(404, 'Not Found');
+        .reply(404, 'Not Found')
+        .times(1);
 
       await expect(
-        getInstallationToken({ appId: '123', privateKey: TEST_PRIVATE_KEY_PEM, targetRepo: 'acme/missing' })
+        getInstallationToken({
+          appId: '123',
+          privateKey: TEST_PRIVATE_KEY_PEM,
+          targetRepo: 'acme/missing',
+          retries: 1,
+        })
       ).rejects.toThrow('Could not determine installationId for repo: acme/missing');
     });
 
-    it('throws with the response body when token minting fails', async () => {
+    it('retries the installation lookup on a transient failure and succeeds', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+        .reply(404, 'remote: Repository not found.')
+        .times(2);
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+        .reply(200, { id: 555 });
+      client
+        .intercept({ method: 'POST', path: '/app/installations/555/access_tokens' })
+        .reply(201, { token: 'ghs_retriedtoken' });
+
+      const token = await getInstallationToken({
+        appId: '123',
+        privateKey: TEST_PRIVATE_KEY_PEM,
+        targetRepo: 'acme/widgets',
+        retries: 3,
+        retryDelayMs: 0,
+      });
+
+      expect(token).toBe('ghs_retriedtoken');
+    });
+
+    it('retries the installation lookup when fetch itself rejects and succeeds', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+        .replyWithError(new Error('getaddrinfo ENOTFOUND api.github.com'));
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+        .reply(200, { id: 555 });
+      client
+        .intercept({ method: 'POST', path: '/app/installations/555/access_tokens' })
+        .reply(201, { token: 'ghs_retriedtoken' });
+
+      const token = await getInstallationToken({
+        appId: '123',
+        privateKey: TEST_PRIVATE_KEY_PEM,
+        targetRepo: 'acme/widgets',
+        retries: 3,
+        retryDelayMs: 0,
+      });
+
+      expect(token).toBe('ghs_retriedtoken');
+    });
+
+    it('gives up after exhausting all retries on persistent lookup failure', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/missing/installation' })
+        .reply(404, 'Not Found')
+        .times(3);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      try {
+        await expect(
+          getInstallationToken({
+            appId: '123',
+            privateKey: TEST_PRIVATE_KEY_PEM,
+            targetRepo: 'acme/missing',
+            retries: 3,
+            retryDelayMs: 0,
+          })
+        ).rejects.toThrow('Could not determine installationId for repo: acme/missing');
+
+        expect(fetchSpy).toHaveBeenCalledTimes(3);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('fails immediately on a non-transient token-mint error without retrying', async () => {
       const client = agent.get('https://api.github.com');
       client
         .intercept({ method: 'POST', path: '/app/installations/999/access_tokens' })
-        .reply(401, 'Bad credentials');
+        .reply(401, 'Bad credentials')
+        .times(1);
 
-      await expect(
-        getInstallationToken({ appId: '123', privateKey: TEST_PRIVATE_KEY_PEM, installationId: '999' })
-      ).rejects.toThrow(/Token mint failed \(401\): Bad credentials/);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      try {
+        await expect(
+          getInstallationToken({
+            appId: '123',
+            privateKey: TEST_PRIVATE_KEY_PEM,
+            installationId: '999',
+            retries: 3,
+            retryDelayMs: 0,
+          })
+        ).rejects.toThrow(/Token mint failed \(401\): Bad credentials/);
+
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
+
+    it('gives up after exhausting all retries on a persistent transient token-mint failure', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'POST', path: '/app/installations/999/access_tokens' })
+        .reply(503, 'Service Unavailable')
+        .times(3);
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      try {
+        await expect(
+          getInstallationToken({
+            appId: '123',
+            privateKey: TEST_PRIVATE_KEY_PEM,
+            installationId: '999',
+            retries: 3,
+            retryDelayMs: 0,
+          })
+        ).rejects.toThrow(/Token mint failed \(503\): Service Unavailable/);
+
+        expect(fetchSpy).toHaveBeenCalledTimes(3);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('retries token minting on a transient failure and succeeds', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'POST', path: '/app/installations/999/access_tokens' })
+        .replyWithError(new Error('fetch failed'))
+        .times(2);
+      client
+        .intercept({ method: 'POST', path: '/app/installations/999/access_tokens' })
+        .reply(201, { token: 'ghs_mintretriedtoken' });
+
+      const token = await getInstallationToken({
+        appId: '123',
+        privateKey: TEST_PRIVATE_KEY_PEM,
+        installationId: '999',
+        retries: 3,
+        retryDelayMs: 0,
+      });
+
+      expect(token).toBe('ghs_mintretriedtoken');
+    });
+
+    it('scopes the access-token request body to the target repo and requested permissions', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({
+          method: 'POST',
+          path: '/app/installations/999/access_tokens',
+          body: (body) => {
+            const parsed = JSON.parse(body);
+            return (
+              Array.isArray(parsed.repositories) &&
+              parsed.repositories.length === 1 &&
+              parsed.repositories[0] === 'widgets' &&
+              JSON.stringify(parsed.permissions) === JSON.stringify({ contents: 'write' })
+            );
+          },
+        })
+        .reply(201, { token: 'ghs_scopedtoken' });
+
+      const token = await getInstallationToken({
+        appId: '123',
+        privateKey: TEST_PRIVATE_KEY_PEM,
+        installationId: '999',
+        targetRepo: 'acme/widgets',
+        permissions: { contents: 'write' },
+      });
+
+      expect(token).toBe('ghs_scopedtoken');
+    });
+
+    it('does not scope access-token request body to repositories when scopeToRepo is false, even if targetRepo is provided for lookup', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+        .reply(200, { id: 555 });
+      client
+        .intercept({
+          method: 'POST',
+          path: '/app/installations/555/access_tokens',
+          body: (body) => body === undefined || body === null,
+        })
+        .reply(201, { token: 'ghs_unscopedtoken' });
+
+      const token = await getInstallationToken({
+        appId: '123',
+        privateKey: TEST_PRIVATE_KEY_PEM,
+        targetRepo: 'acme/widgets',
+        scopeToRepo: false,
+      });
+
+      expect(token).toBe('ghs_unscopedtoken');
+    });
+  });
+
+  describe('parsePermissions', () => {
+    it('returns undefined when unset or empty', () => {
+      expect(parsePermissions(undefined)).toBeUndefined();
+      expect(parsePermissions('')).toBeUndefined();
+    });
+
+    it('returns the parsed object for valid JSON permissions', () => {
+      expect(parsePermissions('{"contents":"write"}')).toEqual({ contents: 'write' });
+    });
+
+    it('throws on invalid JSON', () => {
+      expect(() => parsePermissions('{not json')).toThrow(/Invalid PERMISSIONS/);
+    });
+
+    it.each(['null', 'false', '0', '"contents"', '[]'])(
+      'throws when parsed value %s is not a plain object',
+      (raw) => {
+        expect(() => parsePermissions(raw)).toThrow(/Invalid PERMISSIONS/);
+      }
+    );
   });
 });

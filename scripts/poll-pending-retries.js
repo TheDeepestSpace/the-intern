@@ -132,7 +132,7 @@ async function main(deps = {}) {
     return;
   }
 
-  const entries = readEntriesFn();
+  const entries = await readEntriesFn();
   const now = Date.now();
   const due = findDue(entries, now);
   console.log(`${due.length} of ${entries.length} pending retr${entries.length === 1 ? 'y is' : 'ies are'} due.`);
@@ -152,7 +152,7 @@ async function main(deps = {}) {
     if (entry.retryCount >= entry.maxRetries) {
       // Defense-in-depth: shouldn't normally happen (see pending-retries-store.js),
       // but don't let a stray entry poll forever.
-      updateEntriesFn((current) => removeExhausted(current, entry.key));
+      await updateEntriesFn((current) => removeExhausted(current, entry.key));
       notifyAdminFn(
         `🛑 the-intern-bot: giving up auto-resuming ${describeEntryFn(entry)} after ${entry.retryCount} retries — this may be a genuine bug, not a usage-limit reset. Manual re-trigger needed.`
       );
@@ -163,7 +163,7 @@ async function main(deps = {}) {
     // push then fails (or the job is cancelled), the entry must not stay due
     // and re-fire the same session on the next tick.
     try {
-      updateEntriesFn((current) => markFired(current, entry.key, { lockMs: LOCK_MS }));
+      await updateEntriesFn((current) => markFired(current, entry.key, { lockMs: LOCK_MS }));
     } catch (err) {
       console.error(`Could not lock ${describeEntryFn(entry)} before re-firing; skipping this tick: ${err.message}`);
       continue;
@@ -172,7 +172,7 @@ async function main(deps = {}) {
     const result = await processEntry(entry, token, { owner, repo }, { fireDispatch: fireDispatchFn, describeEntry: describeEntryFn });
 
     if (result.outcome === 'invalid') {
-      updateEntriesFn((current) => removeExhausted(current, entry.key));
+      await updateEntriesFn((current) => removeExhausted(current, entry.key));
       notifyAdminFn(
         `🛑 the-intern-bot: ${result.label} has an unsupported dispatch type and can never be re-fired. Removed from the queue — check pending-retries.json.`
       );

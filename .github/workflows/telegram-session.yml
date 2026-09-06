@@ -4,20 +4,57 @@ on:
     types: [telegram_message]
 
 permissions:
-  contents: write
+  # contents: write is no longer needed here — convo.md and pending-retries
+  # both persist to the-intern-data via a static DATA_REPO_TOKEN secret
+  # (issue #124), not this job's own GITHUB_TOKEN.
+  contents: read
 
 jobs:
-  respond:
+  parse-trigger:
     runs-on: ubuntu-latest
+    # Split out from `respond` so the backend is known before that job starts —
+    # a job's `concurrency:` group is resolved before any of its own steps run,
+    # so it can't reference a step output from within the same job.
+    outputs:
+      backend: ${{ steps.parse.outputs.backend }}
+      clean_text: ${{ steps.parse.outputs.clean_text }}
+    steps:
+      - name: Checkout agent-infra
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Parse backend from Telegram message
+        id: parse
+        run: node scripts/parse-telegram-trigger.js
+
+  respond:
+    needs: parse-trigger
+    runs-on: ubuntu-latest
+    # `data_token` (the-intern-data reach, issue #141) expires after 1 hour,
+    # non-configurably, and — unlike `token` above, which the background
+    # refresher in the "Run agent" step now keeps valid past that cap
+    # (issue #145) — has no equivalent refresh yet. Bound this job below that
+    # so a stuck agent run fails fast instead of limping on with an expired
+    # data_token for the rest of the default 6-hour job timeout.
+    timeout-minutes: 45
     # codex-backend runs need global serialization across the whole repo (not just
     # per-chat): codex proactively rotates its own refresh token in place, and
     # rotated refresh tokens are typically single-use, so an overlapping codex run
     # from here and from dispatcher.yml restoring/persisting CODEX_AUTH_JSON at once
-    # would race and strand each other on a stale token. `steps.*` outputs aren't
-    # available yet when this group is resolved, so the backend keyword is matched
-    # straight out of the raw event text.
+    # would race and strand each other on a stale token. So codex-backend chats
+    # share dispatcher.yml's the-intern-codex-auth group.
+    #
+    # Non-codex runs don't touch CODEX_AUTH_JSON, so they don't need that global
+    # group — they get their own the-intern-telegram group instead. They still need
+    # *some* single shared group (not per-chat) because every chat clones and
+    # pushes the same shared `telegram` branch on the-intern-data, so two different
+    # non-codex chats running concurrently can race to push convo.md. The push step
+    # below retries on rejection by fetching and rebasing, but that can't recover
+    # from a genuine rebase conflict, so serializing via one group avoids the race
+    # outright instead of relying on retries.
     concurrency:
-      group: ${{ contains(github.event.client_payload.text, 'backend=codex') && 'the-intern-codex-auth' || format('telegram-{0}', github.event.client_payload.chat_id) }}
+      group: ${{ needs.parse-trigger.outputs.backend == 'codex' && 'the-intern-codex-auth' || 'the-intern-telegram' }}
       cancel-in-progress: false
       queue: max
     container:
@@ -27,14 +64,19 @@ jobs:
       CODEX_HOME: /home/dev/.codex
     steps:
       - name: Checkout agent-infra
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Parse backend from Telegram message
-        id: parse
-        run: node scripts/parse-telegram-trigger.js
-
+      # Deliberately NOT scoped to TARGET_REPO (unlike dispatcher.yml's mint
+      # step) — a live Telegram chat session needs to act across every repo
+      # the App installation covers (the-intern, svsch, the-intern-testing,
+      # the-intern-data), e.g. commenting/reacting/dispatching on issues in
+      # other repos mid-conversation. This is a deliberate, user-requested
+      # reach vs. safety tradeoff for this workflow only; dispatcher.yml
+      # stays scoped to targetRepo since it only ever needs to act on the
+      # repo it was dispatched for.
       - name: Mint installation token
         id: token
         run: node scripts/mint-installation-token.js
@@ -42,12 +84,31 @@ jobs:
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           TARGET_REPO: ${{ github.repository }}
+          SCOPE_TO_REPO: 'false'
 
-      - name: Checkout telegram branch (create if missing)
+      # Gives the agent shell (issue #141) short-lived, single-repo-scoped
+      # read/write reach into the-intern-data, without exposing the
+      # long-lived DATA_REPO_TOKEN secret itself to agent-executed code.
+      # Scoped to just the contents permission the-intern-data operations
+      # need — without an explicit `permissions`, GitHub grants every
+      # permission the app installation has, not just what's used here.
+      - name: Mint installation token for the-intern-data
+        id: data_token
+        run: node scripts/mint-installation-token.js
         env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          TARGET_REPO: TheDeepestSpace/the-intern-data
+          PERMISSIONS: '{"contents":"write"}'
+
+      # the-intern-data is the sole store for conversation state (issue #112) —
+      # this repo's own telegram orphan branch is no longer read or written.
+      # Auth uses a static fine-grained PAT (issue #124), not a minted token.
+      - name: Checkout telegram branch on the-intern-data (create if missing)
+        env:
+          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
         run: |
-          REPO_URL="https://github.com/${{ github.repository }}.git"
+          REPO_URL="https://github.com/TheDeepestSpace/the-intern-data.git"
           git config --global user.name "the-intern-bot[bot]"
           git config --global user.email "the-intern-bot[bot]@users.noreply.github.com"
           git config --global --add safe.directory "*"
@@ -57,7 +118,7 @@ jobs:
           if git clone --branch telegram --single-branch "$REPO_URL" tg-state 2>/dev/null; then
             echo "Cloned existing telegram branch."
           else
-            echo "Creating orphan telegram branch..."
+            echo "Creating telegram branch on the-intern-data..."
             git clone "$REPO_URL" tg-state
             cd tg-state
             git checkout --orphan telegram
@@ -71,14 +132,14 @@ jobs:
           fi
 
       - name: Install script dependencies for Codex auth round-trip
-        if: steps.parse.outputs.backend == 'codex'
+        if: needs.parse-trigger.outputs.backend == 'codex'
         run: npm ci --omit=dev --include=prod --no-audit --no-fund
 
       # See dispatcher.yml's matching step for the full rationale — same
       # personal-account Codex login round-trip, just triggered from Telegram
       # instead of a GH comment.
       - name: Restore Codex auth.json from secret
-        if: steps.parse.outputs.backend == 'codex'
+        if: needs.parse-trigger.outputs.backend == 'codex'
         run: node scripts/rotate-codex-auth.js restore || echo "::warning::Codex auth.json restore failed; codex exec will fail without valid credentials"
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
@@ -86,18 +147,33 @@ jobs:
       - name: Run agent (fresh session with convo.md context)
         working-directory: tg-state
         env:
-          BACKEND: ${{ steps.parse.outputs.backend }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ steps.parse.outputs.backend != 'codex' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
+          BACKEND: ${{ needs.parse-trigger.outputs.backend }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ needs.parse-trigger.outputs.backend != 'codex' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
-          CLEAN_TEXT: ${{ steps.parse.outputs.clean_text }}
+          # Let the background token refresher below (issue #145) re-mint with
+          # the same scoping the initial "Mint installation token" step above
+          # used (unscoped, since this session can act across every repo the
+          # App installation covers), once that token expires past its fixed
+          # 1hr cap.
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          TARGET_REPO: ${{ github.repository }}
+          SCOPE_TO_REPO: 'false'
+          CLEAN_TEXT: ${{ needs.parse-trigger.outputs.clean_text }}
           RETRY_SOURCE: telegram
           WORKFLOW_FILE: telegram-session.yml
           DISPATCH_REF: ${{ github.ref_name }}
           MAX_RETRIES: 3
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Lets handle-agent-outcome.js's pending-retries read/write authenticate
+          # to the-intern-data (issue #124) — pending-retries.json now lives
+          # solely on the-intern-data. This is the freshly minted, single-repo-
+          # scoped, 1-hour token (issue #141), not the underlying secret — safe
+          # to pass through to the agent shell below.
+          DATA_REPO_TOKEN: ${{ steps.data_token.outputs.token }}
         run: |
           export MESSAGE="$CLEAN_TEXT"
           export CHAT_ID="$(jq -r '.client_payload.chat_id // empty' "$GITHUB_EVENT_PATH")"
@@ -137,21 +213,25 @@ jobs:
               if (err.code !== "ENOENT") throw err;
             }
 
+            // Truncates to the last N bytes on a line boundary, for prompt context
+            // only — the full content on disk (convo.md, read below) is what gets
+            // persisted back to the-intern-data.
+            function truncateForPrompt(content) {
+              const buffer = Buffer.from(content, "utf8");
+              const MAX_CONVO_BYTES = 20 * 1024;
+              if (buffer.length <= MAX_CONVO_BYTES) return content;
+              const start = buffer.length - MAX_CONVO_BYTES;
+              let contentStart = start;
+              if (start > 0 && buffer[start - 1] !== 0x0a) {
+                const firstNewline = buffer.indexOf(0x0a, start);
+                contentStart = firstNewline === -1 ? buffer.length : firstNewline + 1;
+              }
+              return buffer.subarray(contentStart).toString("utf8");
+            }
+
             let convo = "";
             try {
-              const buffer = fs.readFileSync("convo.md");
-              const MAX_CONVO_BYTES = 20 * 1024;
-              if (buffer.length > MAX_CONVO_BYTES) {
-                const start = buffer.length - MAX_CONVO_BYTES;
-                let contentStart = start;
-                if (start > 0 && buffer[start - 1] !== 0x0a) {
-                  const firstNewline = buffer.indexOf(0x0a, start);
-                  contentStart = firstNewline === -1 ? buffer.length : firstNewline + 1;
-                }
-                convo = buffer.subarray(contentStart).toString("utf8");
-              } else {
-                convo = buffer.toString("utf8");
-              }
+              convo = fs.readFileSync("convo.md", "utf8");
             } catch (err) {
               if (err.code !== "ENOENT") throw err;
             }
@@ -168,7 +248,8 @@ jobs:
               const photoPart = replyPhotoPath ? ` (photo attached: ${replyPhotoPath})` : "";
               replyNote = `\n\nThis message is a reply to Telegram message ${replyToMessageId}${textPart}${photoPart}`;
             }
-            const prompt = `${instructions}\n\n${style}\n\nPrior Conversation Summary (from convo.md):\n${convo}\n\nNew Telegram Message:\n${msg}${replyNote}${photoNote}`;
+            const promptConvo = truncateForPrompt(convo);
+            const prompt = `${instructions}\n\n${style}\n\nPrior Conversation Summary (from convo.md):\n${promptConvo}\n\nNew Telegram Message:\n${msg}${replyNote}${photoNote}`;
             fs.writeFileSync("/tmp/prompt.txt", prompt);
           '
 
@@ -193,14 +274,49 @@ jobs:
 
           id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
           chown -R dev:dev . /home/dev /tmp/prompt.txt /tmp/normalize-codex-result.js 2>/dev/null || true
-          su dev -c '
+
+          # Authenticate the dev user's gh/git credential store once with the
+          # token minted above (issue #145), then re-mint and rewrite it every
+          # ~45min for the duration of the agent run below — see
+          # dispatcher.yml's matching steps for the full rationale. GH_TOKEN/
+          # GITHUB_TOKEN are stripped from the agent's own env further down
+          # (`env -u`) so its gh/git calls fall through to this refreshed
+          # on-disk store instead of a stale env var (gh prefers env vars over
+          # stored credentials, which would otherwise shadow every refresh).
+          if command -v gh >/dev/null 2>&1; then
+            INIT_TOKEN="$GH_TOKEN" env -u GH_TOKEN -u GITHUB_TOKEN su dev -c 'echo "$INIT_TOKEN" | gh auth login --with-token && gh auth setup-git'
+          fi
+
+          # Seed the dev user's own global git identity — distinct from the
+          # root-owned /root/.gitconfig set for the tg-state clone earlier in
+          # this job, which the agent below (running as dev via su) never
+          # sees. Unlike dispatcher.yml's single-target-repo runs, this
+          # session isn't scoped to one repo it can set local config on, so
+          # it needs a global default for any repo it clones/commits to
+          # mid-session. Without this, an unset identity has previously led
+          # to a session improvising one, producing a commit author
+          # (missing the required [bot] suffix) GitHub couldn't resolve to
+          # the bot's account.
+          su dev -c 'git config --global user.name "the-intern-bot[bot]" && git config --global user.email "the-intern-bot[bot]@users.noreply.github.com"'
+
+          # Runs as this step's own (root) user, not as dev, so
+          # APP_ID/APP_PRIVATE_KEY never reach the dev user — the same
+          # untrusted context the agent CLI runs in. Killed by PID as soon as
+          # the agent process exits, before any always() cleanup steps.
+          node "$GITHUB_WORKSPACE/scripts/refresh-gh-token.js" &
+          REFRESHER_PID=$!
+          # su dev -c below runs under this step's default set -e, so a
+          # non-zero exit (e.g. the agent CLI failing) would skip straight
+          # past the kill/wait further down and leak the refresher process.
+          trap 'kill "$REFRESHER_PID" 2>/dev/null || true; wait "$REFRESHER_PID" 2>/dev/null || true' EXIT
+
+          env -u APP_ID -u APP_PRIVATE_KEY -u GH_TOKEN -u GITHUB_TOKEN su dev -c '
             export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"
             export TG_BOT_TOKEN="$TG_BOT_TOKEN"
             export CHAT_ID="$CHAT_ID"
             export REPLY_TO_MESSAGE_ID="$REPLY_TO_MESSAGE_ID"
-            export GH_TOKEN="$GH_TOKEN"
-            export GITHUB_TOKEN="$GITHUB_TOKEN"
             export BACKEND="$BACKEND"
+            export DATA_REPO_TOKEN="$DATA_REPO_TOKEN"
             export HOME="/home/dev"
             cd "$(pwd)"
 
@@ -211,9 +327,13 @@ jobs:
               node /tmp/normalize-codex-result.js "$CODEX_EXIT" || true
               cp /tmp/result.json result.json 2>/dev/null || true
             else
-              claude -p "$PROMPT" --output-format json --dangerously-skip-permissions 2>&1 | tee result.json || true
+              claude -p "$PROMPT" --append-system-prompt "This is a one-shot headless run: no later turn will ever re-invoke you. Any background or async tool result you need must be polled to completion within this same turn, or it and the original request are permanently lost." --disallowedTools "Monitor,ScheduleWakeup,CronCreate,CronList,CronDelete" --output-format json --dangerously-skip-permissions 2>&1 | tee result.json || true
             fi
           '
+
+          kill "$REFRESHER_PID" 2>/dev/null || true
+          wait "$REFRESHER_PID" 2>/dev/null || true
+          trap - EXIT
 
           # See dispatcher.yml's matching step: detects a Claude usage-limit stall
           # (issue #100) and queues a pending-retries.json entry instead of leaving
@@ -229,21 +349,40 @@ jobs:
       # why a mid-run failure can still leave a rotated, single-use refresh token
       # on disk that needs writing back regardless of outcome.
       - name: Persist refreshed Codex auth.json to secret
-        if: always() && steps.parse.outputs.backend == 'codex'
+        if: always() && needs.parse-trigger.outputs.backend == 'codex'
         run: node scripts/rotate-codex-auth.js persist
         env:
-          REPO_ADMIN_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
 
-      - name: Commit updated convo.md to telegram branch
+      - name: Commit updated convo.md to telegram branch on the-intern-data
         working-directory: tg-state
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
         run: |
           git config user.name "the-intern-bot[bot]"
           git config user.email "the-intern-bot[bot]@users.noreply.github.com"
-          git add convo.md || true
-          git commit -m "telegram: update convo.md $(date -u +%FT%TZ)" || echo "nothing to commit"
-          git push origin telegram
+          git add convo.md
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit 0
+          fi
+          git commit -m "telegram: update convo.md $(date -u +%FT%TZ)"
+
+          # The concurrency group above serializes all runs of this job, but the
+          # shared `telegram` branch can still be pushed to from elsewhere (e.g. a
+          # manual push). Fetch, rebase onto the latest tip, and retry instead of
+          # losing this update to a non-fast-forward rejection.
+          for attempt in 1 2 3 4 5; do
+            if git push origin telegram; then
+              exit 0
+            fi
+            echo "::warning::Push rejected (attempt $attempt/5); fetching and rebasing before retry."
+            git fetch origin telegram
+            git rebase origin/telegram
+          done
+          echo "::error::Failed to push convo.md to telegram branch after retries."
+          exit 1
 
   notify-failure:
     needs: respond
@@ -251,7 +390,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout agent-infra
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
