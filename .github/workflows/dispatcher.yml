@@ -345,18 +345,70 @@ jobs:
         if: needs.detect-image.outputs.backend == 'codex'
         run: npm ci --omit=dev --include=prod --no-audit --no-fund
 
+      # Factored out of "Run agent" (which used to do this inline, right before its
+      # own su-to-dev calls) so this same dev:dev ownership can also be relied on by
+      # the devcontainer postStartCommand step below (issue #207) — without either
+      # step duplicating a slightly-different copy of this logic.
+      - name: Ensure dev user and workspace ownership
+        if: needs.detect-image.outputs.target_repo != ''
+        working-directory: target
+        run: |
+          TARGET_DIR="$(pwd)"
+          # Ensure dev user exists and owns the workspace so it has write access
+          id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
+
+          if ! chown -R dev:dev "$TARGET_DIR" /tmp /home/dev; then
+            echo "::error::chown failed to grant the dev user write access to workspace directories"
+            exit 1
+          fi
+          if ! su dev -c "test -w '$TARGET_DIR/.git'"; then
+            echo "::error::dev user still lacks write access to $TARGET_DIR/.git after chown; aborting before git config"
+            ls -la "$TARGET_DIR/.git" 2>&1 || true
+            exit 1
+          fi
+
+      # Runs the target repo's `.devcontainer/devcontainer.json` postStartCommand
+      # (npm install, browser binary downloads, etc. — issue #207), the same thing
+      # an interactive devcontainer would run after creating the container. Confirmed
+      # concretely for svsch: its postStartCommand installs deps and Playwright's
+      # Chromium binary, neither of which a dispatched agent session previously had.
+      # Non-fatal by design (see run-devcontainer-poststart.js) and time-boxed here
+      # so a hung install in some target repo can't stall the whole workflow run —
+      # continue-on-error is a second line of defense for that same case, since a
+      # step killed by its own timeout-minutes can't be trusted to exit cleanly on
+      # its own.
+      - name: Run devcontainer postStartCommand
+        if: needs.detect-image.outputs.target_repo != ''
+        working-directory: target
+        timeout-minutes: 10
+        continue-on-error: true
+        run: TARGET_DIR="$(pwd)" node "$GITHUB_WORKSPACE/scripts/run-devcontainer-poststart.js"
+
       # Personal-account Codex login (~/.codex/auth.json) is the only supported auth
       # path for backend=codex — no API-key fallback. Restores the last-known-good
-      # auth.json from the CODEX_AUTH_JSON secret before the run; the matching
-      # write-back happens in "Persist refreshed Codex auth.json" below, after codex
-      # has had a chance to rotate it. See rotate-codex-auth.js for the full
-      # rationale and the log-masking measures — nothing in either step ever echoes
-      # token contents. Restore failures are logged but non-fatal so the job still
-      # reaches "Run agent" (which then fails cleanly on missing credentials) instead
-      # of aborting silently and skipping the failure-notification flow below.
+      # auth.json from the CODEX_AUTH_JSON secret; the matching write-back happens in
+      # "Persist refreshed Codex auth.json" below, after codex has had a chance to
+      # rotate it. See rotate-codex-auth.js for the full rationale and the
+      # log-masking measures — nothing in either step ever echoes token contents.
+      #
+      # Deliberately placed after "Run devcontainer postStartCommand", not before
+      # (PR #208 review): postStartCommand runs arbitrary target-repo code as the
+      # dev user, and the earlier "Ensure dev user and workspace ownership" chown
+      # already made /home/dev (and everything under it) dev-owned before that step
+      # ran. Restoring auth.json only now — after postStartCommand has already run —
+      # means there's nothing under dev's ownership for it to read; the chown here
+      # then grants dev access to just this one file, immediately before "Run agent"
+      # (the only step that needs to read it) rather than for postStartCommand's
+      # entire runtime. Restore/chown failures are logged but non-fatal so the job
+      # still reaches "Run agent" (which then fails cleanly on missing credentials)
+      # instead of aborting silently and skipping the failure-notification flow below.
       - name: Restore Codex auth.json from secret
         if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.backend == 'codex'
-        run: node scripts/rotate-codex-auth.js restore || echo "::warning::Codex auth.json restore failed; codex exec will fail without valid credentials"
+        run: |
+          node scripts/rotate-codex-auth.js restore || echo "::warning::Codex auth.json restore failed; codex exec will fail without valid credentials"
+          if [ -f "$CODEX_HOME/auth.json" ]; then
+            chown dev:dev "$CODEX_HOME/auth.json" || echo "::warning::Failed to chown Codex auth.json to dev; codex exec will fail to read it"
+          fi
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
 
@@ -477,18 +529,9 @@ jobs:
             fs.writeFileSync("/tmp/normalize-codex-result.js", lines.join("\n"));
           '
 
-          # Ensure dev user exists and owns the workspace so it has write access
-          id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
-
-          if ! chown -R dev:dev "$TARGET_DIR" /tmp /home/dev; then
-            echo "::error::chown failed to grant the dev user write access to workspace directories"
-            exit 1
-          fi
-          if ! su dev -c "test -w '$TARGET_DIR/.git'"; then
-            echo "::error::dev user still lacks write access to $TARGET_DIR/.git after chown; aborting before git config"
-            ls -la "$TARGET_DIR/.git" 2>&1 || true
-            exit 1
-          fi
+          # dev user creation + chown already happened in "Ensure dev user and
+          # workspace ownership" above, shared with the devcontainer postStartCommand
+          # step (issue #207).
 
           # Written to a file (rather than inlined into `su -c '...'`) to avoid fragile nested-quote
           # escaping — a previous inline version silently truncated the script at the jq filter's
