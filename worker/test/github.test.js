@@ -61,6 +61,7 @@ function checkSuitePayload(overrides = {}) {
       name: 'the-intern',
     },
     check_suite: {
+      head_sha: 'sha-abc123',
       conclusion: 'failure',
       html_url: 'https://github.com/TheDeepestSpace/the-intern/pull/7/checks',
       pull_requests: [{ number: 7 }],
@@ -513,6 +514,99 @@ describe('handleGitHub check_suite handling', () => {
     );
     expect(res.status).toBe(200);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  function dispatchCalls(fetchSpy) {
+    return fetchSpy.mock.calls.filter(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+  }
+
+  it('dedupes a second check-suite completion for the same PR + commit sha', async () => {
+    const fetchSpy = mockCheckSuiteDispatchFlow();
+    const env = baseGithubEnv();
+
+    const first = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      env
+    );
+    expect(first.status).toBe(200);
+    expect(await first.text()).toBe('ok');
+
+    const second = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      env
+    );
+    expect(second.status).toBe(200);
+    expect(await second.text()).toBe('ignored: ci_failure already dispatched for this PR+commit');
+
+    expect(dispatchCalls(fetchSpy)).toHaveLength(1);
+  });
+
+  it('retries on the next delivery after a failed dispatch instead of deduping it', async () => {
+    const env = baseGithubEnv();
+    mockCheckSuiteDispatchFlow({ dispatchOk: false });
+
+    const first = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      env
+    );
+    expect(first.status).toBe(502);
+
+    const fetchSpy = mockCheckSuiteDispatchFlow();
+    fetchSpy.mockClear();
+    const second = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      env
+    );
+    expect(second.status).toBe(200);
+    expect(await second.text()).toBe('ok');
+    expect(dispatchCalls(fetchSpy)).toHaveLength(1);
+  });
+
+  it('dispatches again for the same PR when a different commit sha fails', async () => {
+    const fetchSpy = mockCheckSuiteDispatchFlow();
+    const env = baseGithubEnv();
+
+    const first = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      env
+    );
+    expect(await first.text()).toBe('ok');
+
+    const second = await worker.fetch(
+      githubRequest({
+        eventType: 'check_suite',
+        body: checkSuitePayload({
+          check_suite: { ...checkSuitePayload().check_suite, head_sha: 'sha-def456' },
+        }),
+      }),
+      env
+    );
+    expect(await second.text()).toBe('ok');
+
+    expect(dispatchCalls(fetchSpy)).toHaveLength(2);
+  });
+
+  it('dispatches independently for two different PRs covered by the same check suite', async () => {
+    const fetchSpy = mockCheckSuiteDispatchFlow();
+    const env = baseGithubEnv();
+
+    const res = await worker.fetch(
+      githubRequest({
+        eventType: 'check_suite',
+        body: checkSuitePayload({
+          check_suite: {
+            ...checkSuitePayload().check_suite,
+            pull_requests: [{ number: 7 }, { number: 8 }],
+          },
+        }),
+      }),
+      env
+    );
+    expect(await res.text()).toBe('ok');
+
+    expect(dispatchCalls(fetchSpy)).toHaveLength(2);
   });
 });
 
