@@ -50,7 +50,7 @@ describe('readCodexEventsTail', () => {
   let tmpFile;
 
   afterEach(() => {
-    if (tmpFile && fs.existsSync(tmpFile)) fs.rmSync(tmpFile);
+    if (tmpFile) fs.rmSync(path.dirname(tmpFile), { recursive: true, force: true });
   });
 
   function write(content) {
