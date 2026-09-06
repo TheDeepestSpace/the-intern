@@ -150,6 +150,35 @@ async function handleGitHub(request, env) {
   }
 }
 
+// Returns the set of check-run names that are completed+failing (or timed
+// out) for a given ref, or null if the API call itself failed. Callers must
+// treat null as "unknown" and fail open (dispatch) rather than assume no
+// failures.
+async function getFailingCheckNames(owner, repo, ref, token) {
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/commits/${ref}/check-runs?per_page=100`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'the-intern-bot-relay',
+        },
+      }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    const runs = data.check_runs || [];
+    return new Set(
+      runs
+        .filter(r => r.status === 'completed' && ['failure', 'timed_out'].includes(r.conclusion))
+        .map(r => r.name)
+    );
+  } catch {
+    return null;
+  }
+}
+
 // Auto-queues a fix-CI dispatch when a check suite fails on a PR the bot
 // itself opened, so it can fix its own broken PRs without a human comment.
 // Deduped per (PR, head commit sha) via the CI_FAILURE_DEDUP KV namespace,
@@ -159,6 +188,12 @@ async function handleGitHub(request, env) {
 // A *new* commit on the same PR still dispatches normally — retry-until-fixed
 // across distinct commits is preserved, only the same-commit double-fire is
 // suppressed. (handlePush below has no such double-trigger and stays KV-free.)
+//
+// Guardrail: if every failing check on the PR's head is already failing on
+// its base branch, the breakage is pre-existing (e.g. a shared transitive
+// CVE) rather than something this PR's diff introduced — skip the dispatch
+// so multiple bot PRs don't independently "fix" the same base-branch issue
+// (see #109). Fails open (dispatches) when the check-runs lookup errors.
 async function handleCheckSuite(payload, env) {
   const checkSuite = payload.check_suite;
   const pullRequests = checkSuite?.pull_requests || [];
@@ -193,6 +228,7 @@ async function handleCheckSuite(payload, env) {
 
     let dispatched = 0;
     let deduped = 0;
+    let skippedPreExisting = 0;
     for (const { number } of pullRequests) {
       const prRes = await fetch(
         `https://api.github.com/repos/${sourceOwner}/${sourceRepo}/pulls/${number}`,
@@ -213,6 +249,17 @@ async function handleCheckSuite(payload, env) {
       if (await env.CI_FAILURE_DEDUP.get(dedupKey)) {
         deduped++;
         continue;
+      }
+
+      const headFailures = await getFailingCheckNames(sourceOwner, sourceRepo, checkSuite.head_sha, token);
+      if (headFailures && headFailures.size > 0 && pullRequest.base?.sha) {
+        const baseFailures = await getFailingCheckNames(sourceOwner, sourceRepo, pullRequest.base.sha, token);
+        if (baseFailures && [...headFailures].every(name => baseFailures.has(name))) {
+          // Every failing check already fails on the base branch too - pre-existing
+          // breakage, not something this PR introduced. Skip the fix-dispatch.
+          skippedPreExisting++;
+          continue;
+        }
       }
 
       const dispatchRes = await dispatchRepoEvent(env, token, 'ci_failure', {
@@ -238,6 +285,9 @@ async function handleCheckSuite(payload, env) {
     }
     if (deduped > 0) {
       return new Response('ignored: ci_failure already dispatched for this PR+commit', { status: 200 });
+    }
+    if (skippedPreExisting > 0) {
+      return new Response('ignored: all failures pre-existing on base branch', { status: 200 });
     }
     return new Response('ignored: no bot-authored pull requests', { status: 200 });
   } catch (err) {
@@ -322,6 +372,9 @@ async function handlePush(payload, env) {
       dispatched++;
     }
 
+    if (dispatched > 0) {
+      return new Response('ok', { status: 200 });
+    }
     return new Response(
       dispatched > 0 ? 'ok' : 'ignored: no bot-authored pull requests became unmergeable',
       { status: 200 }
