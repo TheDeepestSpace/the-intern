@@ -2,8 +2,13 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
 const path = require('path');
+const { resolveDataRepoRemoteUrl, redactUrl, runWithRetryOnNotFound } = require('./data-repo-remote.js');
 
 const SUPPORTED_BACKENDS = new Set(['claude', 'codex']);
+
+// Session/conversation data storage (issue #112): the-intern-data is the sole
+// home for session summaries — the-intern's own orphan branches are no longer
+// read or written (cut over after the-intern-data was confirmed populated).
 
 function sanitizeSlug(repo) {
   return repo.replace(/[^a-zA-Z0-9_-]/g, '-');
@@ -23,7 +28,8 @@ function runGit(cmd, options = {}) {
     return execSync(`git ${cmd}`, { encoding: 'utf8', ...execOptions }).trim();
   } catch (err) {
     if (allowFailure) return '';
-    throw new Error(`git ${cmd} failed: ${(err.stderr || err.message || '').toString().trim()}`);
+    const detail = (err.stderr || err.message || '').toString().trim();
+    throw new Error(`git ${redactUrl(cmd)} failed: ${redactUrl(detail)}`);
   }
 }
 
@@ -49,13 +55,24 @@ function writeOutput(name, value) {
   }
 }
 
-function fetchLatestSummary(targetRepo, issueNumber) {
-  if (!targetRepo || !issueNumber) return { content: '', filename: '' };
-  ensureSafeDirectory();
+async function fetchLatestSummaryFromDataRepo(targetRepo, issueNumber, remoteUrl) {
   const branchName = getBranchName(targetRepo, issueNumber);
 
-  // Fetch branch from origin if available (it may legitimately not exist yet)
-  runGit(`fetch origin ${branchName}:${branchName}`, { allowFailure: true });
+  // Fetch branch from the-intern-data if available (it may legitimately not exist yet)
+  try {
+    await runWithRetryOnNotFound(remoteUrl, (url) => runGit(`fetch ${url} ${branchName}:${branchName}`));
+  } catch (err) {
+    // "couldn't find remote ref" means no prior summary was ever saved for
+    // this issue — that's expected and silent. Any other fetch error (auth,
+    // network, ref-update) must not read a possibly-stale/absent local
+    // branch below, so both cases return here, but only the latter warns.
+    if (!/couldn't find remote ref/i.test(err.message)) {
+      console.warn(`::warning::Could not fetch prior summary branch ${branchName}: ${err.message}`);
+    } else {
+      console.log(`No prior summary branch found for ${branchName}`);
+    }
+    return { content: '', filename: '' };
+  }
 
   // Each save adds one summary in its own commit. Read the file added by the
   // branch tip so same-millisecond filenames remain ordered by persistence,
@@ -71,20 +88,36 @@ function fetchLatestSummary(targetRepo, issueNumber) {
 
   const filename = fileList[fileList.length - 1];
   const content = runGit(`show ${branchName}:${filename}`, { allowFailure: true });
-
-  console.log(`Retrieved prior summary from ${filename}`);
   return { content, filename };
 }
 
-function fetchSummary(targetRepo, issueNumber) {
-  const { content } = fetchLatestSummary(targetRepo, issueNumber);
+async function fetchLatestSummary(targetRepo, issueNumber) {
+  if (!targetRepo || !issueNumber) return { content: '', filename: '' };
+  ensureSafeDirectory();
+
+  let remoteUrl;
+  try {
+    remoteUrl = await resolveDataRepoRemoteUrl();
+  } catch (err) {
+    console.warn(`Skipping the-intern-data fetch: ${err.message}`);
+    return { content: '', filename: '' };
+  }
+  if (!remoteUrl) return { content: '', filename: '' };
+
+  const result = await fetchLatestSummaryFromDataRepo(targetRepo, issueNumber, remoteUrl);
+  if (result.content) console.log(`Retrieved prior summary from the-intern-data: ${result.filename}`);
+  return result;
+}
+
+async function fetchSummary(targetRepo, issueNumber) {
+  const { content } = await fetchLatestSummary(targetRepo, issueNumber);
   if (content) writeOutput('summary', content);
 
   return content;
 }
 
-function fetchBackend(targetRepo, issueNumber) {
-  const { content } = fetchLatestSummary(targetRepo, issueNumber);
+async function fetchBackend(targetRepo, issueNumber) {
+  const { content } = await fetchLatestSummary(targetRepo, issueNumber);
   const match = content.match(/^- \*\*Backend\*\*:\s*(\S+)\s*$/mi);
   const backend = normalizeBackend(match?.[1]);
 
@@ -102,24 +135,21 @@ function resolveBackend(requestedBackend, backendExplicit, persistedBackend) {
   return normalizeBackend(candidate) || 'claude';
 }
 
-function saveSummary(targetRepo, issueNumber, promptText, resultText, backend) {
-  if (!targetRepo || !issueNumber) return;
-  if (!/^[1-9]\d*$/.test(String(issueNumber))) {
-    console.error(`Refusing to save summary: invalid issue number "${issueNumber}"`);
-    process.exitCode = 1;
-    return;
-  }
+// Pushes one summary commit to the per-issue orphan branch on the-intern-data.
+// Sets process.exitCode = 1 on failure — there is no fallback store, so a
+// failed save here is a real data-loss event, not a soft-degrade.
+async function saveSummaryToDataRepo(targetRepo, issueNumber, promptText, resultText, backend, remoteUrl) {
   ensureSafeDirectory();
   const branchName = getBranchName(targetRepo, issueNumber);
   const repoSlug = sanitizeSlug(targetRepo);
   const dirPath = path.join('summaries', repoSlug, String(issueNumber));
-  const hasToken = !!(process.env.GITHUB_TOKEN || process.env.GH_TOKEN);
   const effectiveBackend = normalizeBackend(backend) || 'claude';
 
   // Concurrent runs (e.g. fetch + save jobs racing on the same issue) can push
   // to this branch between our fetch and our push, so a couple of retries
   // absorb the ordinary non-fast-forward rejection instead of failing the step.
   const maxAttempts = 3;
+  let builtContent = '';
 
   try {
     runGit('config user.name "the-intern-bot[bot]"');
@@ -131,7 +161,10 @@ function saveSummary(targetRepo, issueNumber, promptText, resultText, backend) {
         // re-fetch the branch's current tip before rebuilding our commit on it.
         runGit('checkout --detach');
         runGit(`branch -D ${branchName}`);
-        runGit(`fetch origin ${branchName}:${branchName}`);
+        await runWithRetryOnNotFound(remoteUrl, (url) => {
+          remoteUrl = url;
+          return runGit(`fetch ${url} ${branchName}:${branchName}`);
+        });
       }
 
       // Create the orphan branch, or switch to it if a prior run already created it
@@ -160,6 +193,7 @@ ${promptText || 'N/A'}
 ## Execution Output
 ${resultText || 'N/A'}
 `;
+      builtContent = summaryContent;
 
       fs.mkdirSync(dirPath, { recursive: true });
       const filename = path.join(dirPath, `${Date.now()}-${crypto.randomUUID()}.md`);
@@ -168,15 +202,13 @@ ${resultText || 'N/A'}
       runGit(`add ${filename}`);
       runGit(`commit -m "summary: ${targetRepo} #${issueNumber} at ${timestamp}"`);
 
-      if (!hasToken) {
-        console.log('No GITHUB_TOKEN/GH_TOKEN set; skipping push of summary branch.');
-        return;
-      }
-
       try {
-        runGit(`push origin ${branchName}`);
-        console.log(`Pushed summary to branch ${branchName}`);
-        return;
+        await runWithRetryOnNotFound(remoteUrl, (url) => {
+          remoteUrl = url;
+          return runGit(`push ${url} ${branchName}`);
+        });
+        console.log(`Pushed summary to the-intern-data:${branchName}`);
+        return builtContent;
       } catch (err) {
         const isRejected = /non-fast-forward|fetch first/i.test(err.message);
         if (isRejected && attempt < maxAttempts) {
@@ -190,6 +222,33 @@ ${resultText || 'N/A'}
     console.error(`Failed to save session summary for ${targetRepo} #${issueNumber}: ${err.message}`);
     process.exitCode = 1;
   }
+
+  return builtContent;
+}
+
+async function saveSummary(targetRepo, issueNumber, promptText, resultText, backend) {
+  if (!targetRepo || !issueNumber) return;
+  if (!/^[1-9]\d*$/.test(String(issueNumber))) {
+    console.error(`Refusing to save summary: invalid issue number "${issueNumber}"`);
+    process.exitCode = 1;
+    return;
+  }
+
+  let remoteUrl;
+  try {
+    remoteUrl = await resolveDataRepoRemoteUrl();
+  } catch (err) {
+    console.error(`Failed to resolve the-intern-data remote: ${err.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  if (!remoteUrl) {
+    console.error('the-intern-data remote is not configured (DATA_REPO_TOKEN or DATA_REPO_REMOTE_URL); cannot save summary.');
+    process.exitCode = 1;
+    return;
+  }
+
+  await saveSummaryToDataRepo(targetRepo, issueNumber, promptText, resultText, backend, remoteUrl);
 }
 
 if (require.main === module) {
@@ -197,26 +256,31 @@ if (require.main === module) {
   const targetRepo = process.env.TARGET_REPO;
   const issueNumber = process.env.ISSUE_NUMBER;
 
-  if (mode === 'fetch') {
-    fetchSummary(targetRepo, issueNumber);
-  } else if (mode === 'backend') {
-    fetchBackend(targetRepo, issueNumber);
-  } else if (mode === 'resolve-backend') {
-    const backend = resolveBackend(
-      process.env.REQUESTED_BACKEND,
-      process.env.BACKEND_EXPLICIT,
-      process.env.PERSISTED_BACKEND
-    );
-    writeOutput('backend', backend);
-  } else if (mode === 'save') {
-    const promptText = process.env.CLEAN_PROMPT;
-    const resultFile = process.env.RESULT_FILE;
-    let resultText = '';
-    if (resultFile && fs.existsSync(resultFile)) {
-      resultText = fs.readFileSync(resultFile, 'utf8');
+  (async () => {
+    if (mode === 'fetch') {
+      await fetchSummary(targetRepo, issueNumber);
+    } else if (mode === 'backend') {
+      await fetchBackend(targetRepo, issueNumber);
+    } else if (mode === 'resolve-backend') {
+      const backend = resolveBackend(
+        process.env.REQUESTED_BACKEND,
+        process.env.BACKEND_EXPLICIT,
+        process.env.PERSISTED_BACKEND
+      );
+      writeOutput('backend', backend);
+    } else if (mode === 'save') {
+      const promptText = process.env.CLEAN_PROMPT;
+      const resultFile = process.env.RESULT_FILE;
+      let resultText = '';
+      if (resultFile && fs.existsSync(resultFile)) {
+        resultText = fs.readFileSync(resultFile, 'utf8');
+      }
+      await saveSummary(targetRepo, issueNumber, promptText, resultText, process.env.BACKEND);
     }
-    saveSummary(targetRepo, issueNumber, promptText, resultText, process.env.BACKEND);
-  }
+  })().catch(err => {
+    console.error(err);
+    process.exitCode = 1;
+  });
 }
 
-module.exports = { fetchBackend, fetchSummary, resolveBackend, saveSummary };
+module.exports = { fetchBackend, fetchSummary, fetchLatestSummary, resolveBackend, saveSummary };

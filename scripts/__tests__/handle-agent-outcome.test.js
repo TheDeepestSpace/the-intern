@@ -53,11 +53,26 @@ describe('main', () => {
     process.exitCode = 0;
   });
 
+  // A promise plus externally-callable resolve/reject, so a test can assert on
+  // state before persistence settles and control exactly when it does.
+  function deferred() {
+    let resolve, reject;
+    const promise = new Promise((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
   // Mirrors real updateEntries's contract (fetch -> mutate -> push) without any
   // git I/O: applies `mutate` to a fixed `entries` snapshot and drops the
-  // `entries` key from its return value, just like manage-pending-retries.js does.
+  // `entries` key from its return value, just like manage-pending-retries.js
+  // does. Resolves as a real (queued-microtask) Promise rather than a plain
+  // synchronous value, so a `main()` that dropped its `await updateEntriesFn(...)`
+  // would destructure an unresolved Promise instead of the real result and fail
+  // the assertions below.
   function fakeUpdateEntries(entries) {
-    return vi.fn((mutate) => {
+    return vi.fn(async (mutate) => {
       const { entries: _next, ...rest } = mutate(entries);
       return rest;
     });
@@ -70,44 +85,284 @@ describe('main', () => {
       sendTelegram: vi.fn(),
       buildDispatchPayload: vi.fn(() => null),
       detectUsageLimit: vi.fn(() => null),
+      detectStalledWait: vi.fn(() => null),
+      saveCodexLog: vi.fn(() => Promise.resolve()),
+      countIssueComments: vi.fn(() => Promise.resolve(0)),
+      countReviewCommentReplies: vi.fn(() => Promise.resolve(0)),
+      postIssueComment: vi.fn(() => Promise.resolve()),
       ...overrides,
     };
   }
 
-  it('clears a queued retry and pings "resumed" on success', () => {
+  it('clears a queued retry and pings "resumed" on success', async () => {
     const entries = [{ key: baseEnv.RETRY_KEY, retryCount: 1, maxRetries: 3 }];
     const d = deps({
       readResultText: vi.fn(() => ({ isError: false, text: '' })),
       updateEntries: fakeUpdateEntries(entries),
     });
 
-    main(baseEnv, d);
+    await main(baseEnv, d);
 
     expect(d.sendTelegram).toHaveBeenCalledTimes(1);
     expect(d.sendTelegram.mock.calls[0][1]).toMatch(/resumed/);
   });
 
-  it('sends nothing on success when no retry was queued', () => {
+  it('sends nothing on success when no retry was queued', async () => {
     const d = deps({ readResultText: vi.fn(() => ({ isError: false, text: '' })) });
 
-    main(baseEnv, d);
+    await main(baseEnv, d);
 
     expect(d.sendTelegram).not.toHaveBeenCalled();
   });
 
-  it('does not fail the step when clearing a retry on success errors', () => {
-    const d = deps({
-      readResultText: vi.fn(() => ({ isError: false, text: '' })),
-      updateEntries: vi.fn(() => {
-        throw new Error('push rejected');
-      }),
+  describe('silent-success fallback comment', () => {
+    const envWithIssue = {
+      ...baseEnv,
+      TARGET_REPO: 'owner/repo',
+      ISSUE_NUMBER: '42',
+      COMMENT_COUNT_BEFORE: '2',
+    };
+
+    it('posts the final answer as a fallback comment when no new comment landed', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+        countIssueComments: vi.fn(() => Promise.resolve(2)),
+      });
+
+      await main(envWithIssue, d);
+
+      expect(d.countIssueComments).toHaveBeenCalledWith('owner/repo', '42');
+      expect(d.postIssueComment).toHaveBeenCalledWith('owner/repo', '42', 'Here is the answer.');
     });
 
-    expect(() => main(baseEnv, d)).not.toThrow();
+    it('does not post a fallback comment once a new comment already landed', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+        countIssueComments: vi.fn(() => Promise.resolve(3)),
+      });
+
+      await main(envWithIssue, d);
+
+      expect(d.postIssueComment).not.toHaveBeenCalled();
+    });
+
+    it('does not post a fallback comment when the session produced no text', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: '   ' })),
+        countIssueComments: vi.fn(() => Promise.resolve(2)),
+      });
+
+      await main(envWithIssue, d);
+
+      expect(d.countIssueComments).not.toHaveBeenCalled();
+      expect(d.postIssueComment).not.toHaveBeenCalled();
+    });
+
+    it('does not post a fallback comment when there is no baseline comment count (e.g. telegram calls)', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+        countIssueComments: vi.fn(() => Promise.resolve(0)),
+      });
+
+      await main(baseEnv, d);
+
+      expect(d.countIssueComments).not.toHaveBeenCalled();
+      expect(d.postIssueComment).not.toHaveBeenCalled();
+    });
+
+    it('does not post a fallback comment when the baseline count is an empty string (capture step skipped/failed)', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+        countIssueComments: vi.fn(() => Promise.resolve(0)),
+      });
+
+      await main({ ...envWithIssue, COMMENT_COUNT_BEFORE: '' }, d);
+
+      expect(d.countIssueComments).not.toHaveBeenCalled();
+      expect(d.postIssueComment).not.toHaveBeenCalled();
+    });
+
+    it('does not throw and skips posting when checking the comment count fails', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+        countIssueComments: vi.fn(() => Promise.reject(new Error('gh api failed'))),
+      });
+
+      await expect(main(envWithIssue, d)).resolves.not.toThrow();
+      expect(d.postIssueComment).not.toHaveBeenCalled();
+    });
+
+    it('does not throw when posting the fallback comment fails', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+        countIssueComments: vi.fn(() => Promise.resolve(2)),
+        postIssueComment: vi.fn(() => Promise.reject(new Error('gh api failed'))),
+      });
+
+      await expect(main(envWithIssue, d)).resolves.not.toThrow();
+    });
+
+    it('still posts a fallback comment when clearing the queued retry rejects', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+        updateEntries: vi.fn(() => Promise.reject(new Error('push rejected'))),
+        countIssueComments: vi.fn(() => Promise.resolve(2)),
+      });
+
+      await expect(main(envWithIssue, d)).resolves.not.toThrow();
+
+      expect(d.postIssueComment).toHaveBeenCalledWith('owner/repo', '42', 'Here is the answer.');
+    });
+
+    describe('review-thread replies', () => {
+      const envFromReviewComment = { ...envWithIssue, EVENT_TYPE: 'pull_request_review_comment', COMMENT_ID: '999' };
+
+      it('does not post a duplicate top-level comment when the agent already replied in the review thread', async () => {
+        const d = deps({
+          readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+          countReviewCommentReplies: vi.fn(() => Promise.resolve(1)),
+        });
+
+        await main(envFromReviewComment, d);
+
+        expect(d.countReviewCommentReplies).toHaveBeenCalledWith('owner/repo', '42', '999');
+        expect(d.countIssueComments).not.toHaveBeenCalled();
+        expect(d.postIssueComment).not.toHaveBeenCalled();
+      });
+
+      it('falls back to the issue-comment count check when there is no reply in the review thread', async () => {
+        const d = deps({
+          readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+          countReviewCommentReplies: vi.fn(() => Promise.resolve(0)),
+          countIssueComments: vi.fn(() => Promise.resolve(2)),
+        });
+
+        await main(envFromReviewComment, d);
+
+        expect(d.postIssueComment).toHaveBeenCalledWith('owner/repo', '42', 'Here is the answer.');
+      });
+
+      it('falls back to the issue-comment count check when checking for a reply fails', async () => {
+        const d = deps({
+          readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+          countReviewCommentReplies: vi.fn(() => Promise.reject(new Error('gh api failed'))),
+          countIssueComments: vi.fn(() => Promise.resolve(2)),
+        });
+
+        await expect(main(envFromReviewComment, d)).resolves.not.toThrow();
+
+        expect(d.postIssueComment).toHaveBeenCalledWith('owner/repo', '42', 'Here is the answer.');
+      });
+
+      it('does not check for a review-thread reply for other event types', async () => {
+        const d = deps({
+          readResultText: vi.fn(() => ({ isError: false, text: 'Here is the answer.' })),
+          countIssueComments: vi.fn(() => Promise.resolve(2)),
+        });
+
+        await main({ ...envWithIssue, EVENT_TYPE: 'issue_comment' }, d);
+
+        expect(d.countReviewCommentReplies).not.toHaveBeenCalled();
+        expect(d.postIssueComment).toHaveBeenCalledWith('owner/repo', '42', 'Here is the answer.');
+      });
+    });
+  });
+
+  describe('stalled-wait backstop', () => {
+    it('pings the maintainer when the final text reads as a "waiting for X" message', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Waiting on the Playwright run to finish generating baselines.' })),
+        detectStalledWait: vi.fn(() => ({ matchedText: 'Waiting on' })),
+      });
+
+      await main(baseEnv, d);
+
+      expect(d.sendTelegram).toHaveBeenCalledTimes(1);
+      expect(d.sendTelegram.mock.calls[0][1]).toMatch(/ended its turn on a "waiting" message/);
+      expect(d.sendTelegram.mock.calls[0][1]).toContain('Waiting on');
+    });
+
+    it('does not ping when the final text does not match a stalled-wait pattern', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Opened PR #12.' })),
+        detectStalledWait: vi.fn(() => null),
+      });
+
+      await main(baseEnv, d);
+
+      expect(d.sendTelegram).not.toHaveBeenCalled();
+    });
+
+    it('still pings even when a new comment already landed on the issue/PR', async () => {
+      const envWithIssue = {
+        ...baseEnv,
+        TARGET_REPO: 'owner/repo',
+        ISSUE_NUMBER: '42',
+        COMMENT_COUNT_BEFORE: '2',
+      };
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Waiting on CI to finish.' })),
+        detectStalledWait: vi.fn(() => ({ matchedText: 'Waiting on' })),
+        countIssueComments: vi.fn(() => Promise.resolve(3)),
+      });
+
+      await main(envWithIssue, d);
+
+      expect(d.postIssueComment).not.toHaveBeenCalled();
+      expect(d.sendTelegram).toHaveBeenCalledTimes(1);
+      expect(d.sendTelegram.mock.calls[0][1]).toMatch(/ended its turn on a "waiting" message/);
+    });
+
+    it('also pings alongside the "resumed" ping when both a queued retry clears and the text stalls', async () => {
+      const entries = [{ key: baseEnv.RETRY_KEY, retryCount: 1, maxRetries: 3 }];
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: false, text: 'Will check back once the build finishes.' })),
+        detectStalledWait: vi.fn(() => ({ matchedText: 'Will check back' })),
+        updateEntries: fakeUpdateEntries(entries),
+      });
+
+      await main(baseEnv, d);
+
+      expect(d.sendTelegram).toHaveBeenCalledTimes(2);
+      expect(d.sendTelegram.mock.calls[0][1]).toMatch(/resumed/);
+      expect(d.sendTelegram.mock.calls[1][1]).toMatch(/ended its turn on a "waiting" message/);
+    });
+  });
+
+  it('waits for updateEntries to resolve before pinging "resumed" on success', async () => {
+    const entries = [{ key: baseEnv.RETRY_KEY, retryCount: 1, maxRetries: 3 }];
+    const control = deferred();
+    const d = deps({
+      readResultText: vi.fn(() => ({ isError: false, text: '' })),
+      updateEntries: vi.fn((mutate) => control.promise.then(() => {
+        const { entries: _next, ...rest } = mutate(entries);
+        return rest;
+      })),
+    });
+
+    const result = main(baseEnv, d);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(d.sendTelegram).not.toHaveBeenCalled();
+
+    control.resolve();
+    await result;
+
+    expect(d.sendTelegram).toHaveBeenCalledTimes(1);
+    expect(d.sendTelegram.mock.calls[0][1]).toMatch(/resumed/);
+  });
+
+  it('does not fail the step when clearing a retry on success rejects', async () => {
+    const d = deps({
+      readResultText: vi.fn(() => ({ isError: false, text: '' })),
+      updateEntries: vi.fn(() => Promise.reject(new Error('push rejected'))),
+    });
+
+    await expect(main(baseEnv, d)).resolves.not.toThrow();
     expect(d.sendTelegram).not.toHaveBeenCalled();
   });
 
-  it('queues a retry and pings "queued" on a usage-limit stall', () => {
+  it('queues a retry and pings "queued" on a usage-limit stall', async () => {
     const d = deps({
       readResultText: vi.fn(() => ({ isError: true, text: 'usage limit reached' })),
       detectUsageLimit: vi.fn(() => ({ matchedText: 'usage limit reached', retryAfter: '2026-08-03T12:00:00.000Z' })),
@@ -115,13 +370,37 @@ describe('main', () => {
       updateEntries: fakeUpdateEntries([]),
     });
 
-    main(baseEnv, d);
+    await main(baseEnv, d);
 
     expect(d.sendTelegram).toHaveBeenCalledTimes(1);
     expect(d.sendTelegram.mock.calls[0][1]).toMatch(/queued to auto-resume/);
   });
 
-  it('alerts on exhausted retry budget instead of queuing again', () => {
+  it('waits for updateEntries to resolve before pinging "queued" on a usage-limit stall', async () => {
+    const control = deferred();
+    const d = deps({
+      readResultText: vi.fn(() => ({ isError: true, text: 'usage limit reached' })),
+      detectUsageLimit: vi.fn(() => ({ matchedText: 'usage limit reached', retryAfter: '2026-08-03T12:00:00.000Z' })),
+      buildDispatchPayload: vi.fn(() => ({ type: 'workflow_dispatch', workflow: 'dispatcher.yml', ref: 'main', inputs: {} })),
+      updateEntries: vi.fn((mutate) => control.promise.then(() => {
+        const { entries: _next, ...rest } = mutate([]);
+        return rest;
+      })),
+    });
+
+    const result = main(baseEnv, d);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(d.sendTelegram).not.toHaveBeenCalled();
+
+    control.resolve();
+    await result;
+
+    expect(d.sendTelegram).toHaveBeenCalledTimes(1);
+    expect(d.sendTelegram.mock.calls[0][1]).toMatch(/queued to auto-resume/);
+  });
+
+  it('alerts on exhausted retry budget instead of queuing again', async () => {
     const entries = [
       { key: baseEnv.RETRY_KEY, retryCount: 3, maxRetries: 3, source: 'dispatcher', dispatch: {}, retryAfter: '2026-08-03T00:00:00.000Z' },
     ];
@@ -132,55 +411,108 @@ describe('main', () => {
       updateEntries: fakeUpdateEntries(entries),
     });
 
-    main(baseEnv, d);
+    await main(baseEnv, d);
 
     expect(d.sendTelegram).toHaveBeenCalledTimes(1);
     expect(d.sendTelegram.mock.calls[0][1]).toMatch(/used up all/);
   });
 
-  it('falls back to the generic failure notification when queuing a stall fails', () => {
+  it('falls back to the generic failure notification when queuing a stall fails', async () => {
     const d = deps({
       readResultText: vi.fn(() => ({ isError: true, text: 'usage limit reached' })),
       detectUsageLimit: vi.fn(() => ({ matchedText: 'usage limit reached', retryAfter: '2026-08-03T12:00:00.000Z' })),
       buildDispatchPayload: vi.fn(() => ({ type: 'workflow_dispatch', workflow: 'dispatcher.yml', ref: 'main', inputs: {} })),
-      updateEntries: vi.fn(() => {
-        throw new Error('push rejected');
-      }),
+      updateEntries: vi.fn(() => Promise.reject(new Error('push rejected'))),
     });
 
-    expect(() => main(baseEnv, d)).not.toThrow();
+    await expect(main(baseEnv, d)).resolves.not.toThrow();
     expect(d.sendTelegram).toHaveBeenCalledTimes(1);
     expect(d.sendTelegram.mock.calls[0][1]).toMatch(/queuing the auto-retry failed/);
   });
 
-  it('falls back to the generic failure notification when a stall has no dispatch payload', () => {
+  it('falls back to the generic failure notification when a stall has no dispatch payload', async () => {
     const d = deps({
       readResultText: vi.fn(() => ({ isError: true, text: 'usage limit reached' })),
       detectUsageLimit: vi.fn(() => ({ matchedText: 'usage limit reached', retryAfter: '2026-08-03T12:00:00.000Z' })),
       buildDispatchPayload: vi.fn(() => null),
     });
 
-    main(baseEnv, d);
+    await main(baseEnv, d);
 
     expect(d.sendTelegram).toHaveBeenCalledTimes(1);
     expect(d.sendTelegram.mock.calls[0][1]).toMatch(/ran into an error/);
     expect(d.updateEntries).not.toHaveBeenCalled();
   });
 
-  it('sends the generic failure notification for a non-stall failure', () => {
+  it('sends the generic failure notification for a non-stall failure', async () => {
     const d = deps({ readResultText: vi.fn(() => ({ isError: true, text: 'some other crash' })) });
 
-    main(baseEnv, d);
+    await main(baseEnv, d);
 
     expect(d.sendTelegram).toHaveBeenCalledTimes(1);
     expect(d.sendTelegram.mock.calls[0][1]).toMatch(/ran into an error/);
     expect(d.updateEntries).not.toHaveBeenCalled();
   });
 
-  it('exits with an error and does not call any deps when RETRY_KEY is missing', () => {
+  it('saves the codex event log on a codex-backend failure', async () => {
+    const d = deps({ readResultText: vi.fn(() => ({ isError: true, text: 'some other crash' })) });
+
+    await main(
+      {
+        ...baseEnv,
+        BACKEND: 'codex',
+        GITHUB_RUN_ID: '999',
+        TARGET_REPO: 'owner/repo',
+        ISSUE_NUMBER: '42',
+        CODEX_EVENTS_FILE: '/tmp/custom-codex-events.jsonl',
+      },
+      d
+    );
+
+    expect(d.saveCodexLog).toHaveBeenCalledTimes(1);
+    expect(d.saveCodexLog).toHaveBeenCalledWith({
+      targetRepo: 'owner/repo',
+      issueNumber: '42',
+      runId: '999',
+      logFile: '/tmp/custom-codex-events.jsonl',
+    });
+    expect(d.sendTelegram).toHaveBeenCalledTimes(1);
+    expect(d.sendTelegram.mock.calls[0][1]).not.toMatch(/some other crash/);
+  });
+
+  it('lets saveCodexLog fall back to its default log path when CODEX_EVENTS_FILE is unset', async () => {
+    const d = deps({ readResultText: vi.fn(() => ({ isError: true, text: 'some other crash' })) });
+
+    await main({ ...baseEnv, BACKEND: 'codex', GITHUB_RUN_ID: '999' }, d);
+
+    expect(d.saveCodexLog).toHaveBeenCalledWith(
+      expect.objectContaining({ logFile: undefined })
+    );
+  });
+
+  it('does not save the codex event log on a claude-backend failure', async () => {
+    const d = deps({ readResultText: vi.fn(() => ({ isError: true, text: 'some other crash' })) });
+
+    await main({ ...baseEnv, BACKEND: 'claude' }, d);
+
+    expect(d.saveCodexLog).not.toHaveBeenCalled();
+  });
+
+  it('still sends the generic failure notification when saving the codex log rejects', async () => {
+    const d = deps({
+      readResultText: vi.fn(() => ({ isError: true, text: 'some other crash' })),
+      saveCodexLog: vi.fn(() => Promise.reject(new Error('push rejected'))),
+    });
+
+    await expect(main({ ...baseEnv, BACKEND: 'codex' }, d)).resolves.not.toThrow();
+    expect(d.sendTelegram).toHaveBeenCalledTimes(1);
+    expect(d.sendTelegram.mock.calls[0][1]).toMatch(/ran into an error/);
+  });
+
+  it('exits with an error and does not call any deps when RETRY_KEY is missing', async () => {
     const d = deps();
 
-    main({ ...baseEnv, RETRY_KEY: '' }, d);
+    await main({ ...baseEnv, RETRY_KEY: '' }, d);
 
     expect(process.exitCode).toBe(1);
     expect(d.readResultText).not.toHaveBeenCalled();

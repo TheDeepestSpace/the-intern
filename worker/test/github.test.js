@@ -5,6 +5,7 @@ import {
   githubRequest,
   mockCheckSuiteDispatchFlow,
   mockGithubDispatchFlow,
+  mockPushDispatchFlow,
 } from './fixtures.js';
 
 afterEach(() => {
@@ -36,6 +37,20 @@ function coderabbitReviewPayload(overrides = {}) {
   };
 }
 
+function pushPayload(overrides = {}) {
+  return {
+    ref: 'refs/heads/main',
+    installation: { id: 42 },
+    repository: {
+      full_name: 'TheDeepestSpace/the-intern',
+      owner: { login: 'TheDeepestSpace' },
+      name: 'the-intern',
+      default_branch: 'main',
+    },
+    ...overrides,
+  };
+}
+
 function checkSuitePayload(overrides = {}) {
   return {
     action: 'completed',
@@ -46,10 +61,10 @@ function checkSuitePayload(overrides = {}) {
       name: 'the-intern',
     },
     check_suite: {
+      head_sha: 'sha-abc123',
       conclusion: 'failure',
       html_url: 'https://github.com/TheDeepestSpace/the-intern/pull/7/checks',
       pull_requests: [{ number: 7 }],
-      head_sha: 'head-sha',
     },
     ...overrides,
   };
@@ -86,7 +101,7 @@ describe('handleGitHub allowlist gating', () => {
 
   it('skips the allowlist check entirely when ALLOWED_USERS is unset', async () => {
     const res = await worker.fetch(
-      githubRequest({ eventType: 'push', body: issueCommentPayload() }),
+      githubRequest({ eventType: 'star', body: issueCommentPayload() }),
       baseGithubEnv()
     );
 
@@ -110,7 +125,7 @@ describe('handleGitHub allowlist gating', () => {
 });
 
 describe('handleGitHub event-type filtering', () => {
-  it.each(['push', 'pull_request', 'star', 'workflow_run'])(
+  it.each(['pull_request', 'star', 'workflow_run'])(
     'ignores irrelevant event type %s',
     async eventType => {
       const res = await worker.fetch(
@@ -488,23 +503,104 @@ describe('handleGitHub check_suite handling', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('ignores check_suite with no associated pull requests', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+  function dispatchCalls(fetchSpy) {
+    return fetchSpy.mock.calls.filter(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+  }
+
+  it('dedupes a second check-suite completion for the same PR + commit sha', async () => {
+    const fetchSpy = mockCheckSuiteDispatchFlow();
+    const env = baseGithubEnv();
+
+    const first = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      env
+    );
+    expect(first.status).toBe(200);
+    expect(await first.text()).toBe('ok');
+
+    const second = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      env
+    );
+    expect(second.status).toBe(200);
+    expect(await second.text()).toBe('ignored: ci_failure already dispatched for this PR+commit');
+
+    expect(dispatchCalls(fetchSpy)).toHaveLength(1);
+  });
+
+  it('retries on the next delivery after a failed dispatch instead of deduping it', async () => {
+    const env = baseGithubEnv();
+    mockCheckSuiteDispatchFlow({ dispatchOk: false });
+
+    const first = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      env
+    );
+    expect(first.status).toBe(502);
+
+    const fetchSpy = mockCheckSuiteDispatchFlow();
+    fetchSpy.mockClear();
+    const second = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      env
+    );
+    expect(second.status).toBe(200);
+    expect(await second.text()).toBe('ok');
+    expect(dispatchCalls(fetchSpy)).toHaveLength(1);
+  });
+
+  it('dispatches again for the same PR when a different commit sha fails', async () => {
+    const fetchSpy = mockCheckSuiteDispatchFlow();
+    const env = baseGithubEnv();
+
+    const first = await worker.fetch(
+      githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
+      env
+    );
+    expect(await first.text()).toBe('ok');
+
+    const second = await worker.fetch(
+      githubRequest({
+        eventType: 'check_suite',
+        body: checkSuitePayload({
+          check_suite: { ...checkSuitePayload().check_suite, head_sha: 'sha-def456' },
+        }),
+      }),
+      env
+    );
+    expect(await second.text()).toBe('ok');
+
+    expect(dispatchCalls(fetchSpy)).toHaveLength(2);
+  });
+
+  it('dispatches independently for two different PRs covered by the same check suite', async () => {
+    const fetchSpy = mockCheckSuiteDispatchFlow();
+    const env = baseGithubEnv();
+
     const res = await worker.fetch(
       githubRequest({
         eventType: 'check_suite',
-        body: checkSuitePayload({ check_suite: { ...checkSuitePayload().check_suite, pull_requests: [] } }),
+        body: checkSuitePayload({
+          check_suite: {
+            ...checkSuitePayload().check_suite,
+            pull_requests: [{ number: 7 }, { number: 8 }],
+          },
+        }),
       }),
-      baseGithubEnv()
+      env
     );
-    expect(res.status).toBe(200);
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(await res.text()).toBe('ok');
+
+    expect(dispatchCalls(fetchSpy)).toHaveLength(2);
   });
 
   it('skips the dispatch when every failing check on head already fails on base', async () => {
     const fetchSpy = mockCheckSuiteDispatchFlow({
       checkRunsByRef: {
-        'head-sha': [{ name: 'lint', status: 'completed', conclusion: 'failure' }],
+        'sha-abc123': [{ name: 'lint', status: 'completed', conclusion: 'failure' }],
         'base-sha': [{ name: 'lint', status: 'completed', conclusion: 'failure' }],
       },
     });
@@ -524,7 +620,7 @@ describe('handleGitHub check_suite handling', () => {
   it('dispatches when a failing check on head is new (not failing on base)', async () => {
     const fetchSpy = mockCheckSuiteDispatchFlow({
       checkRunsByRef: {
-        'head-sha': [
+        'sha-abc123': [
           { name: 'lint', status: 'completed', conclusion: 'failure' },
           { name: 'build', status: 'completed', conclusion: 'failure' },
         ],
@@ -563,7 +659,7 @@ describe('handleGitHub check_suite handling', () => {
   });
 
   it('fails open and dispatches when the head check-runs fetch rejects', async () => {
-    const fetchSpy = mockCheckSuiteDispatchFlow({ checkRunsThrowRefs: ['head-sha'] });
+    const fetchSpy = mockCheckSuiteDispatchFlow({ checkRunsThrowRefs: ['sha-abc123'] });
     const res = await worker.fetch(
       githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }),
       baseGithubEnv()
@@ -579,7 +675,7 @@ describe('handleGitHub check_suite handling', () => {
 
   it('fails open and dispatches when the base check-runs fetch rejects', async () => {
     const fetchSpy = mockCheckSuiteDispatchFlow({
-      checkRunsByRef: { 'head-sha': [{ name: 'lint', status: 'completed', conclusion: 'failure' }] },
+      checkRunsByRef: { 'sha-abc123': [{ name: 'lint', status: 'completed', conclusion: 'failure' }] },
       checkRunsThrowRefs: ['base-sha'],
     });
     const res = await worker.fetch(
@@ -593,5 +689,189 @@ describe('handleGitHub check_suite handling', () => {
       new URL(input.url ?? input).pathname.endsWith('/dispatches')
     );
     expect(dispatchCall).toBeTruthy();
+  });
+});
+
+describe('handleGitHub push handling', () => {
+  it('dispatches merge_conflict when a default-branch push leaves a bot-authored PR dirty', async () => {
+    const fetchSpy = mockPushDispatchFlow({ mergeableStates: { 7: 'dirty' } });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv({ MERGEABLE_POLL_DELAY_MS: '1' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+
+    const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+    expect(dispatchCall).toBeTruthy();
+    const [, dispatchInit] = dispatchCall;
+    const body = JSON.parse(dispatchInit.body);
+    expect(body.event_type).toBe('merge_conflict');
+    expect(body.client_payload.raw.pull_request.number).toBe(7);
+    expect(body.client_payload.raw.merge_conflict.mergeable_state).toBe('dirty');
+    expect(body.client_payload.raw.merge_conflict.base_ref).toBe('main');
+  });
+
+  it('retries past a null mergeable_state before dispatching', async () => {
+    const fetchSpy = mockPushDispatchFlow({
+      mergeableStates: { 7: 'dirty' },
+      nullPollsBeforeState: { 7: 2 },
+    });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv({ MERGEABLE_POLL_DELAY_MS: '1' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+
+    const pollCalls = fetchSpy.mock.calls.filter(([input]) =>
+      new URL(input.url ?? input).pathname.match(/\/pulls\/7$/)
+    );
+    expect(pollCalls.length).toBe(3);
+  });
+
+  it('keeps polling when mergeable_state resolves before mergeable does', async () => {
+    const fetchSpy = mockPushDispatchFlow({
+      mergeableStates: { 7: 'dirty' },
+      nullPollsBeforeState: { 7: 1 },
+      pendingMergeableStates: { 7: 'unstable' },
+    });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv({ MERGEABLE_POLL_DELAY_MS: '1' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+
+    const pollCalls = fetchSpy.mock.calls.filter(([input]) =>
+      new URL(input.url ?? input).pathname.match(/\/pulls\/7$/)
+    );
+    expect(pollCalls.length).toBe(2);
+  });
+
+  it('follows the Link header to dispatch bot PRs found on later pages', async () => {
+    const fetchSpy = mockPushDispatchFlow({
+      pulledPages: [
+        [{ number: 1, user: { login: 'someone-else' } }],
+        [{ number: 7, user: { login: 'the-intern-bot[bot]' } }],
+      ],
+      mergeableStates: { 7: 'dirty' },
+    });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv({ MERGEABLE_POLL_DELAY_MS: '1' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+
+    const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+    expect(dispatchCall).toBeTruthy();
+    const [, dispatchInit] = dispatchCall;
+    const body = JSON.parse(dispatchInit.body);
+    expect(body.client_payload.raw.pull_request.number).toBe(7);
+  });
+
+  it('does not dispatch when mergeable_state is clean', async () => {
+    const fetchSpy = mockPushDispatchFlow({ mergeableStates: { 7: 'clean' } });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv({ MERGEABLE_POLL_DELAY_MS: '1' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ignored: no bot-authored pull requests became unmergeable');
+
+    const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.endsWith('/dispatches')
+    );
+    expect(dispatchCall).toBeUndefined();
+  });
+
+  it('gives up after the poll cap when mergeable_state stays null', async () => {
+    const fetchSpy = mockPushDispatchFlow({
+      mergeableStates: { 7: 'dirty' },
+      nullPollsBeforeState: { 7: 99 },
+    });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv({ MERGEABLE_POLL_DELAY_MS: '1', MERGEABLE_POLL_ATTEMPTS: '3' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ignored: no bot-authored pull requests became unmergeable');
+
+    const pollCalls = fetchSpy.mock.calls.filter(([input]) =>
+      new URL(input.url ?? input).pathname.match(/\/pulls\/7$/)
+    );
+    expect(pollCalls.length).toBe(3);
+  });
+
+  it('ignores PRs not authored by the bot', async () => {
+    const fetchSpy = mockPushDispatchFlow({
+      openPulls: [{ number: 7, user: { login: 'someone-else' } }],
+    });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ignored: no bot-authored pull requests became unmergeable');
+
+    const pollCall = fetchSpy.mock.calls.find(([input]) =>
+      new URL(input.url ?? input).pathname.match(/\/pulls\/7$/)
+    );
+    expect(pollCall).toBeUndefined();
+  });
+
+  it('ignores pushes to a non-default branch', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload({ ref: 'refs/heads/feature-x' }) }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ignored: push not on default branch');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('ignores a branch-deletion push', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload({ deleted: true }) }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ignored: push not on default branch');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when the payload has no installation id', async () => {
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload({ installation: undefined }) }),
+      baseGithubEnv()
+    );
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe('missing installation id');
+  });
+
+  it('returns 502 when the dispatch call fails', async () => {
+    mockPushDispatchFlow({ mergeableStates: { 7: 'dirty' }, dispatchOk: false });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv({ MERGEABLE_POLL_DELAY_MS: '1' })
+    );
+    expect(res.status).toBe(502);
+  });
+
+  it('bypasses the ALLOWED_USERS allowlist for pushes', async () => {
+    mockPushDispatchFlow({ mergeableStates: { 7: 'dirty' } });
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'push', body: pushPayload() }),
+      baseGithubEnv({ ALLOWED_USERS: 'alice, carol', MERGEABLE_POLL_DELAY_MS: '1' })
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
   });
 });
