@@ -44,7 +44,9 @@ function parseTrigger() {
       targetRepo = payload.repository?.full_name || '';
       issueNumber = String(payload.pull_request.number || '');
       const headSha = payload.check_suite.head_sha || '';
-      commentBody = `CI is failing on this PR (conclusion: ${payload.check_suite.conclusion}). Check suite: ${payload.check_suite.html_url}. This check suite ran against commit \`${headSha}\`. Before investigating, compare that commit to the PR's current head (e.g. \`gh pr view ${issueNumber} --json headRefOid\`). If the PR's head has already moved past \`${headSha}\`, this failure is stale - a newer commit supersedes it, so stop immediately without commenting or pushing anything. Otherwise, investigate the failing checks and push a fix.`;
+      commentBody = headSha
+        ? `CI is failing on this PR (conclusion: ${payload.check_suite.conclusion}). Check suite: ${payload.check_suite.html_url}. This check suite ran against commit \`${headSha}\`. Before investigating, compare that commit to the PR's current head (e.g. \`gh pr view ${issueNumber} --json headRefOid\`). If the PR's head has already moved past \`${headSha}\`, this failure is stale - a newer commit supersedes it, so stop immediately without commenting or pushing anything. Otherwise, investigate the failing checks and push a fix.`
+        : `CI is failing on this PR (conclusion: ${payload.check_suite.conclusion}). Check suite: ${payload.check_suite.html_url}. This check suite's failing commit could not be determined, so staleness can't be safely verified - stop immediately without investigating, commenting, or pushing anything.`;
     } else if (payload.pull_request && payload.coderabbit_review) {
       // coderabbit_review: synthesized instruction, same shape as ci_failure
       // above. The worker never reads/forwards the review body itself (tier-2

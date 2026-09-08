@@ -138,7 +138,7 @@ describe('parse-trigger', () => {
       expect(result.clean_prompt).toBe(result.comment_body);
     });
 
-    it('leaves the head sha blank when check_suite.head_sha is absent', () => {
+    it('falls back to a stop-without-acting instruction when check_suite.head_sha is absent', () => {
       process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
       process.env.GITHUB_EVENT_PATH = writeEventPayload({
         action: 'ci_failure',
@@ -157,8 +157,10 @@ describe('parse-trigger', () => {
 
       const result = parseTrigger();
 
-      expect(result.comment_body).toContain('This check suite ran against commit ``.');
-      expect(result.comment_body).toContain("moved past ``, this failure is stale");
+      expect(result.comment_body).toBe(
+        "CI is failing on this PR (conclusion: failure). Check suite: https://github.com/acme/widgets/pull/9/checks. This check suite's failing commit could not be determined, so staleness can't be safely verified - stop immediately without investigating, commenting, or pushing anything."
+      );
+      expect(result.comment_body).not.toContain('``');
     });
   });
 
