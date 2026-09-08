@@ -108,7 +108,37 @@ describe('parse-trigger', () => {
   });
 
   describe('repository_dispatch: check_suite (ci_failure) shape', () => {
-    it('synthesizes a comment body from the check_suite conclusion and URL', () => {
+    it('synthesizes a comment body from the check_suite conclusion, URL, and head sha, with a staleness-check instruction', () => {
+      process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
+      process.env.GITHUB_EVENT_PATH = writeEventPayload({
+        action: 'ci_failure',
+        client_payload: {
+          raw: {
+            installation: { id: 4242 },
+            repository: { full_name: 'acme/widgets' },
+            pull_request: { number: 9 },
+            check_suite: {
+              conclusion: 'failure',
+              html_url: 'https://github.com/acme/widgets/pull/9/checks',
+              head_sha: 'deadbeef1234',
+            },
+          },
+        },
+      });
+
+      const result = parseTrigger();
+
+      expect(result.target_repo).toBe('acme/widgets');
+      expect(result.issue_number).toBe('9');
+      expect(result.installation_id).toBe('4242');
+      expect(result.event_type).toBe('ci_failure');
+      expect(result.comment_body).toBe(
+        "CI is failing on this PR (conclusion: failure). Check suite: https://github.com/acme/widgets/pull/9/checks. This check suite ran against commit `deadbeef1234`. Before investigating, compare that commit to the PR's current head (e.g. `gh pr view 9 --json headRefOid`). If the PR's head has already moved past `deadbeef1234`, this failure is stale - a newer commit supersedes it, so stop immediately without commenting or pushing anything. Otherwise, investigate the failing checks and push a fix."
+      );
+      expect(result.clean_prompt).toBe(result.comment_body);
+    });
+
+    it('leaves the head sha blank when check_suite.head_sha is absent', () => {
       process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
       process.env.GITHUB_EVENT_PATH = writeEventPayload({
         action: 'ci_failure',
@@ -127,14 +157,8 @@ describe('parse-trigger', () => {
 
       const result = parseTrigger();
 
-      expect(result.target_repo).toBe('acme/widgets');
-      expect(result.issue_number).toBe('9');
-      expect(result.installation_id).toBe('4242');
-      expect(result.event_type).toBe('ci_failure');
-      expect(result.comment_body).toBe(
-        'CI is failing on this PR (conclusion: failure). Check suite: https://github.com/acme/widgets/pull/9/checks. Investigate the failing checks and push a fix.'
-      );
-      expect(result.clean_prompt).toBe(result.comment_body);
+      expect(result.comment_body).toContain('This check suite ran against commit ``.');
+      expect(result.comment_body).toContain("moved past ``, this failure is stale");
     });
   });
 
