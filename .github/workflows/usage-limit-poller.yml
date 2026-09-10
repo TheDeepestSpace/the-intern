@@ -1,6 +1,12 @@
 name: usage-limit poller
 on:
+  # Primary heartbeat: the Cloudflare Worker's Cron Trigger (worker/wrangler.toml)
+  # POSTs this every 5 minutes via repository_dispatch, since it's far more
+  # reliable than GH Actions' own `schedule` trigger below (see #105).
+  repository_dispatch:
+    types: [poller_tick]
   schedule:
+    # Fallback heartbeat, kept in case the Cloudflare side ever misfires.
     # Every 15 minutes. The poller only re-fires entries whose retry_after
     # has actually passed (scripts/poll-pending-retries.js) — this cadence
     # just bounds how late a resume can be, not how often anything happens.
