@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { readResultText, main } from '../handle-agent-outcome.js';
+import { readResultText, readCodexEventsTail, main } from '../handle-agent-outcome.js';
 
 describe('readResultText', () => {
   let tmpFile;
@@ -46,6 +46,82 @@ describe('readResultText', () => {
   });
 });
 
+describe('readCodexEventsTail', () => {
+  let tmpFile;
+
+  afterEach(() => {
+    if (tmpFile) fs.rmSync(path.dirname(tmpFile), { recursive: true, force: true });
+  });
+
+  function write(content) {
+    tmpFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-events-')), 'codex-events.jsonl');
+    fs.writeFileSync(tmpFile, content);
+    return tmpFile;
+  }
+
+  it('returns an empty string when the log file does not exist', () => {
+    expect(readCodexEventsTail(path.join(os.tmpdir(), 'does-not-exist.jsonl'))).toBe('');
+  });
+
+  it('returns an empty string for a falsy logFile', () => {
+    expect(readCodexEventsTail('')).toBe('');
+    expect(readCodexEventsTail(undefined)).toBe('');
+  });
+
+  it('extracts the message from a trailing "error" event (run 34002720228)', () => {
+    const lines = [
+      JSON.stringify({ type: 'agent_message', message: 'working on it' }),
+      JSON.stringify({
+        type: 'error',
+        message:
+          "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 2:00 AM.",
+      }),
+    ];
+    const file = write(lines.join('\n') + '\n');
+    expect(readCodexEventsTail(file)).toBe(
+      "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 2:00 AM."
+    );
+  });
+
+  it('extracts the message from a trailing "turn.failed" event when it is the last line (run 34002720228)', () => {
+    const lines = [
+      JSON.stringify({
+        type: 'error',
+        message: "You've hit your usage limit. ... or try again at 2:00 AM.",
+      }),
+      JSON.stringify({
+        type: 'turn.failed',
+        error: { message: "You've hit your usage limit. ... or try again at 2:00 AM." },
+      }),
+    ];
+    const file = write(lines.join('\n') + '\n');
+    expect(readCodexEventsTail(file)).toBe("You've hit your usage limit. ... or try again at 2:00 AM.");
+  });
+
+  it('skips unrelated trailing events to find the last error/turn.failed message', () => {
+    const lines = [
+      JSON.stringify({ type: 'turn.failed', error: { message: 'first failure' } }),
+      JSON.stringify({ type: 'agent_message', message: 'irrelevant trailing chatter' }),
+    ];
+    const file = write(lines.join('\n') + '\n');
+    expect(readCodexEventsTail(file)).toBe('first failure');
+  });
+
+  it('tolerates malformed trailing lines and keeps scanning backward', () => {
+    const lines = [
+      JSON.stringify({ type: 'error', message: 'the real error' }),
+      'not json at all',
+    ];
+    const file = write(lines.join('\n') + '\n');
+    expect(readCodexEventsTail(file)).toBe('the real error');
+  });
+
+  it('returns an empty string when no error/turn.failed event is present', () => {
+    const file = write(JSON.stringify({ type: 'agent_message', message: 'all good' }) + '\n');
+    expect(readCodexEventsTail(file)).toBe('');
+  });
+});
+
 describe('main', () => {
   const baseEnv = { RETRY_KEY: 'dispatcher:owner/repo#1', TG_ADMIN_CHAT_ID: '123', RUN_URL: 'https://example.test/run' };
 
@@ -81,6 +157,7 @@ describe('main', () => {
   function deps(overrides = {}) {
     return {
       readResultText: vi.fn(() => ({ isError: false, text: '' })),
+      readCodexEventsTail: vi.fn(() => ''),
       updateEntries: fakeUpdateEntries([]),
       sendTelegram: vi.fn(),
       buildDispatchPayload: vi.fn(() => null),
@@ -496,6 +573,71 @@ describe('main', () => {
     await main({ ...baseEnv, BACKEND: 'claude' }, d);
 
     expect(d.saveCodexLog).not.toHaveBeenCalled();
+  });
+
+  describe('codex-events.jsonl fallback for usage-limit detection (issue #205)', () => {
+    const codexMessage =
+      "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 2:00 AM.";
+
+    it('feeds the codex-events.jsonl tail into detectUsageLimit when result.json came back empty', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: true, text: '' })),
+        readCodexEventsTail: vi.fn(() => codexMessage),
+        detectUsageLimit: vi.fn(() => ({ matchedText: "you've hit your usage limit", retryAfter: '2026-08-03T12:00:00.000Z' })),
+        buildDispatchPayload: vi.fn(() => ({ type: 'workflow_dispatch', workflow: 'dispatcher.yml', ref: 'main', inputs: {} })),
+      });
+
+      await main({ ...baseEnv, BACKEND: 'codex', GITHUB_RUN_ID: '999' }, d);
+
+      expect(d.readCodexEventsTail).toHaveBeenCalledWith('/tmp/codex-events.jsonl');
+      expect(d.detectUsageLimit).toHaveBeenCalledWith(codexMessage);
+      expect(d.sendTelegram).toHaveBeenCalledTimes(1);
+      expect(d.sendTelegram.mock.calls[0][1]).toMatch(/queued to auto-resume/);
+    });
+
+    it('reads the codex-events.jsonl tail from CODEX_EVENTS_FILE when set', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: true, text: '' })),
+        readCodexEventsTail: vi.fn(() => codexMessage),
+      });
+
+      await main({ ...baseEnv, BACKEND: 'codex', GITHUB_RUN_ID: '999', CODEX_EVENTS_FILE: '/tmp/custom-codex-events.jsonl' }, d);
+
+      expect(d.readCodexEventsTail).toHaveBeenCalledWith('/tmp/custom-codex-events.jsonl');
+    });
+
+    it('does not fall back to the codex-events.jsonl tail when result.json already has text', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: true, text: 'some other crash' })),
+      });
+
+      await main({ ...baseEnv, BACKEND: 'codex', GITHUB_RUN_ID: '999' }, d);
+
+      expect(d.readCodexEventsTail).not.toHaveBeenCalled();
+      expect(d.detectUsageLimit).toHaveBeenCalledWith('some other crash');
+    });
+
+    it('falls back to the generic failure notification when the codex-events.jsonl tail has no error message either', async () => {
+      const d = deps({
+        readResultText: vi.fn(() => ({ isError: true, text: '' })),
+        readCodexEventsTail: vi.fn(() => ''),
+      });
+
+      await main({ ...baseEnv, BACKEND: 'codex', GITHUB_RUN_ID: '999' }, d);
+
+      expect(d.detectUsageLimit).toHaveBeenCalledWith('');
+      expect(d.sendTelegram).toHaveBeenCalledTimes(1);
+      expect(d.sendTelegram.mock.calls[0][1]).toMatch(/ran into an error/);
+    });
+
+    it('does not consult the codex-events.jsonl tail for a non-codex backend', async () => {
+      const d = deps({ readResultText: vi.fn(() => ({ isError: true, text: '' })) });
+
+      await main({ ...baseEnv, BACKEND: 'claude' }, d);
+
+      expect(d.readCodexEventsTail).not.toHaveBeenCalled();
+      expect(d.detectUsageLimit).toHaveBeenCalledWith('');
+    });
   });
 
   it('still sends the generic failure notification when saving the codex log rejects', async () => {
