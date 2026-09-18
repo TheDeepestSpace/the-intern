@@ -33,6 +33,36 @@ function readResultText(resultFile) {
   }
 }
 
+// Codex's own crash text never reaches result.json (normalize-codex-result.js
+// only has an `agent_message` to work with, so a turn that ends on `error`/
+// `turn.failed` instead produces `{ result: "", is_error: true }` — see issue
+// #205). The raw JSONL event stream saveCodexLog just pushed to
+// the-intern-data still has it, so this re-reads the same on-disk file (not
+// the already-uploaded copy) and scans backward for the last `error` or
+// `turn.failed` event's message — that's the literal usage-limit text (or
+// any other terminal error) detectUsageLimit needs to see.
+function readCodexEventsTail(logFile) {
+  if (!logFile || !fs.existsSync(logFile)) return '';
+  let raw;
+  try {
+    raw = fs.readFileSync(logFile, 'utf8');
+  } catch {
+    return '';
+  }
+  const lines = raw.split('\n').filter((line) => line.trim());
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let event;
+    try {
+      event = JSON.parse(lines[i]);
+    } catch {
+      continue;
+    }
+    if (event.type === 'error' && typeof event.message === 'string') return event.message;
+    if (event.type === 'turn.failed' && typeof event.error?.message === 'string') return event.error.message;
+  }
+  return '';
+}
+
 function sendTelegram(chatId, text) {
   if (!chatId) return;
   try {
@@ -123,6 +153,7 @@ async function main(env = process.env, deps = {}) {
     detectUsageLimit: detectUsageLimitFn = detectUsageLimit,
     detectStalledWait: detectStalledWaitFn = detectStalledWait,
     readResultText: readResultTextFn = readResultText,
+    readCodexEventsTail: readCodexEventsTailFn = readCodexEventsTail,
     saveCodexLog: saveCodexLogFn = saveCodexLog,
     countIssueComments: countIssueCommentsFn = countIssueComments,
     countReviewCommentReplies: countReviewCommentRepliesFn = countReviewCommentReplies,
@@ -241,6 +272,8 @@ async function main(env = process.env, deps = {}) {
   // the-intern-data (private) before the container tears down, regardless of
   // whether this turns out to be a usage-limit stall or a generic failure —
   // never send any of it to Telegram or a shared-visibility artifact.
+  let detectionText = text;
+
   if (env.BACKEND === 'codex') {
     try {
       await saveCodexLogFn({
@@ -252,9 +285,21 @@ async function main(env = process.env, deps = {}) {
     } catch (err) {
       console.error(`::warning::Unexpected error saving codex log: ${err.message}`);
     }
+
+    // normalize-codex-result.js only writes result.json's text from an
+    // `agent_message` — a turn that ends on `error`/`turn.failed` (e.g. a
+    // usage-limit stall) leaves it empty, so detectUsageLimit would otherwise
+    // never see the actual error text (issue #205).
+    if (!text.trim()) {
+      const codexTail = readCodexEventsTailFn(env.CODEX_EVENTS_FILE || '/tmp/codex-events.jsonl');
+      if (codexTail) {
+        console.log('result.json was empty; falling back to the codex-events.jsonl tail for usage-limit detection.');
+        detectionText = codexTail;
+      }
+    }
   }
 
-  const stall = detectUsageLimitFn(text);
+  const stall = detectUsageLimitFn(detectionText);
   const dispatch = stall
     ? buildDispatchPayloadFn({
         eventName: env.GITHUB_EVENT_NAME,
@@ -322,4 +367,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { readResultText, countIssueComments, countReviewCommentReplies, postIssueComment, main };
+module.exports = { readResultText, readCodexEventsTail, countIssueComments, countReviewCommentReplies, postIssueComment, main };
