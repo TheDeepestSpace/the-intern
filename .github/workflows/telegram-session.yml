@@ -31,10 +31,12 @@ jobs:
   respond:
     needs: parse-trigger
     runs-on: ubuntu-latest
-    # Installation access tokens (both `token` and `data_token` above) expire
-    # after 1 hour, non-configurably. Bound this job below that so a stuck
-    # agent run fails fast instead of limping on with an expired data_token
-    # for the rest of the default 6-hour job timeout.
+    # `data_token` (the-intern-data reach, issue #141) expires after 1 hour,
+    # non-configurably, and — unlike `token` above, which the background
+    # refresher in the "Run agent" step now keeps valid past that cap
+    # (issue #145) — has no equivalent refresh yet. Bound this job below that
+    # so a stuck agent run fails fast instead of limping on with an expired
+    # data_token for the rest of the default 6-hour job timeout.
     timeout-minutes: 45
     # codex-backend runs need global serialization across the whole repo (not just
     # per-chat): codex proactively rotates its own refresh token in place, and
@@ -151,6 +153,15 @@ jobs:
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          # Let the background token refresher below (issue #145) re-mint with
+          # the same scoping the initial "Mint installation token" step above
+          # used (unscoped, since this session can act across every repo the
+          # App installation covers), once that token expires past its fixed
+          # 1hr cap.
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          TARGET_REPO: ${{ github.repository }}
+          SCOPE_TO_REPO: 'false'
           CLEAN_TEXT: ${{ needs.parse-trigger.outputs.clean_text }}
           RETRY_SOURCE: telegram
           WORKFLOW_FILE: telegram-session.yml
@@ -263,13 +274,53 @@ jobs:
 
           id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
           chown -R dev:dev . /home/dev /tmp/prompt.txt /tmp/normalize-codex-result.js 2>/dev/null || true
-          su dev -c '
+
+          # Authenticate the dev user's gh/git credential store once with the
+          # token minted above (issue #145), then re-mint and rewrite it every
+          # ~45min for the duration of the agent run below — see
+          # dispatcher.yml's matching steps for the full rationale. GH_TOKEN/
+          # GITHUB_TOKEN are stripped from the agent's own env further down
+          # (`env -u`) so its gh/git calls fall through to this refreshed
+          # on-disk store instead of a stale env var (gh prefers env vars over
+          # stored credentials, which would otherwise shadow every refresh).
+          if command -v gh >/dev/null 2>&1; then
+            INIT_TOKEN="$GH_TOKEN" env -u GH_TOKEN -u GITHUB_TOKEN su dev -c 'echo "$INIT_TOKEN" | gh auth login --with-token && gh auth setup-git'
+          fi
+
+          # Seed the dev user's own global git identity — distinct from the
+          # root-owned /root/.gitconfig set for the tg-state clone earlier in
+          # this job, which the agent below (running as dev via su) never
+          # sees. Unlike dispatcher.yml's single-target-repo runs, this
+          # session isn't scoped to one repo it can set local config on, so
+          # it needs a global default for any repo it clones/commits to
+          # mid-session. Without this, an unset identity has previously led
+          # to a session improvising one, producing a commit author
+          # (missing the required [bot] suffix) GitHub couldn't resolve to
+          # the bot's account.
+          su dev -c 'git config --global user.name "the-intern-bot[bot]" && git config --global user.email "the-intern-bot[bot]@users.noreply.github.com"'
+
+          # Reset the safety-net sentinel send-telegram.js writes on a
+          # successful send (issue #201) — the fallback check below only
+          # means anything if this run's own agent invocation had a chance to
+          # set it fresh, not a leftover from something earlier in the job.
+          rm -f /tmp/telegram-sent
+
+          # Runs as this step's own (root) user, not as dev, so
+          # APP_ID/APP_PRIVATE_KEY never reach the dev user — the same
+          # untrusted context the agent CLI runs in. Killed by PID as soon as
+          # the agent process exits, before any always() cleanup steps.
+          node "$GITHUB_WORKSPACE/scripts/refresh-gh-token.js" &
+          REFRESHER_PID=$!
+          # su dev -c below runs under this step's default set -e, so a
+          # non-zero exit (e.g. the agent CLI failing) would skip straight
+          # past the kill/wait further down and leak the refresher process.
+          trap 'kill "$REFRESHER_PID" 2>/dev/null || true; wait "$REFRESHER_PID" 2>/dev/null || true' EXIT
+
+          env -u APP_ID -u APP_PRIVATE_KEY -u GH_TOKEN -u GITHUB_TOKEN su dev -c '
             export CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"
             export TG_BOT_TOKEN="$TG_BOT_TOKEN"
             export CHAT_ID="$CHAT_ID"
             export REPLY_TO_MESSAGE_ID="$REPLY_TO_MESSAGE_ID"
-            export GH_TOKEN="$GH_TOKEN"
-            export GITHUB_TOKEN="$GITHUB_TOKEN"
             export BACKEND="$BACKEND"
             export DATA_REPO_TOKEN="$DATA_REPO_TOKEN"
             export HOME="/home/dev"
@@ -282,9 +333,30 @@ jobs:
               node /tmp/normalize-codex-result.js "$CODEX_EXIT" || true
               cp /tmp/result.json result.json 2>/dev/null || true
             else
-              claude -p "$PROMPT" --output-format json --dangerously-skip-permissions 2>&1 | tee result.json || true
+              claude -p "$PROMPT" --append-system-prompt "This is a one-shot headless run: no later turn will ever re-invoke you. Any background or async tool result you need must be polled to completion within this same turn, or it and the original request are permanently lost." --disallowedTools "Monitor,ScheduleWakeup,CronCreate,CronList,CronDelete" --output-format json --dangerously-skip-permissions 2>&1 | tee result.json || true
             fi
           '
+
+          kill "$REFRESHER_PID" 2>/dev/null || true
+          wait "$REFRESHER_PID" 2>/dev/null || true
+          trap - EXIT
+
+          # Safety net for a session that computed a full answer but forgot
+          # (or failed) to call send-telegram.js itself before its turn ended
+          # (issue #201) — that leaves the job exiting 0 with nothing ever
+          # reaching the user. send-telegram.js writes /tmp/telegram-sent on
+          # every successful send it makes (including mid-session ones), so
+          # its absence here means no send happened at all this run. Deliberately
+          # not trying to tell "sent something, but not the final answer" apart
+          # from "sent nothing" — any prior send is treated as sufficient.
+          if [ ! -f /tmp/telegram-sent ] && [ -n "$CHAT_ID" ]; then
+            IS_ERROR="$(jq -r 'if .is_error then "true" else "false" end' result.json 2>/dev/null || echo true)"
+            RESULT_TEXT="$(jq -r '.result // empty' result.json 2>/dev/null || true)"
+            if [ "$IS_ERROR" = "false" ] && [ -n "$RESULT_TEXT" ]; then
+              echo "::warning::No Telegram send detected during the session; sending its final answer as a fallback."
+              MESSAGE_TEXT="$RESULT_TEXT" node "$GITHUB_WORKSPACE/scripts/send-telegram.js" || echo "::warning::Fallback Telegram send failed."
+            fi
+          fi
 
           # See dispatcher.yml's matching step: detects a Claude usage-limit stall
           # (issue #100) and queues a pending-retries.json entry instead of leaving

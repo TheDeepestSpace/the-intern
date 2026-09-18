@@ -7,10 +7,12 @@
   },
   "devDependencies": {
     "undici": "^7.29.0",
-    "vitest": "^4.1.10",
-    "wrangler": "^4.118.0"
+    "vitest": "^5.0.0",
+    "wrangler": "^4.129.0"
   },
   "overrides": {
-    "undici": "^7.29.0"
+    "undici": "^7.29.0",
+    "nanoid": "^3.3.18",
+    "sharp": "^0.35.4"
   }
 }

@@ -84,13 +84,17 @@ describe('parse-trigger', () => {
   });
 
   describe('repository_dispatch: pull_request_review_comment shape', () => {
-    it('extracts repo, PR number, and comment body', () => {
+    it('extracts repo, PR number, comment body, comment id, and event type', () => {
       process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
       process.env.GITHUB_EVENT_PATH = writeEventPayload({
+        action: 'pull_request_review_comment',
         client_payload: {
-          repository: { full_name: 'acme/widgets' },
-          pull_request: { number: 3 },
-          comment: { body: '@the-intern-bot agy address this' },
+          raw: {
+            action: 'pull_request_review_comment',
+            repository: { full_name: 'acme/widgets' },
+            pull_request: { number: 3 },
+            comment: { id: 555666777, body: '@the-intern-bot agy address this' },
+          },
         },
       });
 
@@ -98,11 +102,43 @@ describe('parse-trigger', () => {
 
       expect(result.issue_number).toBe('3');
       expect(result.comment_body).toBe('@the-intern-bot agy address this');
+      expect(result.comment_id).toBe('555666777');
+      expect(result.event_type).toBe('pull_request_review_comment');
     });
   });
 
   describe('repository_dispatch: check_suite (ci_failure) shape', () => {
-    it('synthesizes a comment body from the check_suite conclusion and URL', () => {
+    it('synthesizes a comment body from the check_suite conclusion, URL, and head sha, with a staleness-check instruction', () => {
+      process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
+      process.env.GITHUB_EVENT_PATH = writeEventPayload({
+        action: 'ci_failure',
+        client_payload: {
+          raw: {
+            installation: { id: 4242 },
+            repository: { full_name: 'acme/widgets' },
+            pull_request: { number: 9 },
+            check_suite: {
+              conclusion: 'failure',
+              html_url: 'https://github.com/acme/widgets/pull/9/checks',
+              head_sha: 'deadbeef1234',
+            },
+          },
+        },
+      });
+
+      const result = parseTrigger();
+
+      expect(result.target_repo).toBe('acme/widgets');
+      expect(result.issue_number).toBe('9');
+      expect(result.installation_id).toBe('4242');
+      expect(result.event_type).toBe('ci_failure');
+      expect(result.comment_body).toBe(
+        "CI is failing on this PR (conclusion: failure). Check suite: https://github.com/acme/widgets/pull/9/checks. This check suite ran against commit `deadbeef1234`. Before investigating, compare that commit to the PR's current head (e.g. `gh pr view 9 --json headRefOid`). If the PR's head has already moved past `deadbeef1234`, this failure is stale - a newer commit supersedes it, so stop immediately without commenting or pushing anything. Otherwise, investigate the failing checks and push a fix."
+      );
+      expect(result.clean_prompt).toBe(result.comment_body);
+    });
+
+    it('falls back to a stop-without-acting instruction when check_suite.head_sha is absent', () => {
       process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
       process.env.GITHUB_EVENT_PATH = writeEventPayload({
         action: 'ci_failure',
@@ -121,14 +157,10 @@ describe('parse-trigger', () => {
 
       const result = parseTrigger();
 
-      expect(result.target_repo).toBe('acme/widgets');
-      expect(result.issue_number).toBe('9');
-      expect(result.installation_id).toBe('4242');
-      expect(result.event_type).toBe('ci_failure');
       expect(result.comment_body).toBe(
-        'CI is failing on this PR (conclusion: failure). Check suite: https://github.com/acme/widgets/pull/9/checks. Investigate the failing checks and push a fix.'
+        "CI is failing on this PR (conclusion: failure). Check suite: https://github.com/acme/widgets/pull/9/checks. This check suite's failing commit could not be determined, so staleness can't be safely verified - stop immediately without investigating, commenting, or pushing anything."
       );
-      expect(result.clean_prompt).toBe(result.comment_body);
+      expect(result.comment_body).not.toContain('``');
     });
   });
 

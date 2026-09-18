@@ -150,10 +150,50 @@ async function handleGitHub(request, env) {
   }
 }
 
+// Returns the set of check-run names that are completed+failing (or timed
+// out) for a given ref, or null if the API call itself failed. Callers must
+// treat null as "unknown" and fail open (dispatch) rather than assume no
+// failures.
+async function getFailingCheckNames(owner, repo, ref, token) {
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/commits/${ref}/check-runs?per_page=100`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'the-intern-bot-relay',
+        },
+      }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    const runs = data.check_runs || [];
+    return new Set(
+      runs
+        .filter(r => r.status === 'completed' && ['failure', 'timed_out'].includes(r.conclusion))
+        .map(r => r.name)
+    );
+  } catch {
+    return null;
+  }
+}
+
 // Auto-queues a fix-CI dispatch when a check suite fails on a PR the bot
 // itself opened, so it can fix its own broken PRs without a human comment.
-// No dedup/KV: a re-failing run on the same PR just re-dispatches, which is
-// the desired retry-until-fixed behavior.
+// Deduped per (PR, head commit sha) via the CI_FAILURE_DEDUP KV namespace,
+// since a same-repo bot PR commonly triggers both a `push` and a
+// `pull_request` Actions run for the identical head sha, producing two
+// check suites that would otherwise each fire their own ci_failure dispatch.
+// A *new* commit on the same PR still dispatches normally — retry-until-fixed
+// across distinct commits is preserved, only the same-commit double-fire is
+// suppressed. (handlePush below has no such double-trigger and stays KV-free.)
+//
+// Guardrail: if every failing check on the PR's head is already failing on
+// its base branch, the breakage is pre-existing (e.g. a shared transitive
+// CVE) rather than something this PR's diff introduced — skip the dispatch
+// so multiple bot PRs don't independently "fix" the same base-branch issue
+// (see #109). Fails open (dispatches) when the check-runs lookup errors.
 async function handleCheckSuite(payload, env) {
   const checkSuite = payload.check_suite;
   const pullRequests = checkSuite?.pull_requests || [];
@@ -174,11 +214,21 @@ async function handleCheckSuite(payload, env) {
   const botLogin = (env.BOT_LOGIN || 'the-intern-bot[bot]').toLowerCase();
   const sourceOwner = payload.repository?.owner?.login;
   const sourceRepo = payload.repository?.name;
+  // checkSuite.head_sha is the commit this specific check suite actually ran
+  // against and just failed for. The freshly-fetched pullRequest.head.sha
+  // below reflects the PR's *current* head as of the API call, which can
+  // already be a newer commit if the bot pushed again in between — keying on
+  // that would misattribute (or wrongly dedupe) against a commit that hasn't
+  // even finished CI yet. checkSuite.head_sha is the authoritative "commit
+  // currently failing".
+  const sha = checkSuite.head_sha;
 
   try {
     const token = await getInstallationToken(env, installationId);
 
     let dispatched = 0;
+    let deduped = 0;
+    let skippedPreExisting = 0;
     for (const { number } of pullRequests) {
       const prRes = await fetch(
         `https://api.github.com/repos/${sourceOwner}/${sourceRepo}/pulls/${number}`,
@@ -195,6 +245,23 @@ async function handleCheckSuite(payload, env) {
 
       if ((pullRequest.user?.login || '').toLowerCase() !== botLogin) continue;
 
+      const dedupKey = `ci_failure:${sourceOwner}/${sourceRepo}#${number}@${sha}`;
+      if (await env.CI_FAILURE_DEDUP.get(dedupKey)) {
+        deduped++;
+        continue;
+      }
+
+      const headFailures = await getFailingCheckNames(sourceOwner, sourceRepo, checkSuite.head_sha, token);
+      if (headFailures && headFailures.size > 0 && pullRequest.base?.sha) {
+        const baseFailures = await getFailingCheckNames(sourceOwner, sourceRepo, pullRequest.base.sha, token);
+        if (baseFailures && [...headFailures].every(name => baseFailures.has(name))) {
+          // Every failing check already fails on the base branch too - pre-existing
+          // breakage, not something this PR introduced. Skip the fix-dispatch.
+          skippedPreExisting++;
+          continue;
+        }
+      }
+
       const dispatchRes = await dispatchRepoEvent(env, token, 'ci_failure', {
         repository: payload.repository,
         pull_request: pullRequest,
@@ -206,13 +273,23 @@ async function handleCheckSuite(payload, env) {
         const errorText = await dispatchRes.text();
         return new Response(`dispatch failed: ${errorText}`, { status: 502 });
       }
+      // Marked only after a successful dispatch, so a failed delivery leaves
+      // the key unset and a subsequent retry (e.g. GitHub webhook redelivery)
+      // can still go through instead of being permanently deduped.
+      await env.CI_FAILURE_DEDUP.put(dedupKey, '1', { expirationTtl: 60 * 60 * 24 * 14 });
       dispatched++;
     }
 
-    return new Response(
-      dispatched > 0 ? 'ok' : 'ignored: no bot-authored pull requests',
-      { status: 200 }
-    );
+    if (dispatched > 0) {
+      return new Response('ok', { status: 200 });
+    }
+    if (deduped > 0) {
+      return new Response('ignored: ci_failure already dispatched for this PR+commit', { status: 200 });
+    }
+    if (skippedPreExisting > 0) {
+      return new Response('ignored: all failures pre-existing on base branch', { status: 200 });
+    }
+    return new Response('ignored: no bot-authored pull requests', { status: 200 });
   } catch (err) {
     return new Response(`internal error: ${err.message}`, { status: 500 });
   }
@@ -222,8 +299,10 @@ async function handleCheckSuite(payload, env) {
 // leaves an open bot-authored PR unmergeable. GitHub has no webhook for "PR
 // became unmergeable" — mergeable_state is computed asynchronously and only
 // exposed by polling GET /pulls/{n}, which can return null mid-computation
-// (see pollMergeableState). No dedup/KV: a PR that's still dirty on the next
-// push just re-dispatches, same retry-until-fixed shape as handleCheckSuite.
+// (see pollMergeableState). No dedup/KV: a push only fires this once per PR
+// per push (unlike handleCheckSuite's push+pull_request double check-suite),
+// and a PR that's still dirty on the next push just re-dispatches, which is
+// the intended retry-until-fixed behavior.
 async function handlePush(payload, env) {
   const defaultBranch = payload.repository?.default_branch;
   const pushedBranch = (payload.ref || '').replace(/^refs\/heads\//, '');
@@ -293,6 +372,9 @@ async function handlePush(payload, env) {
       dispatched++;
     }
 
+    if (dispatched > 0) {
+      return new Response('ok', { status: 200 });
+    }
     return new Response(
       dispatched > 0 ? 'ok' : 'ignored: no bot-authored pull requests became unmergeable',
       { status: 200 }
@@ -392,7 +474,8 @@ async function handleTelegram(request, env) {
 
   const update = await request.json();
   const message = update.message;
-  if (!message || (!message.text && !message.photo?.length)) {
+  const hasImageDocument = message?.document?.mime_type?.startsWith('image/');
+  if (!message || (!message.text && !message.photo?.length && !hasImageDocument)) {
     return new Response('ok', { status: 200 });
   }
 
@@ -439,6 +522,8 @@ async function handleTelegram(request, env) {
     if (message.photo && message.photo.length > 0) {
       // PhotoSize array is ordered smallest to largest.
       clientPayload.photo_file_id = message.photo[message.photo.length - 1].file_id;
+    } else if (hasImageDocument) {
+      clientPayload.photo_file_id = message.document.file_id;
     }
     if (message.reply_to_message) {
       const replyTo = message.reply_to_message;
@@ -447,6 +532,8 @@ async function handleTelegram(request, env) {
       if (replyTo.photo && replyTo.photo.length > 0) {
         // PhotoSize array is ordered smallest to largest.
         clientPayload.reply_to_photo_file_id = replyTo.photo[replyTo.photo.length - 1].file_id;
+      } else if (replyTo.document?.mime_type?.startsWith('image/')) {
+        clientPayload.reply_to_photo_file_id = replyTo.document.file_id;
       }
     }
 

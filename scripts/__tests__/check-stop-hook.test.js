@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { SUSPICIOUS_PATTERNS } from '../check-stop-hook.js';
+import {
+  SUSPICIOUS_PATTERNS,
+  MAX_BLOCKS,
+  decideStopAction,
+  buildReason,
+  parseRefs,
+  refsChanged,
+  filterPRsCreatedAfter,
+} from '../check-stop-hook.js';
 
 function isSuspicious(message) {
   return SUSPICIOUS_PATTERNS.some((pattern) => pattern.test(message));
@@ -27,5 +35,162 @@ describe('check-stop-hook SUSPICIOUS_PATTERNS', () => {
   it('does not flag ordinary completion text', () => {
     expect(isSuspicious('Fixed the bug and pushed a commit.')).toBe(false);
     expect(isSuspicious('Opened PR #42 with the requested changes.')).toBe(false);
+  });
+});
+
+describe('check-stop-hook decideStopAction', () => {
+  const okMessage = 'Fixed the bug and pushed a commit.';
+  const stallMessage = 'I am waiting on the test suite to finish.';
+
+  it('never blocks once work has landed, even with a suspicious message', () => {
+    const result = decideStopAction({
+      message: stallMessage,
+      statusLines: ['M some/file.js'],
+      landedWork: true,
+      blockCount: 0,
+    });
+    expect(result.block).toBe(false);
+    expect(result.nextBlockCount).toBe(0);
+  });
+
+  it('blocks on a suspicious message alone, with nothing landed and a clean tree', () => {
+    const result = decideStopAction({
+      message: stallMessage,
+      statusLines: [],
+      landedWork: false,
+      blockCount: 0,
+    });
+    expect(result.block).toBe(true);
+    expect(result.nextBlockCount).toBe(1);
+  });
+
+  it('blocks a silent bail with ordinary phrasing when tracked files are dirty and nothing landed', () => {
+    const result = decideStopAction({
+      message: okMessage,
+      statusLines: [' M scripts/foo.js'],
+      landedWork: false,
+      blockCount: 0,
+    });
+    expect(result.block).toBe(true);
+  });
+
+  it('does not block on untracked-only files with ordinary phrasing (weak signal alone)', () => {
+    const result = decideStopAction({
+      message: okMessage,
+      statusLines: ['?? scratch/debug.log'],
+      landedWork: false,
+      blockCount: 0,
+    });
+    expect(result.block).toBe(false);
+  });
+
+  it('mentions leftover untracked files in the reason when a block is already triggered', () => {
+    const result = decideStopAction({
+      message: okMessage,
+      statusLines: [' M scripts/foo.js', '?? scratch/debug.log'],
+      landedWork: false,
+      blockCount: 0,
+    });
+    expect(result.block).toBe(true);
+    expect(result.reason).toMatch(/untracked files/i);
+    expect(result.reason).toMatch(/do not sweep|rather than sweeping/i); // nudges toward explicit handling, not bulk-staging
+  });
+
+  it('stops forcing retries once the block count reaches MAX_BLOCKS', () => {
+    const result = decideStopAction({
+      message: stallMessage,
+      statusLines: [],
+      landedWork: false,
+      blockCount: MAX_BLOCKS,
+    });
+    expect(result.block).toBe(false);
+    expect(result.nextBlockCount).toBe(0);
+  });
+
+  it('keeps blocking across repeated attempts up to MAX_BLOCKS, incrementing each time', () => {
+    let blockCount = 0;
+    for (let i = 0; i < MAX_BLOCKS; i++) {
+      const result = decideStopAction({ message: stallMessage, statusLines: [], landedWork: false, blockCount });
+      expect(result.block).toBe(true);
+      blockCount = result.nextBlockCount;
+    }
+    const finalResult = decideStopAction({ message: stallMessage, statusLines: [], landedWork: false, blockCount });
+    expect(finalResult.block).toBe(false);
+  });
+});
+
+describe('check-stop-hook refsChanged', () => {
+  const baseline = [
+    'aaa111 refs/heads/main',
+    'bbb222 refs/remotes/origin/some-other-old-branch',
+  ].join('\n');
+
+  it('does not treat a pre-existing divergent ref as landed work (CodeRabbit review #169)', () => {
+    // some-other-old-branch already existed at baseline with the same tip;
+    // nothing about it changed this session.
+    const current = baseline;
+    expect(refsChanged(baseline, current)).toBe(false);
+  });
+
+  it('flags a new commit on the checked-out branch', () => {
+    const current = ['ccc333 refs/heads/main', 'bbb222 refs/remotes/origin/some-other-old-branch'].join('\n');
+    expect(refsChanged(baseline, current)).toBe(true);
+  });
+
+  it('flags a freshly created local branch not present at baseline', () => {
+    const current = [baseline, 'ddd444 refs/heads/new-feature-branch'].join('\n');
+    expect(refsChanged(baseline, current)).toBe(true);
+  });
+
+  it('treats an empty baseline as changed (no snapshot to compare against)', () => {
+    expect(refsChanged('', 'aaa111 refs/heads/main')).toBe(true);
+  });
+});
+
+describe('check-stop-hook parseRefs', () => {
+  it('maps ref name to sha, ignoring blank lines', () => {
+    const parsed = parseRefs('aaa111 refs/heads/main\n\nbbb222 refs/heads/other\n');
+    expect(parsed.get('refs/heads/main')).toBe('aaa111');
+    expect(parsed.get('refs/heads/other')).toBe('bbb222');
+    expect(parsed.size).toBe(2);
+  });
+});
+
+describe('check-stop-hook filterPRsCreatedAfter', () => {
+  const sessionStart = '2026-08-14T22:06:36Z';
+
+  it('excludes an old open PR created before session start (CodeRabbit review #169)', () => {
+    const prs = [{ number: 169, createdAt: '2026-08-14T20:00:00Z' }];
+    expect(filterPRsCreatedAfter(prs, sessionStart)).toEqual([]);
+  });
+
+  it('excludes an old closed PR created before session start', () => {
+    const prs = [{ number: 42, createdAt: '2026-01-01T00:00:00Z' }];
+    expect(filterPRsCreatedAfter(prs, sessionStart)).toEqual([]);
+  });
+
+  it('includes a PR created during this session', () => {
+    const prs = [{ number: 200, createdAt: '2026-08-14T22:10:00Z' }];
+    expect(filterPRsCreatedAfter(prs, sessionStart)).toEqual(prs);
+  });
+
+  it('does not filter when no session-start timestamp is available', () => {
+    const prs = [{ number: 169, createdAt: '2026-01-01T00:00:00Z' }];
+    expect(filterPRsCreatedAfter(prs, '')).toEqual(prs);
+  });
+});
+
+describe('check-stop-hook buildReason', () => {
+  it('produces a non-empty, readable reason for every trigger combination', () => {
+    for (const isSuspicious of [true, false]) {
+      for (const hasTrackedChanges of [true, false]) {
+        for (const hasUntracked of [true, false]) {
+          if (!isSuspicious && !hasTrackedChanges) continue; // not a real trigger combination
+          const reason = buildReason({ isSuspicious, hasTrackedChanges, hasUntracked });
+          expect(typeof reason).toBe('string');
+          expect(reason.length).toBeGreaterThan(0);
+        }
+      }
+    }
   });
 });

@@ -9,6 +9,7 @@ function parseTrigger() {
   let commentBody = '';
   let installationId = '';
   let eventType = '';
+  let commentId = '';
 
   if (eventName === 'repository_dispatch') {
     let payload = {};
@@ -35,13 +36,17 @@ function parseTrigger() {
       targetRepo = payload.repository?.full_name || '';
       issueNumber = String(payload.pull_request.number || '');
       commentBody = payload.comment.body || '';
+      commentId = String(payload.comment?.id || '');
     } else if (payload.pull_request && payload.check_suite) {
       // ci_failure: synthesized instruction, no @the-intern-bot mention needed
       // since this bypasses the mention gate entirely (the stripping regex
       // below is a no-op on text that doesn't contain the mention).
       targetRepo = payload.repository?.full_name || '';
       issueNumber = String(payload.pull_request.number || '');
-      commentBody = `CI is failing on this PR (conclusion: ${payload.check_suite.conclusion}). Check suite: ${payload.check_suite.html_url}. Investigate the failing checks and push a fix.`;
+      const headSha = payload.check_suite.head_sha || '';
+      commentBody = headSha
+        ? `CI is failing on this PR (conclusion: ${payload.check_suite.conclusion}). Check suite: ${payload.check_suite.html_url}. This check suite ran against commit \`${headSha}\`. Before investigating, compare that commit to the PR's current head (e.g. \`gh pr view ${issueNumber} --json headRefOid\`). If the PR's head has already moved past \`${headSha}\`, this failure is stale - a newer commit supersedes it, so stop immediately without commenting or pushing anything. Otherwise, investigate the failing checks and push a fix.`
+        : `CI is failing on this PR (conclusion: ${payload.check_suite.conclusion}). Check suite: ${payload.check_suite.html_url}. This check suite's failing commit could not be determined, so staleness can't be safely verified - stop immediately without investigating, commenting, or pushing anything.`;
     } else if (payload.pull_request && payload.coderabbit_review) {
       // coderabbit_review: synthesized instruction, same shape as ci_failure
       // above. The worker never reads/forwards the review body itself (tier-2
@@ -122,6 +127,7 @@ function parseTrigger() {
     model,
     effort,
     event_type: eventType,
+    comment_id: commentId,
   };
 
   console.log('Parsed trigger:', JSON.stringify(result, null, 2));
