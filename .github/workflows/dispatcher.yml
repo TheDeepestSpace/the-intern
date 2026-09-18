@@ -105,10 +105,10 @@ jobs:
 
           TAG=""
           if [ -n "$TAGS" ] && echo "$TAGS" | jq -e 'has("tags")' > /dev/null 2>&1; then
-            if echo "$TAGS" | jq -e '.tags | index("dev-latest")' > /dev/null; then
-              TAG="dev-latest"
-            elif echo "$TAGS" | jq -e '.tags | index("latest")' > /dev/null; then
+            if echo "$TAGS" | jq -e '.tags | index("latest")' > /dev/null; then
               TAG="latest"
+            elif echo "$TAGS" | jq -e '.tags | index("dev-latest")' > /dev/null; then
+              TAG="dev-latest"
             fi
           fi
 
