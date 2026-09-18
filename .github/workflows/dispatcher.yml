@@ -584,7 +584,7 @@ jobs:
 
             // Reasoning effort is kept at "xhigh" unconditionally, independent of which
             // model is in play — an explicit model= override changes only the model,
-            // never the effort (there's no effort= plumbing to backend=codex yet; this
+            // never the effort (there is no effort= plumbing to backend=codex yet; this
             // keeps that a deliberate follow-up rather than an accidental side effect of
             // this change).
             const codexModelFlags = `${codexModelFlag || "-c model=\\\"gpt-5.6-sol\\\""} -c model_reasoning_effort=\\\"xhigh\\\"`;
