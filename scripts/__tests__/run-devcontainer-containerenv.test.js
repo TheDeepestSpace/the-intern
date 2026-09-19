@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { run, resolveContainerEnv, appendToGithubEnv } from '../run-devcontainer-containerenv.js';
+import { run, resolveContainerEnv, appendToGithubEnv, isUnsafeEnvVarName } from '../run-devcontainer-containerenv.js';
 
 describe('run-devcontainer-containerenv', () => {
   let tmpDir;
@@ -100,6 +100,38 @@ describe('run-devcontainer-containerenv', () => {
     expect(warn.mock.calls[0][0]).toContain('${localEnv:HOME}');
   });
 
+  it('warns and skips reserved/execution-control variable names instead of exporting them to GITHUB_ENV', () => {
+    writeDevcontainer(
+      JSON.stringify({
+        containerEnv: {
+          PATH: '.',
+          BASH_ENV: '/tmp/evil.sh',
+          NODE_OPTIONS: '--require=/tmp/evil.js',
+          GITHUB_WORKSPACE: '/tmp/attacker',
+          NPM_CONFIG_REGISTRY: 'https://evil.example',
+          SAFE_VAR: 'ok',
+        },
+      })
+    );
+    const warn = vi.fn();
+
+    const result = run({ targetDir: tmpDir, githubEnvPath, log: () => {}, warn });
+
+    expect(result).toEqual({ loaded: true, ok: false, keys: ['SAFE_VAR'] });
+    const written = fs.readFileSync(githubEnvPath, 'utf8');
+    expect(written).toContain('SAFE_VAR<<');
+    expect(written).not.toContain('PATH<<');
+    expect(written).not.toContain('BASH_ENV<<');
+    expect(written).not.toContain('NODE_OPTIONS<<');
+    expect(written).not.toContain('GITHUB_WORKSPACE<<');
+    expect(written).not.toContain('NPM_CONFIG_REGISTRY<<');
+    expect(warn).toHaveBeenCalledTimes(5);
+    for (const call of warn.mock.calls) {
+      expect(call[0]).toContain('::warning::');
+      expect(call[0]).toContain('reserved/execution-control variable name');
+    }
+  });
+
   it('warns and skips a non-string value instead of coercing it', () => {
     writeDevcontainer(JSON.stringify({ containerEnv: { FOO: 1 } }));
     const warn = vi.fn();
@@ -180,6 +212,43 @@ describe('resolveContainerEnv', () => {
     const { resolved, skipped } = resolveContainerEnv({ A: 42 }, '/work/target');
     expect(resolved).toEqual({});
     expect(skipped).toEqual([{ key: 'A', reason: 'non-string-value' }]);
+  });
+
+  it('flags an unsafe/reserved variable name without including it in resolved, case-insensitively', () => {
+    const { resolved, skipped } = resolveContainerEnv({ Path: '.', path: '/tmp/evil' }, '/work/target');
+    expect(resolved).toEqual({});
+    expect(skipped).toEqual([
+      { key: 'Path', reason: 'unsafe-variable-name' },
+      { key: 'path', reason: 'unsafe-variable-name' },
+    ]);
+  });
+});
+
+describe('isUnsafeEnvVarName', () => {
+  it.each([
+    'PATH',
+    'path',
+    'HOME',
+    'BASH_ENV',
+    'ENV',
+    'IFS',
+    'NODE_OPTIONS',
+    'NODE_PATH',
+    'LD_PRELOAD',
+    'LD_LIBRARY_PATH',
+    'DYLD_INSERT_LIBRARIES',
+    'PYTHONPATH',
+    'GIT_SSH_COMMAND',
+    'GITHUB_WORKSPACE',
+    'GITHUB_ENV',
+    'RUNNER_TEMP',
+    'NPM_CONFIG_REGISTRY',
+  ])('flags %s as unsafe', (name) => {
+    expect(isUnsafeEnvVarName(name)).toBe(true);
+  });
+
+  it.each(['SVSCH_LOCAL_NO_VIDEO', 'MY_APP_CONFIG', 'FOO'])('does not flag %s as unsafe', (name) => {
+    expect(isUnsafeEnvVarName(name)).toBe(false);
   });
 });
 

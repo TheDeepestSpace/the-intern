@@ -21,15 +21,69 @@ const fs = require('fs');
 const path = require('path');
 const { DEVCONTAINER_RELATIVE_PATH, parseJsonc, substituteVariables } = require('./run-devcontainer-poststart');
 
+// Resolved vars land in $GITHUB_ENV, which every later *root* step in
+// dispatcher.yml also inherits (e.g. `working-directory: target` steps that
+// invoke `node "$GITHUB_WORKSPACE/scripts/...js"` before ever su-ing to the
+// dev user) — not just the dev-owned postStartCommand/agent steps this
+// feature was written for. containerEnv is target-repo-authored and
+// untrusted, so a name in either of these sets is never safe to pass
+// through, regardless of value: search-path/interpreter-hijack vars (a
+// target repo could ship its own `node` on `PATH=.`, or point NODE_OPTIONS/
+// LD_PRELOAD/BASH_ENV at a file it committed) and GitHub Actions'/npm's own
+// control vars (redefining GITHUB_WORKSPACE would repoint every later
+// `$GITHUB_WORKSPACE/scripts/...` invocation at the attacker's checkout).
+const UNSAFE_ENV_VAR_NAMES = new Set([
+  'PATH',
+  'HOME',
+  'IFS',
+  'ENV',
+  'BASH_ENV',
+  'NODE_OPTIONS',
+  'NODE_PATH',
+  'LD_PRELOAD',
+  'LD_LIBRARY_PATH',
+  'LD_AUDIT',
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+  'DYLD_FRAMEWORK_PATH',
+  'PERL5LIB',
+  'PERL5OPT',
+  'PYTHONPATH',
+  'PYTHONSTARTUP',
+  'PYTHONHOME',
+  'RUBYOPT',
+  'RUBYLIB',
+  'GEM_PATH',
+  'GEM_HOME',
+  'GIT_SSH',
+  'GIT_SSH_COMMAND',
+  'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_SYSTEM',
+  'SSL_CERT_FILE',
+  'SSL_CERT_DIR',
+  'CURL_CA_BUNDLE',
+]);
+const UNSAFE_ENV_VAR_PREFIXES = ['GITHUB_', 'RUNNER_', 'NPM_CONFIG_'];
+
+function isUnsafeEnvVarName(key) {
+  const upper = key.toUpperCase();
+  return UNSAFE_ENV_VAR_NAMES.has(upper) || UNSAFE_ENV_VAR_PREFIXES.some((prefix) => upper.startsWith(prefix));
+}
+
 // Runs each value through the same substituteVariables() used for
 // postStartCommand, so ${containerWorkspaceFolder} etc. resolve consistently.
-// Non-string values and values referencing unsupported host-side variables
-// are skipped (never silently pass a literal placeholder or non-string
-// through), leaving `resolved` containing only the vars safe to export.
+// Unsafe names, non-string values, and values referencing unsupported
+// host-side variables are all skipped (never silently pass a literal
+// placeholder, a non-string, or a dangerous name through), leaving
+// `resolved` containing only the vars safe to export.
 function resolveContainerEnv(containerEnv, workspaceFolder) {
   const resolved = {};
   const skipped = [];
   for (const [key, value] of Object.entries(containerEnv)) {
+    if (isUnsafeEnvVarName(key)) {
+      skipped.push({ key, reason: 'unsafe-variable-name' });
+      continue;
+    }
     if (typeof value !== 'string') {
       skipped.push({ key, reason: 'non-string-value' });
       continue;
@@ -88,7 +142,12 @@ function run({ targetDir, devcontainerPath, githubEnvPath, log = console.log, wa
   const { resolved, skipped } = resolveContainerEnv(containerEnv, targetDir);
 
   for (const item of skipped) {
-    if (item.reason === 'unsupported-variable') {
+    if (item.reason === 'unsafe-variable-name') {
+      warn(
+        `::warning::containerEnv.${item.key} is a reserved/execution-control variable name and can never be ` +
+          'set via devcontainer.json; skipping.'
+      );
+    } else if (item.reason === 'unsupported-variable') {
       warn(
         `::warning::containerEnv.${item.key} references unsupported variable(s) ${item.unsupported.join(', ')} ` +
           '— these are host-side devcontainer concepts with no meaning in this container; skipping.'
@@ -115,6 +174,7 @@ function run({ targetDir, devcontainerPath, githubEnvPath, log = console.log, wa
 }
 
 module.exports = {
+  isUnsafeEnvVarName,
   resolveContainerEnv,
   appendToGithubEnv,
   run,
