@@ -367,6 +367,20 @@ jobs:
             exit 1
           fi
 
+      # Reads the target repo's `.devcontainer/devcontainer.json` containerEnv map
+      # (issue #222) and exports it to $GITHUB_ENV, so it reaches every later step —
+      # including the postStartCommand step below and the "Run agent" step's own
+      # `su dev -c` invocation — without per-step threading (`su dev -c` with no
+      # login flag inherits the calling shell's environment). Placed before "Run
+      # devcontainer postStartCommand" so a postStartCommand that itself depends on
+      # a containerEnv value sees it too. Non-fatal by design, same policy as
+      # postStartCommand: a broken devcontainer.json in some target repo must not
+      # be able to take down dispatch.
+      - name: Load devcontainer containerEnv
+        if: needs.detect-image.outputs.target_repo != ''
+        working-directory: target
+        run: TARGET_DIR="$(pwd)" node "$GITHUB_WORKSPACE/scripts/run-devcontainer-containerenv.js"
+
       # Runs the target repo's `.devcontainer/devcontainer.json` postStartCommand
       # (npm install, browser binary downloads, etc. — issue #207), the same thing
       # an interactive devcontainer would run after creating the container. Confirmed
