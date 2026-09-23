@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { parseTelegramTrigger } from '../parse-telegram-trigger.js';
 
 const ENV_KEYS = ['GITHUB_EVENT_PATH', 'GITHUB_OUTPUT', 'CLEAN_TEXT_FILE'];
@@ -94,5 +94,22 @@ describe('parse-telegram-trigger', () => {
     parseTelegramTrigger();
 
     expect(fs.readFileSync(cleanTextFile, 'utf8')).toBe('what is the plan?');
+  });
+
+  describe('console logging (issue #226 follow-up)', () => {
+    it('never logs clean_text content, even though it still logs other fields', () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      process.env.GITHUB_EVENT_PATH = writeEventPayload({
+        client_payload: { text: 'backend=codex super secret message text' },
+      });
+
+      parseTelegramTrigger();
+
+      const logged = logSpy.mock.calls.map(args => args.join(' ')).join('\n');
+      logSpy.mockRestore();
+
+      expect(logged).not.toContain('super secret message text');
+      expect(logged).toContain('codex');
+    });
   });
 });

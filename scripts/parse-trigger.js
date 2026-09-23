@@ -130,7 +130,15 @@ function parseTrigger() {
     comment_id: commentId,
   };
 
-  console.log('Parsed trigger:', JSON.stringify(result, null, 2));
+  // comment_body/clean_prompt are raw issue/PR comment content and must never
+  // be logged here: this step's stdout streams straight to the public Actions
+  // log (unlike the `handle`/`respond` jobs, which redirect into $LOG_FILE),
+  // so an unredacted dump would leak that content to anyone with read access
+  // to the run (issue #226 follow-up). ::add-mask:: isn't a substitute here —
+  // GitHub Actions can't mask a value containing newlines, and arbitrary
+  // comment text routinely does.
+  const { comment_body, clean_prompt, ...loggableResult } = result;
+  console.log('Parsed trigger:', JSON.stringify(loggableResult, null, 2));
 
   // Written to a file rather than a step `env:` key (issue #226) — a step-level
   // `env:` mapping referencing this content gets auto-echoed by the Actions
