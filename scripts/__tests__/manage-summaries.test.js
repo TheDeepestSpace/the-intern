@@ -131,7 +131,7 @@ describe('manage-summaries', () => {
       expect(await fetchBackend('acme/widgets', '7')).toBe('codex');
     });
 
-    it('writes the summary to GITHUB_OUTPUT using a heredoc delimiter', async () => {
+    it('writes the summary to a file instead of GITHUB_OUTPUT (issue #226)', async () => {
       const saver = newWorkDir('work-save-out');
       process.chdir(saver);
       await saveSummary('acme/widgets', '9', 'prompt', 'result');
@@ -141,11 +141,22 @@ describe('manage-summaries', () => {
       const outputFile = path.join(tmpRoot, 'gh-output');
       fs.writeFileSync(outputFile, '');
       process.env.GITHUB_OUTPUT = outputFile;
+      const summaryFile = path.join(tmpRoot, 'prior_summary.txt');
 
-      await fetchSummary('acme/widgets', '9');
+      await fetchSummary('acme/widgets', '9', summaryFile);
 
-      const contents = fs.readFileSync(outputFile, 'utf8');
-      expect(contents).toMatch(/summary<<EOF_\w+\n[\s\S]*result[\s\S]*\nEOF_\w+\n/);
+      expect(fs.readFileSync(outputFile, 'utf8')).toBe('');
+      expect(fs.readFileSync(summaryFile, 'utf8')).toContain('result');
+    });
+
+    it('does not write a summary file when there is no prior summary', async () => {
+      const work = newWorkDir('work-fetch-no-summary');
+      process.chdir(work);
+      const summaryFile = path.join(tmpRoot, 'no-prior-summary.txt');
+
+      await fetchSummary('acme/widgets', '999', summaryFile);
+
+      expect(fs.existsSync(summaryFile)).toBe(false);
     });
 
     it('writes the persisted backend to GITHUB_OUTPUT', async () => {

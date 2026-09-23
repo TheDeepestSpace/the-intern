@@ -12,6 +12,7 @@ const ENV_KEYS = [
   'INPUT_PR_NUMBER',
   'INPUT_COMMENT_BODY',
   'INPUT_INSTALLATION_ID',
+  'CLEAN_PROMPT_FILE',
 ];
 
 function writeEventPayload(payload) {
@@ -391,6 +392,20 @@ describe('parse-trigger', () => {
 
       const contents = fs.readFileSync(outputFile, 'utf8');
       expect(contents).toMatch(/comment_body<<EOF_\w+\nline one\nline two\nEOF_\w+\n/);
+    });
+
+    it('writes clean_prompt to CLEAN_PROMPT_FILE instead of only GITHUB_OUTPUT (issue #226)', () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clean-prompt-file-'));
+      const cleanPromptFile = path.join(dir, 'clean_prompt.txt');
+      process.env.CLEAN_PROMPT_FILE = cleanPromptFile;
+      process.env.GITHUB_EVENT_NAME = 'workflow_dispatch';
+      process.env.INPUT_TARGET_REPO = 'acme/widgets';
+      process.env.INPUT_PR_NUMBER = '1';
+      process.env.INPUT_COMMENT_BODY = 'fix the parser bug';
+
+      parseTrigger();
+
+      expect(fs.readFileSync(cleanPromptFile, 'utf8')).toBe('fix the parser bug');
     });
   });
 });

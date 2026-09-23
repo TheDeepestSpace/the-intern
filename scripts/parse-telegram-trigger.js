@@ -27,6 +27,14 @@ function parseTelegramTrigger() {
 
   console.log('Parsed Telegram trigger:', JSON.stringify(result, null, 2));
 
+  // Written to a file rather than a step `env:` key (issue #226) — a step-level
+  // `env:` mapping referencing this content gets auto-echoed by the Actions
+  // runner as plaintext before the step's script ever runs, regardless of any
+  // stdout/stderr redirect the script itself does.
+  if (process.env.CLEAN_TEXT_FILE) {
+    fs.writeFileSync(process.env.CLEAN_TEXT_FILE, result.clean_text, 'utf8');
+  }
+
   if (process.env.GITHUB_OUTPUT) {
     for (const [k, v] of Object.entries(result)) {
       if (typeof v === 'string' && v.includes('\n')) {
