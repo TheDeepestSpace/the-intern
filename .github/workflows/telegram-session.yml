@@ -158,6 +158,20 @@ jobs:
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
 
+      # Re-parses the same triggering event (rather than consuming
+      # needs.parse-trigger.outputs.clean_text directly below) and writes the
+      # message text straight to a file instead of a step `env:` key (issue
+      # #226) — a step-level `env:` mapping referencing this content gets
+      # auto-echoed by the Actions runner as plaintext before the step's
+      # script ever runs, regardless of any stdout/stderr redirect the script
+      # itself does.
+      - name: Write clean message text to file for agent step
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          node scripts/parse-telegram-trigger.js
+        env:
+          CLEAN_TEXT_FILE: clean_text.txt
+
       - name: Run agent (fresh session with convo.md context)
         working-directory: tg-state
         env:
@@ -176,7 +190,6 @@ jobs:
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           TARGET_REPO: ${{ github.repository }}
           SCOPE_TO_REPO: 'false'
-          CLEAN_TEXT: ${{ needs.parse-trigger.outputs.clean_text }}
           RETRY_SOURCE: telegram
           WORKFLOW_FILE: telegram-session.yml
           DISPATCH_REF: ${{ github.ref_name }}
@@ -190,7 +203,7 @@ jobs:
           DATA_REPO_TOKEN: ${{ steps.data_token.outputs.token }}
         run: |
           exec >> "$LOG_FILE" 2>&1
-          export MESSAGE="$CLEAN_TEXT"
+          export MESSAGE="$(cat ../clean_text.txt 2>/dev/null || true)"
           export CHAT_ID="$(jq -r '.client_payload.chat_id // empty' "$GITHUB_EVENT_PATH")"
           export REPLY_TO_MESSAGE_ID="$(jq -r '.client_payload.message_id // empty' "$GITHUB_EVENT_PATH")"
           export PHOTO_FILE_ID="$(jq -r '.client_payload.photo_file_id // empty' "$GITHUB_EVENT_PATH")"

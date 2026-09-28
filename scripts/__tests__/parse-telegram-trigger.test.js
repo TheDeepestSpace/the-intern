@@ -1,10 +1,10 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { parseTelegramTrigger } from '../parse-telegram-trigger.js';
 
-const ENV_KEYS = ['GITHUB_EVENT_PATH', 'GITHUB_OUTPUT'];
+const ENV_KEYS = ['GITHUB_EVENT_PATH', 'GITHUB_OUTPUT', 'CLEAN_TEXT_FILE'];
 
 function writeEventPayload(payload) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'parse-telegram-trigger-'));
@@ -81,5 +81,35 @@ describe('parse-telegram-trigger', () => {
     const contents = fs.readFileSync(outputFile, 'utf8');
     expect(contents).toContain('backend=codex');
     expect(contents).toContain('clean_text=what is the plan?');
+  });
+
+  it('writes clean_text to CLEAN_TEXT_FILE instead of only GITHUB_OUTPUT (issue #226)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clean-text-file-'));
+    const cleanTextFile = path.join(dir, 'clean_text.txt');
+    process.env.CLEAN_TEXT_FILE = cleanTextFile;
+    process.env.GITHUB_EVENT_PATH = writeEventPayload({
+      client_payload: { text: 'backend=codex what is the plan?' },
+    });
+
+    parseTelegramTrigger();
+
+    expect(fs.readFileSync(cleanTextFile, 'utf8')).toBe('what is the plan?');
+  });
+
+  describe('console logging (issue #226 follow-up)', () => {
+    it('never logs clean_text content, even though it still logs other fields', () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      process.env.GITHUB_EVENT_PATH = writeEventPayload({
+        client_payload: { text: 'backend=codex super secret message text' },
+      });
+
+      parseTelegramTrigger();
+
+      const logged = logSpy.mock.calls.map(args => args.join(' ')).join('\n');
+      logSpy.mockRestore();
+
+      expect(logged).not.toContain('super secret message text');
+      expect(logged).toContain('codex');
+    });
   });
 });

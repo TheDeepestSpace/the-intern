@@ -103,4 +103,21 @@ describe.each([
     expect(uploadStep.chunk).toMatch(/manage-run-log\.js/);
     expect(uploadStep.chunk).toMatch(/DATA_REPO_TOKEN: \$\{\{ secrets\.DATA_REPO_TOKEN \}\}/);
   });
+
+  // issue #226: the runner auto-echoes a step's resolved `env:` mapping as a
+  // plaintext key/value dump before that step's script ever runs — a second,
+  // unrelated leak channel that `exec >> "$LOG_FILE" 2>&1` (checked above)
+  // has no effect on, since it's step setup rather than script stdout/stderr.
+  // clean_text/clean_prompt/the prior summary are raw Telegram/issue/comment
+  // content, so none of them may ever be the value of a step-level `env:`
+  // key — they must instead reach a step's script via a file an earlier step
+  // wrote, read with `cat` inside the script body.
+  it('never gives a step-level `env:` key a value derived from clean_text/clean_prompt/prior-summary content', () => {
+    const CONTENT_BEARING_OUTPUT = /\.outputs\.(clean_text|clean_prompt|summary)\b/;
+    const offenders = steps.filter(s => {
+      const envBlockMatch = s.chunk.match(/\n {8}env:\n((?: {10}.*\n?)*)/);
+      return envBlockMatch ? CONTENT_BEARING_OUTPUT.test(envBlockMatch[1]) : false;
+    });
+    expect(offenders.map(s => s.name)).toEqual([]);
+  });
 });
