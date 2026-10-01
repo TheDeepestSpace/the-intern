@@ -30,7 +30,11 @@ function sanitizeSlug(value) {
 }
 
 function getLogPath(targetRepo, issueNumber, runId) {
-  return path.join(sanitizeSlug(targetRepo), sanitizeSlug(issueNumber), `${sanitizeSlug(runId)}.jsonl`);
+  // telegram-session.yml runs have no issue/PR to key off of (issue #232) —
+  // fall back to a fixed sentinel segment rather than skipping the upload
+  // entirely, so those failures still land somewhere browsable.
+  const issueSlug = issueNumber ? sanitizeSlug(issueNumber) : 'no-issue';
+  return path.join(sanitizeSlug(targetRepo), issueSlug, `${sanitizeSlug(runId)}.jsonl`);
 }
 
 // Args are passed as an array (execFileSync, not a shell) so none of
@@ -90,8 +94,8 @@ function pushWithRetry(remoteUrl, gitOpts, prepare, { maxAttempts = 3 } = {}) {
 // handling flow (the Telegram alert still needs to go out), so every error
 // path here only warns.
 async function saveCodexLog({ targetRepo, issueNumber, runId, logFile = '/tmp/codex-events.jsonl' } = {}) {
-  if (!targetRepo || !issueNumber || !runId) {
-    console.log('Skipping codex log upload: missing targetRepo, issueNumber, or runId.');
+  if (!targetRepo || !runId) {
+    console.log('Skipping codex log upload: missing targetRepo or runId.');
     return;
   }
   if (!fs.existsSync(logFile)) {

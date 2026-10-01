@@ -241,11 +241,19 @@ async function main(env = process.env, deps = {}) {
   // the-intern-data (private) before the container tears down, regardless of
   // whether this turns out to be a usage-limit stall or a generic failure —
   // never send any of it to Telegram or a shared-visibility artifact.
+  //
+  // telegram-session.yml calls never set ISSUE_NUMBER (there's no issue/PR a
+  // live chat session is tied to), which used to make saveCodexLog's own
+  // `issueNumber` guard skip the upload entirely — silently losing the only
+  // diagnostic for every telegram+codex failure (issue #232). Key those runs
+  // by chat id instead so saveCodexLog still has something non-empty to path
+  // on; manage-codex-log.js itself now falls back further if even that is
+  // unavailable.
   if (env.BACKEND === 'codex') {
     try {
       await saveCodexLogFn({
         targetRepo,
-        issueNumber,
+        issueNumber: issueNumber || (retryChatId ? `telegram-${retryChatId}` : ''),
         runId: env.GITHUB_RUN_ID,
         logFile: env.CODEX_EVENTS_FILE || undefined,
       });
