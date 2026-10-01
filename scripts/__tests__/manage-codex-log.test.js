@@ -66,6 +66,10 @@ describe('manage-codex-log', () => {
         path.join('acme-weird-repo-name', '7', '12345.jsonl')
       );
     });
+
+    it('falls back to a "no-issue" sentinel segment when issueNumber is empty', () => {
+      expect(getLogPath('acme/widgets', '', '12345')).toBe(path.join('acme-widgets', 'no-issue', '12345.jsonl'));
+    });
   });
 
   describe('saveCodexLog', () => {
@@ -109,17 +113,27 @@ describe('manage-codex-log', () => {
       expect(readFromRemote(getLogPath('acme/widgets', '5', '2'))).toBe('run b');
     });
 
-    it('does nothing when targetRepo, issueNumber, or runId is missing', async () => {
+    it('does nothing when targetRepo or runId is missing', async () => {
       const work = newWorkDir('save-missing-key');
       process.chdir(work);
       const logFile = path.join(tmpRoot, 'codex-events.jsonl');
       fs.writeFileSync(logFile, 'content\n');
 
       await saveCodexLog({ targetRepo: '', issueNumber: '5', runId: '1', logFile });
-      await saveCodexLog({ targetRepo: 'acme/widgets', issueNumber: '', runId: '1', logFile });
       await saveCodexLog({ targetRepo: 'acme/widgets', issueNumber: '5', runId: '', logFile });
 
       expect(sh(`git ls-remote ${dataRemoteDir} ${BRANCH_NAME}`, work)).toBe('');
+    });
+
+    it('saves under a "no-issue" sentinel path when issueNumber is missing (e.g. telegram-session.yml failures)', async () => {
+      const work = newWorkDir('save-no-issue');
+      process.chdir(work);
+      const logFile = path.join(tmpRoot, 'codex-events.jsonl');
+      fs.writeFileSync(logFile, 'content\n');
+
+      await saveCodexLog({ targetRepo: 'acme/widgets', issueNumber: '', runId: '1', logFile });
+
+      expect(readFromRemote(getLogPath('acme/widgets', '', '1'))).toBe('content');
     });
 
     it('does nothing when the log file does not exist', async () => {
