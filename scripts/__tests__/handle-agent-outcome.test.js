@@ -567,6 +567,19 @@ describe('main', () => {
     );
   });
 
+  it('keys the codex log by chat id when ISSUE_NUMBER is unset (telegram-session.yml calls)', async () => {
+    const d = deps({ readResultText: vi.fn(() => ({ isError: true, text: 'some other crash' })) });
+
+    await main(
+      { ...baseEnv, BACKEND: 'codex', GITHUB_RUN_ID: '999', TARGET_REPO: 'owner/repo', RETRY_CHAT_ID: '555' },
+      d
+    );
+
+    expect(d.saveCodexLog).toHaveBeenCalledWith(
+      expect.objectContaining({ targetRepo: 'owner/repo', issueNumber: 'telegram-555', runId: '999' })
+    );
+  });
+
   it('does not save the codex event log on a claude-backend failure', async () => {
     const d = deps({ readResultText: vi.fn(() => ({ isError: true, text: 'some other crash' })) });
 

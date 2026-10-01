@@ -8,3 +8,7 @@ AGENT_INFRA_OWNER = "TheDeepestSpace"
 AGENT_INFRA_REPO = "the-intern"
 
 # no-op change to trigger deploy-worker.yml after Node 22 fix (#27)
+
+[[kv_namespaces]]
+binding = "CI_FAILURE_DEDUP"
+id = "fcf245f1528e47f7a38215cc678977ba"

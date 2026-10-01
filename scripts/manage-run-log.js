@@ -1,44 +1,54 @@
-// Pushes the raw codex event log (/tmp/codex-events.jsonl) to the-intern-data
-// on a codex-backend failure (issue #134), so an intermittent crash is
-// debuggable after the ephemeral container is torn down. Replaces #94's
-// approach (closed unmerged): that PR inlined a log snippet into the Telegram
-// alert and uploaded the full log as a GitHub Actions artifact, and
-// CodeRabbit flagged both as a credential-disclosure risk since codex has
-// access to the restored GitHub auth file. Here the raw log never reaches
-// Telegram (the alert stays generic) or a GH Actions artifact (semi-shared
-// visibility); the only sink is the-intern-data, which is private, so no
-// redaction pass is needed.
+// Uploads the silenced, accumulated stdout/stderr log for a dispatcher/
+// telegram-session run to the-intern-data (private) when the job fails
+// (issue #224). Every `run:` step in those jobs redirects its own output into
+// a single on-disk log file instead of streaming it to the public Actions
+// log; this module is the "always() ... if: failure()" step at the end of
+// each job that pushes whatever accumulated there before the container tears
+// down. On a successful run nothing calls this, so nothing is ever uploaded
+// and the public log stays empty.
+//
+// Same shared-branch-per-log pattern as manage-codex-log.js: failures are
+// rare and diagnostic, so there's no benefit to per-issue branch
+// proliferation, and a single branch keeps every log path-browsable under
+// one tree. Kept as a separate module (rather than generalizing
+// manage-codex-log.js) since the two are wired up on different triggers —
+// this one fires on any job failure regardless of backend or step, while
+// manage-codex-log.js fires only on a detected codex-backend agent failure.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { resolveDataRepoRemoteUrl, redactUrl } = require('./data-repo-remote.js');
 
-// Single shared branch (like pending-retries.json) rather than one branch per
-// issue (like summaries/workspace backups): failures are rare and diagnostic,
-// so there is no benefit to per-issue branch proliferation here, and a single
-// branch keeps every log path-browsable under one tree.
-const BRANCH_NAME = 'codex-logs';
-// Caps what gets pushed, not what codex wrote to disk: keeps a single
+const BRANCH_NAME = 'run-logs';
+// Caps what gets pushed, not what the job wrote to disk: keeps a single
 // pathological run from ballooning the-intern-data. The tail is what matters
-// for debugging a crash anyway (mirrors manage-workspace-backup.js's
-// TRANSCRIPT_TAIL_BYTES reasoning).
+// for debugging a failure anyway (mirrors manage-codex-log.js's
+// MAX_LOG_BYTES/manage-workspace-backup.js's TRANSCRIPT_TAIL_BYTES reasoning).
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
 
 function sanitizeSlug(value) {
   return String(value).replace(/[^a-zA-Z0-9_-]/g, '-');
 }
 
-function getLogPath(targetRepo, issueNumber, runId) {
-  // telegram-session.yml runs have no issue/PR to key off of (issue #232) —
-  // fall back to a fixed sentinel segment rather than skipping the upload
-  // entirely, so those failures still land somewhere browsable.
-  const issueSlug = issueNumber ? sanitizeSlug(issueNumber) : 'no-issue';
-  return path.join(sanitizeSlug(targetRepo), issueSlug, `${sanitizeSlug(runId)}.jsonl`);
+// `prefix` is a caller-supplied, already-slash-delimited namespace (e.g.
+// "dispatcher/acme-widgets/42" or "telegram-session") — each segment is
+// sanitized individually so the slashes stay meaningful path separators
+// instead of being collapsed into dashes.
+function sanitizePrefix(prefix) {
+  return String(prefix || 'unknown')
+    .split('/')
+    .filter(Boolean)
+    .map(sanitizeSlug)
+    .join('/');
+}
+
+function getLogPath(prefix, runId) {
+  return path.join(sanitizePrefix(prefix), `${sanitizeSlug(runId)}.log`);
 }
 
 // Args are passed as an array (execFileSync, not a shell) so none of
-// remoteUrl/targetRepo/issueNumber/runId/commit-message ever go through shell
+// remoteUrl/prefix/runId/commit-message ever go through shell
 // interpretation, however they're generated upstream.
 function runGit(args, options = {}) {
   const { allowFailure = false, stdio: callerStdio, ...execOptions } = options;
@@ -65,9 +75,9 @@ async function resolveRemoteUrl() {
   return remoteUrl;
 }
 
-// Same retry-on-non-fast-forward shape as manage-workspace-backup.js's
-// pushWithRetry: concurrent codex failures across different runs can race on
-// this single shared branch.
+// Same retry-on-non-fast-forward shape as manage-codex-log.js's
+// pushWithRetry: concurrent failures across different runs can race on this
+// single shared branch.
 function pushWithRetry(remoteUrl, gitOpts, prepare, { maxAttempts = 3 } = {}) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     runGit(['checkout', '--detach'], { ...gitOpts, allowFailure: true });
@@ -90,16 +100,17 @@ function pushWithRetry(remoteUrl, gitOpts, prepare, { maxAttempts = 3 } = {}) {
   }
 }
 
-// Best-effort: a failure here must never fail the caller's own failure-
-// handling flow (the Telegram alert still needs to go out), so every error
-// path here only warns.
-async function saveCodexLog({ targetRepo, issueNumber, runId, logFile = '/tmp/codex-events.jsonl' } = {}) {
-  if (!targetRepo || !runId) {
-    console.log('Skipping codex log upload: missing targetRepo or runId.');
+// Best-effort: a failure here must never fail the caller's own failure
+// handling — the job is already in a failed state, and the Telegram alert
+// (if any) doesn't depend on this succeeding. Every error path here only
+// warns.
+async function saveRunLog({ prefix, runId, logFile = '/tmp/run.log' } = {}) {
+  if (!prefix || !runId) {
+    console.log('Skipping run log upload: missing prefix or runId.');
     return;
   }
   if (!fs.existsSync(logFile)) {
-    console.log(`No codex event log at ${logFile}; nothing to save.`);
+    console.log(`No run log at ${logFile}; nothing to save.`);
     return;
   }
 
@@ -107,11 +118,11 @@ async function saveCodexLog({ targetRepo, issueNumber, runId, logFile = '/tmp/co
   try {
     content = fs.readFileSync(logFile, 'utf8');
   } catch (err) {
-    console.warn(`::warning::Could not read codex log ${logFile}: ${err.message}`);
+    console.warn(`::warning::Could not read run log ${logFile}: ${err.message}`);
     return;
   }
   if (!content.trim()) {
-    console.log('Codex event log is empty; nothing to save.');
+    console.log('Run log is empty; nothing to save.');
     return;
   }
   const contentBytes = Buffer.from(content, 'utf8');
@@ -128,17 +139,16 @@ async function saveCodexLog({ targetRepo, issueNumber, runId, logFile = '/tmp/co
   try {
     remoteUrl = await resolveRemoteUrl();
   } catch (err) {
-    console.warn(`::warning::Skipping codex log upload: ${err.message}`);
+    console.warn(`::warning::Skipping run log upload: ${err.message}`);
     return;
   }
 
-  const relPath = getLogPath(targetRepo, issueNumber, runId);
+  const relPath = getLogPath(prefix, runId);
 
   // Runs in a temporary worktree rather than the caller's own checkout: this
-  // is called mid-job from a step (handle-agent-outcome.js) whose caller
-  // still needs the outer agent-infra checkout intact for later steps —
-  // same constraint manage-pending-retries.js's updateEntries documents.
-  const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-log-'));
+  // is called from a job's final step, whose caller (the outer agent-infra
+  // checkout) doesn't need to end up on this orphan branch.
+  const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'run-log-'));
   const gitOpts = { cwd: worktreeDir };
   try {
     runGit(['worktree', 'add', '--detach', worktreeDir]);
@@ -159,11 +169,11 @@ async function saveCodexLog({ targetRepo, issueNumber, runId, logFile = '/tmp/co
       fs.writeFileSync(destPath, content, 'utf8');
 
       runGit(['add', '--', relPath], gitOpts);
-      runGit(['commit', '-m', `codex-log: ${targetRepo} #${issueNumber} run ${runId}`], gitOpts);
+      runGit(['commit', '-m', `run-log: ${prefix} run ${runId}`], gitOpts);
     });
-    console.log(`Pushed codex event log to the-intern-data:${BRANCH_NAME}/${relPath}`);
+    console.log(`Pushed run log to the-intern-data:${BRANCH_NAME}/${relPath}`);
   } catch (err) {
-    console.warn(`::warning::Failed to push codex event log: ${err.message}`);
+    console.warn(`::warning::Failed to push run log: ${err.message}`);
   } finally {
     runGit(['branch', '-D', BRANCH_NAME], { ...gitOpts, allowFailure: true });
     runGit(['worktree', 'remove', '--force', worktreeDir], { allowFailure: true });
@@ -171,4 +181,17 @@ async function saveCodexLog({ targetRepo, issueNumber, runId, logFile = '/tmp/co
   }
 }
 
-module.exports = { BRANCH_NAME, MAX_LOG_BYTES, getLogPath, saveCodexLog };
+if (require.main === module) {
+  saveRunLog({
+    prefix: process.env.RUN_LOG_PREFIX,
+    runId: process.env.GITHUB_RUN_ID,
+    logFile: process.env.LOG_FILE || undefined,
+  }).catch(err => {
+    // Mirrors the best-effort contract above: log it, but don't flip the
+    // step (and thus the already-failed job) into a harder failure over a
+    // debugging aid that didn't make it out.
+    console.warn(`::warning::Unexpected error saving run log: ${err.message}`);
+  });
+}
+
+module.exports = { BRANCH_NAME, MAX_LOG_BYTES, getLogPath, saveRunLog };

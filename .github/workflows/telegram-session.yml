@@ -62,6 +62,11 @@ jobs:
       options: --user root
     env:
       CODEX_HOME: /home/dev/.codex
+      # Every `run:` step below redirects its own stdout/stderr into this file
+      # instead of streaming to the public Actions log (issue #224); the
+      # "Upload run log on failure" step at the end of the job is the only
+      # thing that ever reads it back out, and only when the job failed.
+      LOG_FILE: /tmp/run.log
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -79,7 +84,9 @@ jobs:
       # repo it was dispatched for.
       - name: Mint installation token
         id: token
-        run: node scripts/mint-installation-token.js
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          node scripts/mint-installation-token.js
         env:
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
@@ -94,7 +101,9 @@ jobs:
       # permission the app installation has, not just what's used here.
       - name: Mint installation token for the-intern-data
         id: data_token
-        run: node scripts/mint-installation-token.js
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          node scripts/mint-installation-token.js
         env:
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
@@ -108,6 +117,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
         run: |
+          exec >> "$LOG_FILE" 2>&1
           REPO_URL="https://github.com/TheDeepestSpace/the-intern-data.git"
           git config --global user.name "the-intern-bot[bot]"
           git config --global user.email "the-intern-bot[bot]@users.noreply.github.com"
@@ -133,16 +143,34 @@ jobs:
 
       - name: Install script dependencies for Codex auth round-trip
         if: needs.parse-trigger.outputs.backend == 'codex'
-        run: npm ci --omit=dev --include=prod --no-audit --no-fund
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          npm ci --omit=dev --include=prod --no-audit --no-fund
 
       # See dispatcher.yml's matching step for the full rationale — same
       # personal-account Codex login round-trip, just triggered from Telegram
       # instead of a GH comment.
       - name: Restore Codex auth.json from secret
         if: needs.parse-trigger.outputs.backend == 'codex'
-        run: node scripts/rotate-codex-auth.js restore || echo "::warning::Codex auth.json restore failed; codex exec will fail without valid credentials"
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          node scripts/rotate-codex-auth.js restore || echo "::warning::Codex auth.json restore failed; codex exec will fail without valid credentials"
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+
+      # Re-parses the same triggering event (rather than consuming
+      # needs.parse-trigger.outputs.clean_text directly below) and writes the
+      # message text straight to a file instead of a step `env:` key (issue
+      # #226) — a step-level `env:` mapping referencing this content gets
+      # auto-echoed by the Actions runner as plaintext before the step's
+      # script ever runs, regardless of any stdout/stderr redirect the script
+      # itself does.
+      - name: Write clean message text to file for agent step
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          node scripts/parse-telegram-trigger.js
+        env:
+          CLEAN_TEXT_FILE: clean_text.txt
 
       - name: Run agent (fresh session with convo.md context)
         working-directory: tg-state
@@ -162,7 +190,6 @@ jobs:
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           TARGET_REPO: ${{ github.repository }}
           SCOPE_TO_REPO: 'false'
-          CLEAN_TEXT: ${{ needs.parse-trigger.outputs.clean_text }}
           RETRY_SOURCE: telegram
           WORKFLOW_FILE: telegram-session.yml
           DISPATCH_REF: ${{ github.ref_name }}
@@ -175,7 +202,8 @@ jobs:
           # to pass through to the agent shell below.
           DATA_REPO_TOKEN: ${{ steps.data_token.outputs.token }}
         run: |
-          export MESSAGE="$CLEAN_TEXT"
+          exec >> "$LOG_FILE" 2>&1
+          export MESSAGE="$(cat ../clean_text.txt 2>/dev/null || true)"
           export CHAT_ID="$(jq -r '.client_payload.chat_id // empty' "$GITHUB_EVENT_PATH")"
           export REPLY_TO_MESSAGE_ID="$(jq -r '.client_payload.message_id // empty' "$GITHUB_EVENT_PATH")"
           export PHOTO_FILE_ID="$(jq -r '.client_payload.photo_file_id // empty' "$GITHUB_EVENT_PATH")"
@@ -299,6 +327,12 @@ jobs:
           # the bot's account.
           su dev -c 'git config --global user.name "the-intern-bot[bot]" && git config --global user.email "the-intern-bot[bot]@users.noreply.github.com"'
 
+          # Reset the safety-net sentinel send-telegram.js writes on a
+          # successful send (issue #201) — the fallback check below only
+          # means anything if this run's own agent invocation had a chance to
+          # set it fresh, not a leftover from something earlier in the job.
+          rm -f /tmp/telegram-sent
+
           # Runs as this step's own (root) user, not as dev, so
           # APP_ID/APP_PRIVATE_KEY never reach the dev user — the same
           # untrusted context the agent CLI runs in. Killed by PID as soon as
@@ -327,13 +361,30 @@ jobs:
               node /tmp/normalize-codex-result.js "$CODEX_EXIT" || true
               cp /tmp/result.json result.json 2>/dev/null || true
             else
-              claude -p "$PROMPT" --append-system-prompt "This is a one-shot headless run: no later turn will ever re-invoke you. Any background or async tool result you need must be polled to completion within this same turn, or it and the original request are permanently lost." --disallowedTools "Monitor,ScheduleWakeup,CronCreate,CronList,CronDelete" --output-format json --dangerously-skip-permissions 2>&1 | tee result.json || true
+              claude -p "$PROMPT" --append-system-prompt "This is a one-shot headless run: no later turn will ever re-invoke you. Any background or async tool result you need must be polled to completion within this same turn, or it and the original request are permanently lost." --disallowedTools "Monitor,ScheduleWakeup,CronCreate,CronList,CronDelete" --output-format json --dangerously-skip-permissions > result.json 2>&1 || true
             fi
           '
 
           kill "$REFRESHER_PID" 2>/dev/null || true
           wait "$REFRESHER_PID" 2>/dev/null || true
           trap - EXIT
+
+          # Safety net for a session that computed a full answer but forgot
+          # (or failed) to call send-telegram.js itself before its turn ended
+          # (issue #201) — that leaves the job exiting 0 with nothing ever
+          # reaching the user. send-telegram.js writes /tmp/telegram-sent on
+          # every successful send it makes (including mid-session ones), so
+          # its absence here means no send happened at all this run. Deliberately
+          # not trying to tell "sent something, but not the final answer" apart
+          # from "sent nothing" — any prior send is treated as sufficient.
+          if [ ! -f /tmp/telegram-sent ] && [ -n "$CHAT_ID" ]; then
+            IS_ERROR="$(jq -r 'if .is_error then "true" else "false" end' result.json 2>/dev/null || echo true)"
+            RESULT_TEXT="$(jq -r '.result // empty' result.json 2>/dev/null || true)"
+            if [ "$IS_ERROR" = "false" ] && [ -n "$RESULT_TEXT" ]; then
+              echo "::warning::No Telegram send detected during the session; sending its final answer as a fallback."
+              MESSAGE_TEXT="$RESULT_TEXT" node "$GITHUB_WORKSPACE/scripts/send-telegram.js" || echo "::warning::Fallback Telegram send failed."
+            fi
+          fi
 
           # See dispatcher.yml's matching step: detects a Claude usage-limit stall
           # (issue #100) and queues a pending-retries.json entry instead of leaving
@@ -350,7 +401,9 @@ jobs:
       # on disk that needs writing back regardless of outcome.
       - name: Persist refreshed Codex auth.json to secret
         if: always() && needs.parse-trigger.outputs.backend == 'codex'
-        run: node scripts/rotate-codex-auth.js persist
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          node scripts/rotate-codex-auth.js persist
         env:
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
@@ -360,6 +413,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
         run: |
+          exec >> "$LOG_FILE" 2>&1
           git config user.name "the-intern-bot[bot]"
           git config user.email "the-intern-bot[bot]@users.noreply.github.com"
           git add convo.md
@@ -383,6 +437,26 @@ jobs:
           done
           echo "::error::Failed to push convo.md to telegram branch after retries."
           exit 1
+
+      # Pushes whatever accumulated in $LOG_FILE (issue #224) to the-intern-data
+      # (private) so a post-mortem is possible after the public log was silenced
+      # above — only runs when something in this job actually failed (failure()
+      # is true if any prior step failed and wasn't continue-on-error'd), so a
+      # successful run uploads nothing and the public log stays empty. No
+      # natural per-repo/issue scoping here (unlike dispatcher.yml, a Telegram
+      # session isn't tied to one target repo), so the run id alone keys the
+      # log path.
+      - name: Upload run log on failure
+        if: failure()
+        continue-on-error: true
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          node "$GITHUB_WORKSPACE/scripts/manage-run-log.js"
+        env:
+          RUN_LOG_PREFIX: telegram-session
+          # Lets manage-run-log.js authenticate to the-intern-data (issue
+          # #124), same pattern as manage-summaries.js/manage-workspace-backup.js.
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
 
   notify-failure:
     needs: respond
