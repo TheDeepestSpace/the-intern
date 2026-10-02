@@ -37,9 +37,15 @@ RUN if ! command -v node >/dev/null 2>&1; then \
       rm -f "${NODE_TARBALL}"; \
     fi
 
-RUN command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code
+# Always (re)install claude/codex to our pinned versions rather than skipping
+# when a binary of the same name is already present: target repos that ship
+# their own devcontainer image can bundle an old codex/claude CLI, and a
+# command-v guard would silently keep running that stale binary forever
+# regardless of CODEX_VERSION here (e.g. gpt-6-astra requiring a newer Codex
+# CLI than a repo's baked-in one, issue found 2026-10-02).
+RUN npm install -g @anthropic-ai/claude-code
 
-RUN command -v codex >/dev/null 2>&1 || npm install -g @openai/codex@${CODEX_VERSION}
+RUN npm install -g @openai/codex@${CODEX_VERSION}
 
 RUN if ! command -v gh >/dev/null 2>&1; then \
       ARCH="$(uname -m)"; \
