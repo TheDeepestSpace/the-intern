@@ -1,5 +1,5 @@
 # CI image (base build and runtime environment)
-FROM public.ecr.aws/lts/ubuntu:22.04_stable AS ci
+FROM docker.io/ubuntu:22.04 AS ci
 ARG DEBIAN_FRONTEND=noninteractive
 
 # Update and install essential tools
