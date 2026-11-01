@@ -572,6 +572,24 @@ async function handleCodeRabbitReview(payload, env) {
   }
 }
 
+// Returns {file_id, file_name} for a non-image file attachment (document,
+// video, audio, voice, animation), or null. Images are handled as photos.
+function pickFileAttachment(message) {
+  const kinds = [
+    ['document', 'document'],
+    ['video', 'video'],
+    ['audio', 'audio'],
+    ['voice', 'voice'],
+    ['animation', 'animation'],
+  ];
+  for (const [key, label] of kinds) {
+    const f = message[key];
+    if (!f?.file_id || f.mime_type?.startsWith('image/')) continue;
+    return { file_id: f.file_id, file_name: f.file_name || label };
+  }
+  return null;
+}
+
 async function handleTelegram(request, env) {
   const secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
   if (env.TG_WEBHOOK_SECRET && secret !== env.TG_WEBHOOK_SECRET) {
@@ -581,7 +599,8 @@ async function handleTelegram(request, env) {
   const update = await request.json();
   const message = update.message;
   const hasImageDocument = message?.document?.mime_type?.startsWith('image/');
-  if (!message || (!message.text && !message.photo?.length && !hasImageDocument)) {
+  const attachment = message ? pickFileAttachment(message) : null;
+  if (!message || (!message.text && !message.photo?.length && !hasImageDocument && !attachment)) {
     return new Response('ok', { status: 200 });
   }
 
@@ -630,6 +649,9 @@ async function handleTelegram(request, env) {
       clientPayload.photo_file_id = message.photo[message.photo.length - 1].file_id;
     } else if (hasImageDocument) {
       clientPayload.photo_file_id = message.document.file_id;
+    } else if (attachment) {
+      clientPayload.file_id = attachment.file_id;
+      clientPayload.file_name = attachment.file_name;
     }
     if (message.reply_to_message) {
       const replyTo = message.reply_to_message;
@@ -640,6 +662,12 @@ async function handleTelegram(request, env) {
         clientPayload.reply_to_photo_file_id = replyTo.photo[replyTo.photo.length - 1].file_id;
       } else if (replyTo.document?.mime_type?.startsWith('image/')) {
         clientPayload.reply_to_photo_file_id = replyTo.document.file_id;
+      } else {
+        const replyAttachment = pickFileAttachment(replyTo);
+        if (replyAttachment) {
+          clientPayload.reply_to_file_id = replyAttachment.file_id;
+          clientPayload.reply_to_file_name = replyAttachment.file_name;
+        }
       }
     }
 

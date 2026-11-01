@@ -21,6 +21,11 @@ async function downloadTelegramPhoto() {
 
   if (!getFileRes.ok) {
     const errText = await getFileRes.text();
+    // Bot API refuses getFile for files over 20 MB; exit 2 lets callers report it.
+    if (getFileRes.status === 400 && /too big/i.test(errText)) {
+      console.error('Telegram file too big (Bot API limit is 20 MB):', errText);
+      process.exit(2);
+    }
     console.error(`Telegram getFile failed (${getFileRes.status}):`, errText);
     process.exit(1);
   }
