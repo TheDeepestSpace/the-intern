@@ -159,6 +159,35 @@ async function handleGitHub(request, env) {
   }
 }
 
+// Returns the set of check-run names that are completed+failing (or timed
+// out) for a given ref, or null if the API call itself failed. Callers must
+// treat null as "unknown" and fail open (dispatch) rather than assume no
+// failures.
+async function getFailingCheckNames(owner, repo, ref, token) {
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/commits/${ref}/check-runs?per_page=100`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'the-intern-bot-relay',
+        },
+      }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    const runs = data.check_runs || [];
+    return new Set(
+      runs
+        .filter(r => r.status === 'completed' && ['failure', 'timed_out'].includes(r.conclusion))
+        .map(r => r.name)
+    );
+  } catch {
+    return null;
+  }
+}
+
 // Auto-queues a fix-CI dispatch when a check suite fails on a PR the bot
 // itself opened, so it can fix its own broken PRs without a human comment.
 // Deduped per (PR, head commit sha) via the CI_FAILURE_DEDUP KV namespace,
@@ -168,6 +197,12 @@ async function handleGitHub(request, env) {
 // A *new* commit on the same PR still dispatches normally — retry-until-fixed
 // across distinct commits is preserved, only the same-commit double-fire is
 // suppressed. (handlePush below has no such double-trigger and stays KV-free.)
+//
+// Guardrail: if every failing check on the PR's head is already failing on
+// its base branch, the breakage is pre-existing (e.g. a shared transitive
+// CVE) rather than something this PR's diff introduced — skip the dispatch
+// so multiple bot PRs don't independently "fix" the same base-branch issue
+// (see #109). Fails open (dispatches) when the check-runs lookup errors.
 async function handleCheckSuite(payload, env) {
   const checkSuite = payload.check_suite;
   const pullRequests = checkSuite?.pull_requests || [];
@@ -202,6 +237,7 @@ async function handleCheckSuite(payload, env) {
 
     let dispatched = 0;
     let deduped = 0;
+    let skippedPreExisting = 0;
     for (const { number } of pullRequests) {
       const prRes = await fetch(
         `https://api.github.com/repos/${sourceOwner}/${sourceRepo}/pulls/${number}`,
@@ -222,6 +258,17 @@ async function handleCheckSuite(payload, env) {
       if (await env.CI_FAILURE_DEDUP.get(dedupKey)) {
         deduped++;
         continue;
+      }
+
+      const headFailures = await getFailingCheckNames(sourceOwner, sourceRepo, checkSuite.head_sha, token);
+      if (headFailures && headFailures.size > 0 && pullRequest.base?.sha) {
+        const baseFailures = await getFailingCheckNames(sourceOwner, sourceRepo, pullRequest.base.sha, token);
+        if (baseFailures && [...headFailures].every(name => baseFailures.has(name))) {
+          // Every failing check already fails on the base branch too - pre-existing
+          // breakage, not something this PR introduced. Skip the fix-dispatch.
+          skippedPreExisting++;
+          continue;
+        }
       }
 
       const dispatchRes = await dispatchRepoEvent(env, token, 'ci_failure', {
@@ -248,6 +295,9 @@ async function handleCheckSuite(payload, env) {
     if (deduped > 0) {
       return new Response('ignored: ci_failure already dispatched for this PR+commit', { status: 200 });
     }
+    if (skippedPreExisting > 0) {
+      return new Response('ignored: all failures pre-existing on base branch', { status: 200 });
+    }
     return new Response('ignored: no bot-authored pull requests', { status: 200 });
   } catch (err) {
     return new Response(`internal error: ${err.message}`, { status: 500 });
@@ -263,6 +313,9 @@ async function handleCheckSuite(payload, env) {
 // and a PR that's still dirty on the next push just re-dispatches, which is
 // the intended retry-until-fixed behavior.
 async function handlePush(payload, env) {
+  if (SPECAGE_SPEC_REF.test(payload.ref || '')) {
+    return handleSpecagePush(payload, env);
+  }
   const defaultBranch = payload.repository?.default_branch;
   const pushedBranch = (payload.ref || '').replace(/^refs\/heads\//, '');
 
@@ -331,6 +384,9 @@ async function handlePush(payload, env) {
       dispatched++;
     }
 
+    if (dispatched > 0) {
+      return new Response('ok', { status: 200 });
+    }
     return new Response(
       dispatched > 0 ? 'ok' : 'ignored: no bot-authored pull requests became unmergeable',
       { status: 200 }
@@ -338,6 +394,109 @@ async function handlePush(payload, env) {
   } catch (err) {
     return new Response(`internal error: ${err.message}`, { status: 500 });
   }
+}
+
+const SPECAGE_SPEC_REF = /^refs\/heads\/specages\/([^/]+)\/spec$/;
+
+function ghHeaders(token, accept = 'application/vnd.github+json') {
+  return { Authorization: `Bearer ${token}`, Accept: accept, 'User-Agent': 'the-intern-bot-relay' };
+}
+
+// Commit-driven specage dispatch: a push to specages/<project>/spec in an
+// allowlisted data repo (SPECAGE_DATA_REPOS, comma-separated owner/repo) pushed
+// by specage-app[bot] (SPECAGE_BOT_LOGIN) files
+// a specage_push repository_dispatch (specage.yml) against the project repo (named in .specage/config.yaml
+// on the pushed commit) with no issue/PR attached: like a Telegram message,
+// this is what decides whether any issue gets created. Deduped per
+// (data repo, head sha) in KV, marked only after a successful dispatch.
+async function handleSpecagePush(payload, env) {
+  const project = payload.ref.match(SPECAGE_SPEC_REF)[1];
+  const dataRepo = payload.repository?.full_name || '';
+  const allowed = (env.SPECAGE_DATA_REPOS || '')
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (!allowed.includes(dataRepo.toLowerCase())) {
+    return new Response('ignored: data repo not allowlisted', { status: 200 });
+  }
+
+  // Only the specage app's own pushes may trigger a dispatch.
+  const specageLogin = (env.SPECAGE_BOT_LOGIN || 'specage-app[bot]').toLowerCase();
+  const sender = (payload.sender?.login || '').toLowerCase();
+  if (sender !== specageLogin) {
+    return new Response('ignored: sender not authorized', { status: 200 });
+  }
+  const sha = payload.after;
+  if (payload.deleted || !sha || /^0+$/.test(sha)) {
+    return new Response('ignored: spec branch deleted', { status: 200 });
+  }
+  const installationId = payload.installation?.id;
+  if (!installationId) {
+    return new Response('missing installation id', { status: 400 });
+  }
+
+  const dedupKey = `specage_push:${dataRepo}@${sha}`;
+  try {
+    if (await env.CI_FAILURE_DEDUP.get(dedupKey)) {
+      return new Response('ignored: specage push already dispatched', { status: 200 });
+    }
+
+    const dataToken = await getInstallationToken(env, installationId);
+    const cfgRes = await fetch(
+      `https://api.github.com/repos/${dataRepo}/contents/.specage/config.yaml?ref=${sha}`,
+      { headers: ghHeaders(dataToken, 'application/vnd.github.raw+json') }
+    );
+    if (cfgRes.status === 404) {
+      return new Response('ignored: no .specage/config.yaml on spec branch', { status: 200 });
+    }
+    if (!cfgRes.ok) {
+      return new Response(`config fetch failed (${cfgRes.status})`, { status: 502 });
+    }
+    const cfg = await cfgRes.text();
+    const projectRepo = cfg.match(/^repo:\s*["']?([\w.-]+\/[\w.-]+)["']?/m)?.[1];
+    if (!projectRepo) {
+      return new Response('ignored: config has no project repo', { status: 200 });
+    }
+    const backend = cfg.match(/^[ \t]+backend:\s*["']?([\w.-]+)/m)?.[1] || 'claude';
+
+    const owner = env.AGENT_INFRA_OWNER || 'TheDeepestSpace';
+    const repo = env.AGENT_INFRA_REPO || 'the-intern';
+    const appJwt = mintAppJwt(env.APP_ID, normalizeKey(getPrivateKey(env)));
+    const projectInstall = await getInstallationIdForRepo(appJwt, projectRepo);
+    const internInstall = env.AGENT_INFRA_INSTALLATION_ID || (await getInstallationIdForRepo(appJwt, `${owner}/${repo}`));
+    if (!projectInstall || !internInstall) {
+      return new Response('app not installed on project or agent-infra repo', { status: 502 });
+    }
+    const internToken = await getInstallationToken(env, internInstall);
+
+    const dispatchRes = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/dispatches`,
+      {
+        method: 'POST',
+        headers: { ...ghHeaders(internToken), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event_type: 'specage_push',
+          client_payload: {
+            target_repo: projectRepo,
+            installation_id: String(projectInstall),
+            text: `backend=${backend} Run the specage dispatch for commit ${sha}. Spec and trail live in ${dataRepo} on branches specages/${project}/{spec,trail}. Follow .specage/PROTOCOL.md on the spec branch exactly.`,
+          },
+        }),
+      }
+    );
+    if (!dispatchRes.ok) {
+      return new Response(`dispatch failed: ${await dispatchRes.text()}`, { status: 502 });
+    }
+    await env.CI_FAILURE_DEDUP.put(dedupKey, '1', { expirationTtl: 60 * 60 * 24 * 14 });
+    return new Response('ok', { status: 200 });
+  } catch (err) {
+    return new Response(`internal error: ${err.message}`, { status: 500 });
+  }
+}
+
+function normalizeKey(key) {
+  key = (key || '').trim();
+  return key.includes('-----BEGIN') ? key : Buffer.from(key, 'base64').toString('utf8');
 }
 
 // Polls GET /pulls/{n} for mergeable, retrying past a null response (GitHub
@@ -465,6 +624,24 @@ async function handleScheduled(env) {
   }
 }
 
+// Returns {file_id, file_name} for a non-image file attachment (document,
+// video, audio, voice, animation), or null. Images are handled as photos.
+function pickFileAttachment(message) {
+  const kinds = [
+    ['document', 'document'],
+    ['video', 'video'],
+    ['audio', 'audio'],
+    ['voice', 'voice'],
+    ['animation', 'animation'],
+  ];
+  for (const [key, label] of kinds) {
+    const f = message[key];
+    if (!f?.file_id || f.mime_type?.startsWith('image/')) continue;
+    return { file_id: f.file_id, file_name: f.file_name || label };
+  }
+  return null;
+}
+
 async function handleTelegram(request, env) {
   const secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
   if (env.TG_WEBHOOK_SECRET && secret !== env.TG_WEBHOOK_SECRET) {
@@ -474,7 +651,8 @@ async function handleTelegram(request, env) {
   const update = await request.json();
   const message = update.message;
   const hasImageDocument = message?.document?.mime_type?.startsWith('image/');
-  if (!message || (!message.text && !message.photo?.length && !hasImageDocument)) {
+  const attachment = message ? pickFileAttachment(message) : null;
+  if (!message || (!message.text && !message.photo?.length && !hasImageDocument && !attachment)) {
     return new Response('ok', { status: 200 });
   }
 
@@ -510,6 +688,9 @@ async function handleTelegram(request, env) {
       clientPayload.photo_file_id = message.photo[message.photo.length - 1].file_id;
     } else if (hasImageDocument) {
       clientPayload.photo_file_id = message.document.file_id;
+    } else if (attachment) {
+      clientPayload.file_id = attachment.file_id;
+      clientPayload.file_name = attachment.file_name;
     }
     if (message.reply_to_message) {
       const replyTo = message.reply_to_message;
@@ -520,6 +701,12 @@ async function handleTelegram(request, env) {
         clientPayload.reply_to_photo_file_id = replyTo.photo[replyTo.photo.length - 1].file_id;
       } else if (replyTo.document?.mime_type?.startsWith('image/')) {
         clientPayload.reply_to_photo_file_id = replyTo.document.file_id;
+      } else {
+        const replyAttachment = pickFileAttachment(replyTo);
+        if (replyAttachment) {
+          clientPayload.reply_to_file_id = replyAttachment.file_id;
+          clientPayload.reply_to_file_name = replyAttachment.file_name;
+        }
       }
     }
 

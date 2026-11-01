@@ -1,5 +1,5 @@
 # CI image (base build and runtime environment)
-FROM public.ecr.aws/lts/ubuntu:22.04_stable AS ci
+FROM docker.io/ubuntu:22.04 AS ci
 ARG DEBIAN_FRONTEND=noninteractive
 
 # Update and install essential tools
@@ -45,7 +45,7 @@ RUN cd /tmp && \
 RUN npm install -g @anthropic-ai/claude-code
 
 # Pre-install Codex CLI globally (alternative agent backend)
-ARG CODEX_VERSION=0.146.0
+ARG CODEX_VERSION=0.160.0
 RUN npm install -g @openai/codex@${CODEX_VERSION}
 
 # Pre-install GitHub CLI (gh)

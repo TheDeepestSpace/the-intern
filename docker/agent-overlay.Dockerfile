@@ -16,7 +16,7 @@ ARG GH_CLI_VERSION=2.63.2
 ARG GH_TARBALL_HASH_X64="912fdb1ca29cb005fb746fc5d2b787a289078923a29d0f9ec19a0b00272ded00  gh_${GH_CLI_VERSION}_linux_amd64.tar.gz"
 ARG GH_TARBALL_HASH_ARM64="0f31e2a8549c64b5c1679f0b99ce5e0dac7c91da9e86f6246adb8805b0f0b4bb  gh_${GH_CLI_VERSION}_linux_arm64.tar.gz"
 
-ARG CODEX_VERSION=0.146.0
+ARG CODEX_VERSION=0.160.0
 
 ARG JQ_VERSION=1.7.1
 ARG JQ_BINARY_HASH_X64="5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5  jq-linux-amd64"
@@ -37,9 +37,16 @@ RUN if ! command -v node >/dev/null 2>&1; then \
       rm -f "${NODE_TARBALL}"; \
     fi
 
-RUN command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code
+# Always (re)install claude/codex rather than skipping when a binary of the
+# same name is already present: target repos that ship their own devcontainer
+# image can bundle an old codex/claude CLI, and a command-v guard would
+# silently keep running that stale binary forever regardless of our intended
+# version here (e.g. gpt-6-astra requiring a newer Codex CLI than a repo's
+# baked-in one, issue found 2026-10-02). --force makes npm replace a
+# conflicting unmanaged binary instead of failing with EEXIST.
+RUN npm install -g --force @anthropic-ai/claude-code
 
-RUN command -v codex >/dev/null 2>&1 || npm install -g @openai/codex@${CODEX_VERSION}
+RUN npm install -g --force @openai/codex@${CODEX_VERSION}
 
 RUN if ! command -v gh >/dev/null 2>&1; then \
       ARCH="$(uname -m)"; \

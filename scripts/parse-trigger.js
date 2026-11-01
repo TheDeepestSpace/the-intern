@@ -43,7 +43,10 @@ function parseTrigger() {
       // below is a no-op on text that doesn't contain the mention).
       targetRepo = payload.repository?.full_name || '';
       issueNumber = String(payload.pull_request.number || '');
-      commentBody = `CI is failing on this PR (conclusion: ${payload.check_suite.conclusion}). Check suite: ${payload.check_suite.html_url}. Investigate the failing checks and push a fix.`;
+      const headSha = payload.check_suite.head_sha || '';
+      commentBody = headSha
+        ? `CI is failing on this PR (conclusion: ${payload.check_suite.conclusion}). Check suite: ${payload.check_suite.html_url}. This check suite ran against commit \`${headSha}\`. Before investigating, compare that commit to the PR's current head (e.g. \`gh pr view ${issueNumber} --json headRefOid\`). If the PR's head has already moved past \`${headSha}\`, this failure is stale - a newer commit supersedes it, so stop immediately without commenting or pushing anything. Otherwise, investigate the failing checks and push a fix.`
+        : `CI is failing on this PR (conclusion: ${payload.check_suite.conclusion}). Check suite: ${payload.check_suite.html_url}. This check suite's failing commit could not be determined, so staleness can't be safely verified - stop immediately without investigating, commenting, or pushing anything.`;
     } else if (payload.pull_request && payload.coderabbit_review) {
       // coderabbit_review: synthesized instruction, same shape as ci_failure
       // above. The worker never reads/forwards the review body itself (tier-2
@@ -127,7 +130,23 @@ function parseTrigger() {
     comment_id: commentId,
   };
 
-  console.log('Parsed trigger:', JSON.stringify(result, null, 2));
+  // comment_body/clean_prompt are raw issue/PR comment content and must never
+  // be logged here: this step's stdout streams straight to the public Actions
+  // log (unlike the `handle`/`respond` jobs, which redirect into $LOG_FILE),
+  // so an unredacted dump would leak that content to anyone with read access
+  // to the run (issue #226 follow-up). ::add-mask:: isn't a substitute here —
+  // GitHub Actions can't mask a value containing newlines, and arbitrary
+  // comment text routinely does.
+  const { comment_body, clean_prompt, ...loggableResult } = result;
+  console.log('Parsed trigger:', JSON.stringify(loggableResult, null, 2));
+
+  // Written to a file rather than a step `env:` key (issue #226) — a step-level
+  // `env:` mapping referencing this content gets auto-echoed by the Actions
+  // runner as plaintext before the step's script ever runs, regardless of any
+  // stdout/stderr redirect the script itself does.
+  if (process.env.CLEAN_PROMPT_FILE) {
+    fs.writeFileSync(process.env.CLEAN_PROMPT_FILE, result.clean_prompt, 'utf8');
+  }
 
   if (process.env.GITHUB_OUTPUT) {
     for (const [k, v] of Object.entries(result)) {

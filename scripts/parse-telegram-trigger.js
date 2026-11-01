@@ -25,7 +25,23 @@ function parseTelegramTrigger() {
     clean_text: cleanText,
   };
 
-  console.log('Parsed Telegram trigger:', JSON.stringify(result, null, 2));
+  // clean_text is raw Telegram message content and must never be logged here:
+  // this step's stdout streams straight to the public Actions log (unlike the
+  // `respond` job, which redirects into $LOG_FILE), so an unredacted dump
+  // would leak that content to anyone with read access to the run (issue #226
+  // follow-up). ::add-mask:: isn't a substitute here — GitHub Actions can't
+  // mask a value containing newlines, and arbitrary message text routinely
+  // does.
+  const { clean_text, ...loggableResult } = result;
+  console.log('Parsed Telegram trigger:', JSON.stringify(loggableResult, null, 2));
+
+  // Written to a file rather than a step `env:` key (issue #226) — a step-level
+  // `env:` mapping referencing this content gets auto-echoed by the Actions
+  // runner as plaintext before the step's script ever runs, regardless of any
+  // stdout/stderr redirect the script itself does.
+  if (process.env.CLEAN_TEXT_FILE) {
+    fs.writeFileSync(process.env.CLEAN_TEXT_FILE, result.clean_text, 'utf8');
+  }
 
   if (process.env.GITHUB_OUTPUT) {
     for (const [k, v] of Object.entries(result)) {

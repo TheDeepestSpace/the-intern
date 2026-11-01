@@ -109,9 +109,15 @@ async function fetchLatestSummary(targetRepo, issueNumber) {
   return result;
 }
 
-async function fetchSummary(targetRepo, issueNumber) {
+async function fetchSummary(targetRepo, issueNumber, outputFile) {
   const { content } = await fetchLatestSummary(targetRepo, issueNumber);
-  if (content) writeOutput('summary', content);
+
+  // Written to a file rather than a step output consumed via a step `env:`
+  // key (issue #226) — a step-level `env:` mapping referencing this content
+  // gets auto-echoed by the Actions runner as plaintext before the step's
+  // script ever runs, regardless of any stdout/stderr redirect the script
+  // itself does.
+  if (content && outputFile) fs.writeFileSync(outputFile, content, 'utf8');
 
   return content;
 }
@@ -258,7 +264,7 @@ if (require.main === module) {
 
   (async () => {
     if (mode === 'fetch') {
-      await fetchSummary(targetRepo, issueNumber);
+      await fetchSummary(targetRepo, issueNumber, process.env.SUMMARY_FILE);
     } else if (mode === 'backend') {
       await fetchBackend(targetRepo, issueNumber);
     } else if (mode === 'resolve-backend') {
@@ -269,7 +275,12 @@ if (require.main === module) {
       );
       writeOutput('backend', backend);
     } else if (mode === 'save') {
-      const promptText = process.env.CLEAN_PROMPT;
+      // Read from a file rather than a CLEAN_PROMPT env var (issue #226) — a
+      // step-level `env:` mapping referencing this content gets auto-echoed
+      // by the Actions runner as plaintext before the step's script ever
+      // runs, regardless of any stdout/stderr redirect the script itself does.
+      const promptFile = process.env.CLEAN_PROMPT_FILE;
+      const promptText = promptFile && fs.existsSync(promptFile) ? fs.readFileSync(promptFile, 'utf8') : '';
       const resultFile = process.env.RESULT_FILE;
       let resultText = '';
       if (resultFile && fs.existsSync(resultFile)) {
