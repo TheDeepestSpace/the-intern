@@ -571,6 +571,13 @@ async function act(env = process.env, deps = {}) {
           events.pending.push({ ...item, reason: `dry run: would merge (${decision.reason})` });
           continue;
         }
+        // Last-moment guard: never merge unless CI is still green on the exact
+        // head being merged (the review above can take a while).
+        const finalCi = await fetchCi(token, repo, pr.head.sha, d);
+        if (!finalCi.green) {
+          events.pending.push({ ...item, reason: `CI no longer green before merge: ${finalCi.reason}` });
+          continue;
+        }
         const method = await pickMergeMethod(token, repo, mergeMethods, d);
         try {
           await mergePr(token, repo, number, pr.head.sha, method, d);

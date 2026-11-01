@@ -332,6 +332,25 @@ describe('act', () => {
     expect(JSON.parse(fs.readFileSync('events.json', 'utf8')).merged).toHaveLength(1);
   });
 
+  it('does not merge when CI turns red between the decision and the merge call', async () => {
+    writePlan([candidate({ classification: 'security' })]);
+    writeVerdict('acme/widgets#1', 'safe');
+    let n = 0;
+    const gh = fakeGitHub({
+      'GET /repos/acme/widgets/pulls/1': { body: pr() },
+      'GET /repos/acme/widgets/commits/sha1/check-runs?per_page=100': () => ({
+        body: { check_runs: [{ name: 'test', status: 'completed', conclusion: ++n === 1 ? 'success' : 'failure' }] },
+      }),
+      'GET /repos/acme/widgets/commits/sha1/status': { body: { state: 'success', total_count: 0 } },
+      'GET /repos/acme/widgets': { body: { allow_squash_merge: true } },
+      'PUT /repos/acme/widgets/pulls/1/merge': { body: { merged: true } },
+    });
+    const events = await act(env, { fetchImpl: gh.fetchImpl, mintToken: async () => 'w', now: () => NOW, ...memoryStore() });
+    expect(events.merged).toEqual([]);
+    expect(events.pending[0].reason).toMatch(/CI no longer green/);
+    expect(gh.called('PUT /repos/acme/widgets/pulls/1/merge')).toHaveLength(0);
+  });
+
   it('confirms a safe regular update: label + comment + clock, no merge', async () => {
     writePlan([candidate()]);
     writeVerdict('acme/widgets#1', 'safe', [], 'fine');
