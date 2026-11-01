@@ -55,18 +55,6 @@ describe('handleTelegram gating', () => {
     expect(await res.text()).toBe('ok');
   });
 
-  it('returns ok without dispatching for a non-image document with no text or caption', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    const message = baseMessage({
-      text: undefined,
-      document: { file_id: 'doc-1', mime_type: 'application/pdf' },
-    });
-    const res = await worker.fetch(telegramRequest({ update: { message } }), baseTelegramEnv());
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe('ok');
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
   it('rejects requests with a bad secret token when TG_WEBHOOK_SECRET is configured', async () => {
     const res = await worker.fetch(
       telegramRequest({
@@ -180,6 +168,46 @@ describe('handleTelegram client_payload construction', () => {
     const payload = await dispatchedClientPayload(fetchSpy);
     expect(payload.photo_file_id).toBe('doc-image');
     expect(payload.text).toBe('uncompressed image');
+  });
+
+  it('dispatches a non-image document with no text, adding file_id and file_name', async () => {
+    const fetchSpy = mockGithubDispatchFlow();
+    const message = baseMessage({
+      text: undefined,
+      document: { file_id: 'doc-1', file_name: 'report.pdf', mime_type: 'application/pdf' },
+    });
+    const res = await worker.fetch(telegramRequest({ update: { message } }), baseTelegramEnv());
+    expect(res.status).toBe(200);
+
+    const payload = await dispatchedClientPayload(fetchSpy);
+    expect(payload.file_id).toBe('doc-1');
+    expect(payload.file_name).toBe('report.pdf');
+    expect(payload).not.toHaveProperty('photo_file_id');
+  });
+
+  it('dispatches voice messages, defaulting file_name', async () => {
+    const fetchSpy = mockGithubDispatchFlow();
+    const message = baseMessage({ text: undefined, voice: { file_id: 'v-1', mime_type: 'audio/ogg' } });
+    await worker.fetch(telegramRequest({ update: { message } }), baseTelegramEnv());
+
+    const payload = await dispatchedClientPayload(fetchSpy);
+    expect(payload.file_id).toBe('v-1');
+    expect(payload.file_name).toBe('voice');
+  });
+
+  it('adds reply_to_file_id and reply_to_file_name for replies to file attachments', async () => {
+    const fetchSpy = mockGithubDispatchFlow();
+    const message = baseMessage({
+      reply_to_message: {
+        message_id: 7,
+        document: { file_id: 'r-doc', file_name: 'a.zip', mime_type: 'application/zip' },
+      },
+    });
+    await worker.fetch(telegramRequest({ update: { message } }), baseTelegramEnv());
+
+    const payload = await dispatchedClientPayload(fetchSpy);
+    expect(payload.reply_to_file_id).toBe('r-doc');
+    expect(payload.reply_to_file_name).toBe('a.zip');
   });
 
   it('includes reply_to_message fields, preferring reply text over reply caption', async () => {
