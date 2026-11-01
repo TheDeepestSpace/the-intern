@@ -434,8 +434,11 @@ async function handleSpecagePush(payload, env) {
       `https://api.github.com/repos/${dataRepo}/contents/.specage/config.yaml?ref=${sha}`,
       { headers: ghHeaders(dataToken, 'application/vnd.github.raw+json') }
     );
-    if (!cfgRes.ok) {
+    if (cfgRes.status === 404) {
       return new Response('ignored: no .specage/config.yaml on spec branch', { status: 200 });
+    }
+    if (!cfgRes.ok) {
+      return new Response(`config fetch failed (${cfgRes.status})`, { status: 502 });
     }
     const cfg = await cfgRes.text();
     const projectRepo = cfg.match(/^repo:\s*["']?([\w.-]+\/[\w.-]+)["']?/m)?.[1];
@@ -456,19 +459,24 @@ async function handleSpecagePush(payload, env) {
     const internToken = await getInstallationToken(env, internInstall);
 
     const short = sha.slice(0, 7);
-    const issueRes = await fetch(`https://api.github.com/repos/${projectRepo}/issues`, {
-      method: 'POST',
-      headers: { ...ghHeaders(projectToken), 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        title: `specage dispatch ${short}`,
-        labels: ['specage-dispatch'],
-        body: `Spec commit \`${sha}\` on \`${dataRepo}\` (\`specages/${project}/spec\`).\n\nReply here with @the-intern-bot to answer questions that are not spec text.`,
-      }),
-    });
-    if (!issueRes.ok) {
-      return new Response(`issue creation failed: ${await issueRes.text()}`, { status: 502 });
+    const issueKey = `${dedupKey}:issue`;
+    let issueNumber = await env.CI_FAILURE_DEDUP.get(issueKey);
+    if (!issueNumber) {
+      const issueRes = await fetch(`https://api.github.com/repos/${projectRepo}/issues`, {
+        method: 'POST',
+        headers: { ...ghHeaders(projectToken), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: `specage dispatch ${short}`,
+          labels: ['specage-dispatch'],
+          body: `Spec commit \`${sha}\` on \`${dataRepo}\` (\`specages/${project}/spec\`).\n\nReply here with @the-intern-bot to answer questions that are not spec text.`,
+        }),
+      });
+      if (!issueRes.ok) {
+        return new Response(`issue creation failed: ${await issueRes.text()}`, { status: 502 });
+      }
+      issueNumber = String((await issueRes.json()).number);
+      await env.CI_FAILURE_DEDUP.put(issueKey, issueNumber, { expirationTtl: 60 * 60 * 24 * 14 });
     }
-    const issue = await issueRes.json();
 
     const dispatchRes = await fetch(
       `https://api.github.com/repos/${owner}/${repo}/actions/workflows/dispatcher.yml/dispatches`,
@@ -479,7 +487,7 @@ async function handleSpecagePush(payload, env) {
           ref: 'main',
           inputs: {
             target_repo: projectRepo,
-            pr_number: String(issue.number),
+            pr_number: issueNumber,
             installation_id: String(projectInstall),
             comment_body: `backend=${backend} Run the specage dispatch for commit ${sha}. Spec and trail live in ${dataRepo} on branches specages/${project}/{spec,trail}. Follow .specage/PROTOCOL.md on the spec branch exactly.`,
           },
