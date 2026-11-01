@@ -45,6 +45,7 @@ function stepsWithRunBlocks(steps) {
 
 describe.each([
   { file: 'dispatcher.yml', job: 'handle', label: 'dispatcher.yml handle job' },
+  { file: 'specage.yml', job: 'handle', label: 'specage.yml handle job' },
   { file: 'telegram-session.yml', job: 'respond', label: 'telegram-session.yml respond job' },
 ])('$label', ({ file, job }) => {
   const yamlText = readWorkflow(file);

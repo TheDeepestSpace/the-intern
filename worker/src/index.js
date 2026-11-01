@@ -395,7 +395,7 @@ function ghHeaders(token, accept = 'application/vnd.github+json') {
 
 // Commit-driven specage dispatch: a push to specages/<project>/spec in an
 // allowlisted data repo (SPECAGE_DATA_REPOS, comma-separated owner/repo) files
-// runs dispatcher.yml against the project repo (named in .specage/config.yaml
+// a specage_push repository_dispatch (specage.yml) against the project repo (named in .specage/config.yaml
 // on the pushed commit) with no issue/PR attached: like a Telegram message,
 // this is what decides whether any issue gets created. Deduped per
 // (data repo, head sha) in KV, marked only after a successful dispatch.
@@ -459,16 +459,16 @@ async function handleSpecagePush(payload, env) {
     const internToken = await getInstallationToken(env, internInstall);
 
     const dispatchRes = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/actions/workflows/dispatcher.yml/dispatches`,
+      `https://api.github.com/repos/${owner}/${repo}/dispatches`,
       {
         method: 'POST',
         headers: { ...ghHeaders(internToken), 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ref: 'main',
-          inputs: {
+          event_type: 'specage_push',
+          client_payload: {
             target_repo: projectRepo,
             installation_id: String(projectInstall),
-            comment_body: `backend=${backend} Run the specage dispatch for commit ${sha}. Spec and trail live in ${dataRepo} on branches specages/${project}/{spec,trail}. Follow .specage/PROTOCOL.md on the spec branch exactly.`,
+            text: `backend=${backend} Run the specage dispatch for commit ${sha}. Spec and trail live in ${dataRepo} on branches specages/${project}/{spec,trail}. Follow .specage/PROTOCOL.md on the spec branch exactly.`,
           },
         }),
       }
