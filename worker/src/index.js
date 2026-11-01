@@ -394,7 +394,8 @@ function ghHeaders(token, accept = 'application/vnd.github+json') {
 }
 
 // Commit-driven specage dispatch: a push to specages/<project>/spec in an
-// allowlisted data repo (SPECAGE_DATA_REPOS, comma-separated owner/repo) files
+// allowlisted data repo (SPECAGE_DATA_REPOS, comma-separated owner/repo) pushed
+// by specage-app[bot] (SPECAGE_BOT_LOGIN) files
 // a specage_push repository_dispatch (specage.yml) against the project repo (named in .specage/config.yaml
 // on the pushed commit) with no issue/PR attached: like a Telegram message,
 // this is what decides whether any issue gets created. Deduped per
@@ -410,10 +411,11 @@ async function handleSpecagePush(payload, env) {
     return new Response('ignored: data repo not allowlisted', { status: 200 });
   }
 
-  const botLogin = (env.BOT_LOGIN || 'the-intern-bot[bot]').toLowerCase();
+  // Only the specage app's own pushes may trigger a dispatch.
+  const specageLogin = (env.SPECAGE_BOT_LOGIN || 'specage-app[bot]').toLowerCase();
   const sender = (payload.sender?.login || '').toLowerCase();
-  if (sender === botLogin || sender.endsWith('[bot]') || payload.sender?.type === 'Bot') {
-    return new Response('ignored: bot push', { status: 200 });
+  if (sender !== specageLogin) {
+    return new Response('ignored: sender not authorized', { status: 200 });
   }
   const sha = payload.after;
   if (payload.deleted || !sha || /^0+$/.test(sha)) {

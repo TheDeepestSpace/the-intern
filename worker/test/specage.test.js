@@ -14,7 +14,7 @@ function specPush(overrides = {}) {
     ref: 'refs/heads/specages/demo/spec',
     after: SHA,
     installation: { id: 42 },
-    sender: { login: 'alice', type: 'User' },
+    sender: { login: 'specage-app[bot]', type: 'Bot' },
     repository: { full_name: 'acme/specage-data' },
     ...overrides,
   };
@@ -84,11 +84,21 @@ describe('specage spec-branch push', () => {
     expect(await res.text()).toBe('ignored: data repo not allowlisted');
   });
 
-  it('ignores bot pushes', async () => {
+  it.each([
+    ['a human', { login: 'alice', type: 'User' }],
+    ['another bot', { login: 'the-intern-bot[bot]', type: 'Bot' }],
+    ['a missing sender', undefined],
+  ])('ignores pushes from %s', async (_name, sender) => {
     const spy = mockFlow();
-    const res = await send(specPush({ sender: { login: 'specage[bot]', type: 'Bot' } }));
-    expect(await res.text()).toBe('ignored: bot push');
+    const res = await send(specPush({ sender }));
+    expect(await res.text()).toBe('ignored: sender not authorized');
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('honours SPECAGE_BOT_LOGIN override', async () => {
+    mockFlow();
+    const res = await send(specPush({ sender: { login: 'Other-App[bot]' } }), env({ SPECAGE_BOT_LOGIN: 'other-app[bot]' }));
+    expect(await res.text()).toBe('ok');
   });
 
   it('does not treat the trail branch as a spec branch', async () => {
