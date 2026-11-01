@@ -304,6 +304,9 @@ async function handleCheckSuite(payload, env) {
 // and a PR that's still dirty on the next push just re-dispatches, which is
 // the intended retry-until-fixed behavior.
 async function handlePush(payload, env) {
+  if (SPECAGE_SPEC_REF.test(payload.ref || '')) {
+    return handleSpecagePush(payload, env);
+  }
   const defaultBranch = payload.repository?.default_branch;
   const pushedBranch = (payload.ref || '').replace(/^refs\/heads\//, '');
 
@@ -382,6 +385,120 @@ async function handlePush(payload, env) {
   } catch (err) {
     return new Response(`internal error: ${err.message}`, { status: 500 });
   }
+}
+
+const SPECAGE_SPEC_REF = /^refs\/heads\/specages\/([^/]+)\/spec$/;
+
+function ghHeaders(token, accept = 'application/vnd.github+json') {
+  return { Authorization: `Bearer ${token}`, Accept: accept, 'User-Agent': 'the-intern-bot-relay' };
+}
+
+// Commit-driven specage dispatch: a push to specages/<project>/spec in an
+// allowlisted data repo (SPECAGE_DATA_REPOS, comma-separated owner/repo) files
+// a dispatch issue on the project repo (named in .specage/config.yaml on the
+// pushed commit) and runs dispatcher.yml against it. Deduped per
+// (data repo, head sha) in KV, marked only after a successful dispatch.
+async function handleSpecagePush(payload, env) {
+  const project = payload.ref.match(SPECAGE_SPEC_REF)[1];
+  const dataRepo = payload.repository?.full_name || '';
+  const allowed = (env.SPECAGE_DATA_REPOS || '')
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (!allowed.includes(dataRepo.toLowerCase())) {
+    return new Response('ignored: data repo not allowlisted', { status: 200 });
+  }
+
+  const botLogin = (env.BOT_LOGIN || 'the-intern-bot[bot]').toLowerCase();
+  const sender = (payload.sender?.login || '').toLowerCase();
+  if (sender === botLogin || sender.endsWith('[bot]') || payload.sender?.type === 'Bot') {
+    return new Response('ignored: bot push', { status: 200 });
+  }
+  const sha = payload.after;
+  if (payload.deleted || !sha || /^0+$/.test(sha)) {
+    return new Response('ignored: spec branch deleted', { status: 200 });
+  }
+  const installationId = payload.installation?.id;
+  if (!installationId) {
+    return new Response('missing installation id', { status: 400 });
+  }
+
+  const dedupKey = `specage_push:${dataRepo}@${sha}`;
+  try {
+    if (await env.CI_FAILURE_DEDUP.get(dedupKey)) {
+      return new Response('ignored: specage push already dispatched', { status: 200 });
+    }
+
+    const dataToken = await getInstallationToken(env, installationId);
+    const cfgRes = await fetch(
+      `https://api.github.com/repos/${dataRepo}/contents/.specage/config.yaml?ref=${sha}`,
+      { headers: ghHeaders(dataToken, 'application/vnd.github.raw+json') }
+    );
+    if (!cfgRes.ok) {
+      return new Response('ignored: no .specage/config.yaml on spec branch', { status: 200 });
+    }
+    const cfg = await cfgRes.text();
+    const projectRepo = cfg.match(/^repo:\s*["']?([\w.-]+\/[\w.-]+)["']?/m)?.[1];
+    if (!projectRepo) {
+      return new Response('ignored: config has no project repo', { status: 200 });
+    }
+    const backend = cfg.match(/^[ \t]+backend:\s*["']?([\w.-]+)/m)?.[1] || 'claude';
+
+    const owner = env.AGENT_INFRA_OWNER || 'TheDeepestSpace';
+    const repo = env.AGENT_INFRA_REPO || 'the-intern';
+    const appJwt = mintAppJwt(env.APP_ID, normalizeKey(getPrivateKey(env)));
+    const projectInstall = await getInstallationIdForRepo(appJwt, projectRepo);
+    const internInstall = env.AGENT_INFRA_INSTALLATION_ID || (await getInstallationIdForRepo(appJwt, `${owner}/${repo}`));
+    if (!projectInstall || !internInstall) {
+      return new Response('app not installed on project or agent-infra repo', { status: 502 });
+    }
+    const projectToken = await getInstallationToken(env, projectInstall);
+    const internToken = await getInstallationToken(env, internInstall);
+
+    const short = sha.slice(0, 7);
+    const issueRes = await fetch(`https://api.github.com/repos/${projectRepo}/issues`, {
+      method: 'POST',
+      headers: { ...ghHeaders(projectToken), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: `specage dispatch ${short}`,
+        labels: ['specage-dispatch'],
+        body: `Spec commit \`${sha}\` on \`${dataRepo}\` (\`specages/${project}/spec\`).\n\nReply here with @the-intern-bot to answer questions that are not spec text.`,
+      }),
+    });
+    if (!issueRes.ok) {
+      return new Response(`issue creation failed: ${await issueRes.text()}`, { status: 502 });
+    }
+    const issue = await issueRes.json();
+
+    const dispatchRes = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/actions/workflows/dispatcher.yml/dispatches`,
+      {
+        method: 'POST',
+        headers: { ...ghHeaders(internToken), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ref: 'main',
+          inputs: {
+            target_repo: projectRepo,
+            pr_number: String(issue.number),
+            installation_id: String(projectInstall),
+            comment_body: `backend=${backend} Run the specage dispatch for commit ${sha}. Spec and trail live in ${dataRepo} on branches specages/${project}/{spec,trail}. Follow .specage/PROTOCOL.md on the spec branch exactly.`,
+          },
+        }),
+      }
+    );
+    if (!dispatchRes.ok) {
+      return new Response(`dispatch failed: ${await dispatchRes.text()}`, { status: 502 });
+    }
+    await env.CI_FAILURE_DEDUP.put(dedupKey, '1', { expirationTtl: 60 * 60 * 24 * 14 });
+    return new Response('ok', { status: 200 });
+  } catch (err) {
+    return new Response(`internal error: ${err.message}`, { status: 500 });
+  }
+}
+
+function normalizeKey(key) {
+  key = (key || '').trim();
+  return key.includes('-----BEGIN') ? key : Buffer.from(key, 'base64').toString('utf8');
 }
 
 // Polls GET /pulls/{n} for mergeable, retrying past a null response (GitHub
