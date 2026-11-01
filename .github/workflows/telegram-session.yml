@@ -229,7 +229,7 @@ jobs:
           # sanitized basename. Exit 2 from the downloader means >20 MB.
           download_attachment() {
             local file_id="$1" raw_name="$2" dir="$3" name
-            name="$(basename -- "$raw_name" | tr -c 'A-Za-z0-9._-' '_' | sed 's/^\.*//' | cut -c1-100)"
+            name="$(basename -- "$raw_name" | tr -d '\n' | tr -c 'A-Za-z0-9._-' '_' | sed 's/^\.*//' | cut -c1-100)"
             [ -n "$name" ] || name="file"
             rm -rf "$dir"; mkdir -p "$dir"
             local rc=0
