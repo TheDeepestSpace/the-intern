@@ -1,0 +1,663 @@
+name: specage dispatch
+on:
+  repository_dispatch:
+    types: [specage_push]
+
+permissions:
+  contents: read
+
+jobs:
+  detect-image:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.check.outputs.image }}
+      target_repo: ${{ steps.parse.outputs.target_repo }}
+      clean_prompt: ${{ steps.parse.outputs.clean_prompt }}
+      installation_id: ${{ steps.parse.outputs.installation_id }}
+      backend: ${{ steps.parse.outputs.backend }}
+      model: ${{ steps.parse.outputs.model }}
+    steps:
+      - name: Checkout agent-infra
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Parse trigger and extract target repo / params
+        id: parse
+        run: node scripts/parse-specage-trigger.js
+        env:
+          CLEAN_PROMPT_FILE: clean_prompt.txt
+
+      # Carries clean_prompt across to the `handle` job as a file rather than a
+      # step `env:` key there (issue #226) — a step-level `env:` mapping
+      # referencing this content gets auto-echoed by the Actions runner as
+      # plaintext before the step's script ever runs. needs.*.outputs can't
+      # reach `handle` any other way since it's a separate job on a separate
+      # runner/container.
+      - name: Upload clean prompt for handle job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: clean-prompt-${{ github.run_id }}
+          path: clean_prompt.txt
+          retention-days: 1
+
+      - name: Mint temporary token for image check
+        id: temp_token
+        run: node scripts/mint-installation-token.js
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          INSTALLATION_ID: ${{ steps.parse.outputs.installation_id }}
+          TARGET_REPO: ${{ steps.parse.outputs.target_repo }}
+
+      - name: Check for repo-specific devcontainer image on GHCR
+        id: check
+        env:
+          GH_TOKEN: ${{ steps.temp_token.outputs.token }}
+          REPO_NAME: ${{ steps.parse.outputs.target_repo }}
+        run: |
+          FALLBACK_IMAGE="ghcr.io/thedeepestspace/the-intern-dev:latest"
+          if [ -z "$REPO_NAME" ]; then
+            echo "image=$FALLBACK_IMAGE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          REPO_OWNER="${REPO_NAME%%/*}"
+          REPO_SLUG="${REPO_NAME##*/}"
+          IMAGE="ghcr.io/${REPO_OWNER,,}/${REPO_SLUG,,}-dev"
+          SCOPE="repository:${REPO_OWNER,,}/${REPO_SLUG,,}-dev:pull"
+          GHCR_TOKEN=$(curl -s -K - \
+               "https://ghcr.io/token?service=ghcr.io&scope=${SCOPE}" <<CURL_CFG | jq -r '.token // empty'
+          user = "token:${GH_TOKEN}"
+          CURL_CFG
+          )
+
+          TAGS=""
+          if [ -n "$GHCR_TOKEN" ]; then
+            TAGS=$(curl -s -f -H "Authorization: Bearer $GHCR_TOKEN" \
+                 "https://ghcr.io/v2/${REPO_OWNER,,}/${REPO_SLUG,,}-dev/tags/list" || true)
+          fi
+
+          TAG=""
+          if [ -n "$TAGS" ] && echo "$TAGS" | jq -e 'has("tags")' > /dev/null 2>&1; then
+            if echo "$TAGS" | jq -e '.tags | index("latest")' > /dev/null; then
+              TAG="latest"
+            elif echo "$TAGS" | jq -e '.tags | index("dev-latest")' > /dev/null; then
+              TAG="dev-latest"
+            fi
+          fi
+
+          if [ -n "$TAG" ]; then
+            echo "Detected custom container image: $IMAGE:$TAG"
+            echo "image=$IMAGE:$TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "No repo-specific container image found; using fallback $FALLBACK_IMAGE"
+            echo "image=$FALLBACK_IMAGE" >> "$GITHUB_OUTPUT"
+          fi
+
+  ensure-agent-overlay:
+    needs: detect-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+    steps:
+      - name: Checkout agent-infra
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check whether base image is our own fallback
+        id: fallback_check
+        run: |
+          REPO_LOWER=$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          if [ "${{ needs.detect-image.outputs.image }}" = "ghcr.io/${REPO_LOWER}-dev:latest" ]; then
+            echo "is_fallback=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_fallback=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint temporary token for base image access
+        id: temp_token
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        run: node scripts/mint-installation-token.js
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          INSTALLATION_ID: ${{ needs.detect-image.outputs.installation_id }}
+          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+
+      - name: Set up Docker Buildx
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Login to GHCR to pull base image
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: x-access-token
+          password: ${{ steps.temp_token.outputs.token }}
+
+      # The overlay tag is derived from the base image's digest (not its mutable
+      # "latest"/"dev-latest" tag), so a new dev-image build in the target repo
+      # naturally produces a new tag here and forces a rebuild on the next dispatch
+      # instead of reusing a stale overlay. It also folds in a hash of the overlay
+      # Dockerfile itself, so editing docker/agent-overlay.Dockerfile forces a
+      # rebuild too, instead of silently reusing a stale cached image built from
+      # the old Dockerfile.
+      - name: Resolve base image digest and overlay tag
+        id: overlay_meta
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        env:
+          REPO_NAME: ${{ needs.detect-image.outputs.target_repo }}
+          BASE_IMAGE: ${{ needs.detect-image.outputs.image }}
+        run: |
+          REPO_SLUG="${REPO_NAME##*/}"
+          DIGEST=$(docker buildx imagetools inspect "$BASE_IMAGE" | awk '/^Digest:/ {print $2}')
+
+          if [ -z "$DIGEST" ]; then
+            echo "::error::Could not resolve a digest for base image $BASE_IMAGE"
+            exit 1
+          fi
+
+          DIGEST_SHORT=$(echo "$DIGEST" | sed 's/^sha256://' | cut -c1-12)
+          DOCKERFILE_HASH=$(sha256sum docker/agent-overlay.Dockerfile | cut -c1-12)
+          OVERLAY_TAG="${REPO_SLUG,,}-${DIGEST_SHORT}-${DOCKERFILE_HASH}"
+          OVERLAY_IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/agent-overlay:${OVERLAY_TAG}"
+
+          echo "overlay_tag=$OVERLAY_TAG" >> "$GITHUB_OUTPUT"
+          echo "overlay_image=$OVERLAY_IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR to check overlay image
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for an existing overlay image
+        id: check_overlay
+        if: steps.fallback_check.outputs.is_fallback != 'true'
+        env:
+          OVERLAY_IMAGE: ${{ steps.overlay_meta.outputs.overlay_image }}
+        run: |
+          if docker buildx imagetools inspect "$OVERLAY_IMAGE" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push agent-overlay image
+        if: steps.fallback_check.outputs.is_fallback != 'true' && steps.check_overlay.outputs.exists != 'true'
+        uses: ./.github/actions/build-push-image
+        with:
+          dockerfile: docker/agent-overlay.Dockerfile
+          image: ${{ steps.overlay_meta.outputs.overlay_image }}
+          build-args: |
+            BASE_IMAGE=${{ needs.detect-image.outputs.image }}
+          pull-username: x-access-token
+          pull-password: ${{ steps.temp_token.outputs.token }}
+          push-password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve final image output
+        id: resolve
+        run: |
+          if [ "${{ steps.fallback_check.outputs.is_fallback }}" = "true" ]; then
+            echo "image=${{ needs.detect-image.outputs.image }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=${{ steps.overlay_meta.outputs.overlay_image }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  handle:
+    needs: [detect-image, ensure-agent-overlay]
+    runs-on: ubuntu-latest
+    # contents: write is no longer needed here — session summaries and
+    # pending-retries both persist to the-intern-data via a static
+    # DATA_REPO_TOKEN secret (issue #124), not this job's own GITHUB_TOKEN.
+    permissions:
+      contents: read
+    # Per-project-repo serialization (queue: max) keeps two specage pushes for the
+    # same project from racing on checkout/push. No issue is involved. codex-backend runs additionally need
+    # global serialization: codex proactively rotates its own refresh token in place,
+    # and rotated refresh tokens are typically single-use, so two overlapping
+    # codex-backend runs restoring/persisting CODEX_AUTH_JSON at once would race and
+    # strand each other on a stale token.
+    concurrency:
+      group: ${{ needs.detect-image.outputs.backend == 'codex' && 'the-intern-codex-auth' || format('specage-{0}', needs.detect-image.outputs.target_repo) }}
+      cancel-in-progress: false
+      queue: max
+    container:
+      image: ${{ needs.ensure-agent-overlay.outputs.image }}
+      options: --user root
+    env:
+      CODEX_HOME: /home/dev/.codex
+      # Every `run:` step below redirects its own stdout/stderr into this file
+      # instead of streaming to the public Actions log (issue #224); the
+      # "Upload run log on failure" step at the end of the job is the only
+      # thing that ever reads it back out, and only when the job failed.
+      LOG_FILE: /tmp/run.log
+    steps:
+      - name: Checkout agent-infra
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Retrieves the file the detect-image job uploaded above instead of
+      # consuming needs.detect-image.outputs.clean_prompt via a step `env:`
+      # key below (issue #226) — see that job's upload step for why.
+      - name: Download clean prompt from detect-image job
+        if: needs.detect-image.outputs.target_repo != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: clean-prompt-${{ github.run_id }}
+
+      - name: Mint installation token
+        id: token
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          node scripts/mint-installation-token.js
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          INSTALLATION_ID: ${{ needs.detect-image.outputs.installation_id }}
+          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+
+      - name: Checkout target repository
+        if: needs.detect-image.outputs.target_repo != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.detect-image.outputs.target_repo }}
+          token: ${{ steps.token.outputs.token }}
+          path: target
+
+      - name: Install script dependencies for Codex auth round-trip
+        if: needs.detect-image.outputs.backend == 'codex'
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          npm ci --omit=dev --include=prod --no-audit --no-fund
+
+      # Factored out of "Run agent" (which used to do this inline, right before its
+      # own su-to-dev calls) so this same dev:dev ownership can also be relied on by
+      # the devcontainer postStartCommand step below (issue #207) — without either
+      # step duplicating a slightly-different copy of this logic.
+      - name: Ensure dev user and workspace ownership
+        if: needs.detect-image.outputs.target_repo != ''
+        working-directory: target
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          TARGET_DIR="$(pwd)"
+          # Ensure dev user exists and owns the workspace so it has write access
+          id -u dev >/dev/null 2>&1 || (useradd -m -s /bin/bash dev && echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers)
+
+          if ! chown -R dev:dev "$TARGET_DIR" /tmp /home/dev; then
+            echo "::error::chown failed to grant the dev user write access to workspace directories"
+            exit 1
+          fi
+          if ! su dev -c "test -w '$TARGET_DIR/.git'"; then
+            echo "::error::dev user still lacks write access to $TARGET_DIR/.git after chown; aborting before git config"
+            ls -la "$TARGET_DIR/.git" 2>&1 || true
+            exit 1
+          fi
+
+      # Runs the target repo's `.devcontainer/devcontainer.json` postStartCommand
+      # (npm install, browser binary downloads, etc. — issue #207), the same thing
+      # an interactive devcontainer would run after creating the container. Confirmed
+      # concretely for svsch: its postStartCommand installs deps and Playwright's
+      # Chromium binary, neither of which a dispatched agent session previously had.
+      # Non-fatal by design (see run-devcontainer-poststart.js) and time-boxed here
+      # so a hung install in some target repo can't stall the whole workflow run —
+      # continue-on-error is a second line of defense for that same case, since a
+      # step killed by its own timeout-minutes can't be trusted to exit cleanly on
+      # its own.
+      - name: Run devcontainer postStartCommand
+        if: needs.detect-image.outputs.target_repo != ''
+        working-directory: target
+        timeout-minutes: 10
+        continue-on-error: true
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          TARGET_DIR="$(pwd)" node "$GITHUB_WORKSPACE/scripts/run-devcontainer-poststart.js"
+
+      # Personal-account Codex login (~/.codex/auth.json) is the only supported auth
+      # path for backend=codex — no API-key fallback. Restores the last-known-good
+      # auth.json from the CODEX_AUTH_JSON secret; the matching write-back happens in
+      # "Persist refreshed Codex auth.json" below, after codex has had a chance to
+      # rotate it. See rotate-codex-auth.js for the full rationale and the
+      # log-masking measures — nothing in either step ever echoes token contents.
+      #
+      # Deliberately placed after "Run devcontainer postStartCommand", not before
+      # (PR #208 review): postStartCommand runs arbitrary target-repo code as the
+      # dev user, and the earlier "Ensure dev user and workspace ownership" chown
+      # already made /home/dev (and everything under it) dev-owned before that step
+      # ran. Restoring auth.json only now — after postStartCommand has already run —
+      # means there's nothing under dev's ownership for it to read; the chown here
+      # grants dev ownership of $CODEX_HOME (created fresh by this restore step,
+      # running as root — codex exec needs to write into it too, e.g. session/state
+      # files, not just read auth.json), immediately before "Run agent" (the only
+      # step that needs it) rather than for postStartCommand's entire runtime.
+      # Restore/chown failures are logged but non-fatal so the job still reaches
+      # "Run agent" (which then fails cleanly on missing credentials) instead of
+      # aborting silently and skipping the failure-notification flow below.
+      - name: Restore Codex auth.json from secret
+        if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.backend == 'codex'
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          node scripts/rotate-codex-auth.js restore || echo "::warning::Codex auth.json restore failed; codex exec will fail without valid credentials"
+          if [ -d "$CODEX_HOME" ]; then
+            chown -R dev:dev "$CODEX_HOME" || echo "::warning::Failed to chown Codex home to dev; codex exec will fail to read/write it"
+          fi
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+
+      - name: Run agent (fresh session per trigger, as non-root user)
+        if: needs.detect-image.outputs.target_repo != ''
+        working-directory: target
+        env:
+          BACKEND: ${{ needs.detect-image.outputs.backend }}
+          MODEL: ${{ needs.detect-image.outputs.model }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ needs.detect-image.outputs.backend != 'codex' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          # Let the background token refresher below (issue #145) re-mint with
+          # the same scoping the initial "Mint installation token" step above
+          # used, once the token it minted expires past its fixed 1hr cap.
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          INSTALLATION_ID: ${{ needs.detect-image.outputs.installation_id }}
+          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
+          RETRY_KEY: specage:${{ needs.detect-image.outputs.target_repo }}
+          RETRY_SOURCE: specage
+          DISPATCH_REF: ${{ github.ref_name }}
+          MAX_RETRIES: 3
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Lets handle-agent-outcome.js's pending-retries read/write authenticate
+          # to the-intern-data (issue #124) — pending-retries.json now lives
+          # solely on the-intern-data.
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          export COMMENT_BODY="$(cat ../clean_prompt.txt 2>/dev/null || true)"
+          export STYLE_GUIDE="$(cat ../instructions/shared-style.md 2>/dev/null || true)"
+          export TARGET_DIR="$(pwd)"
+
+          node -e '
+            const fs = require("fs");
+            const repo = process.env.TARGET_REPO || "";
+            const comment = process.env.COMMENT_BODY || "";
+            const style = process.env.STYLE_GUIDE || "";
+
+            let prompt = `You are @the-intern-bot working on repository ${repo}. No issue or PR is attached to this run; create an issue yourself if you decide one is needed.\nYou have access to the GitHub CLI (\x27gh\x27) and full git tools. Use \x27gh\x27 to post comments, inspect code, run tests, or open PRs as needed.\n\nThis is a headless, single-shot session: your final message is never shown to anyone — only a \x27gh\x27 comment, commit, or other repo action reaches a human. Post a comment when there\x27s something worth telling a human (an answer, a landed change, a blocker); if the request is a question or otherwise doesn\x27t land a PR/issue that already carries the answer, don\x27t let it go unanswered. But don\x27t post just to confirm receipt, and if a threaded reply already covers the response, don\x27t also post a separate top-level comment restating it.\n\n`;
+            if (style) {
+              prompt += `${style}\n\n`;
+            }
+            prompt += `New request:\n${comment}`;
+            fs.writeFileSync("/tmp/prompt.txt", prompt);
+            // Raw MODEL value, written here (trusted root context, before
+            // run_as_dev.sh is generated) so the generated script can read it
+            // into a shell variable rather than the value ever being
+            // interpolated directly into a command string — same reasoning as
+            // /tmp/prompt.txt above.
+            fs.writeFileSync("/tmp/model.txt", process.env.MODEL || "");
+          '
+
+          # Extraction logic written to its own file (not inlined via jq, which isn't guaranteed to
+          # be present in every target image) so result.json parsing has no external dependency.
+          # Reads from /tmp/result.json (outside the target/ working tree, issue #71) so a git
+          # clean/reset run by Claude inside target/ can't unlink it out from under the redirect;
+          # still writes session_result.txt into target/ (cwd).
+          node -e '
+            const fs = require("fs");
+            const lines = [
+              "const fs = require(\"fs\");",
+              "let output = \"\";",
+              "try {",
+              "  const raw = fs.readFileSync(\"/tmp/result.json\", \"utf8\");",
+              "  const data = JSON.parse(raw);",
+              "  const value = data.result ?? data.output ?? data;",
+              "  output = typeof value === \"string\" ? value : JSON.stringify(value, null, 2);",
+              "} catch (e) {",
+              "  output = fs.readFileSync(\"/tmp/result.json\", \"utf8\").toString();",
+              "}",
+              "fs.writeFileSync(\"session_result.txt\", output);",
+            ];
+            fs.writeFileSync("/tmp/extract-result.js", lines.join("\n"));
+          '
+
+          # codex exec has no --output-format json like claude; instead it streams
+          # JSONL events to stdout (captured separately, for debugging only) and
+          # writes the final agent message to --output-last-message. This wraps
+          # that final message into the same {result, is_error} shape claude's
+          # own --output-format json produces, so extract-result.js and the
+          # failure-detection step below work unmodified for either backend.
+          node -e '
+            const fs = require("fs");
+            const lines = [
+              "const fs = require(\"fs\");",
+              "const exitCode = process.argv[2];",
+              "let finalMessage = \"\";",
+              "try { finalMessage = fs.readFileSync(\"/tmp/codex-final.txt\", \"utf8\"); } catch (e) {}",
+              "const isError = exitCode !== \"0\" || !finalMessage.trim();",
+              "fs.writeFileSync(\"/tmp/result.json\", JSON.stringify({ result: finalMessage, is_error: isError }, null, 2));",
+            ];
+            fs.writeFileSync("/tmp/normalize-codex-result.js", lines.join("\n"));
+          '
+
+          # dev user creation + chown already happened in "Ensure dev user and
+          # workspace ownership" above, shared with the devcontainer postStartCommand
+          # step (issue #207).
+
+          # Written to a file (rather than inlined into `su -c '...'`) to avoid fragile nested-quote
+          # escaping — a previous inline version silently truncated the script at the jq filter's
+          # single quotes, dropping everything after it.
+          #
+          # Backend invocation differs (claude vs codex), but both are run with their
+          # sandboxing/approval prompts fully disabled — the isolation here comes from
+          # the ephemeral container and non-root dev user, not from the CLI's own
+          # permission system, same trust model on both backends.
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const backend = process.env.BACKEND === "codex" ? "codex" : "claude";
+            const agentInfraDir = path.dirname(process.env.TARGET_DIR || "");
+
+            // model= is free text from the dispatch text (parse-specage-trigger.js).
+            // buildModelFlag/buildCodexModelFlag allowlist-check it and hand back a flag
+            // that references a shell variable rather than the raw value, so nothing gets
+            // interpolated straight into the command string below even after the
+            // allowlist check.
+            const {
+              buildModelFlag,
+              buildCodexModelFlag,
+            } = require(path.join(agentInfraDir, "scripts", "build-model-flag.js"));
+
+            let claudeModelFlag = "";
+            let codexModelFlag = "";
+            let modelSetupLine = null;
+            if (backend === "claude") {
+              const modelResult = buildModelFlag(process.env.MODEL);
+              if (modelResult.warning) {
+                console.log(modelResult.warning);
+              }
+              if (modelResult.valid) {
+                claudeModelFlag = " " + modelResult.flag;
+                modelSetupLine = "MODEL=\"$(cat /tmp/model.txt)\"";
+              }
+            } else {
+              const modelResult = buildCodexModelFlag(process.env.MODEL);
+              if (modelResult.warning) {
+                console.log(modelResult.warning);
+              }
+              if (modelResult.valid) {
+                codexModelFlag = modelResult.flag;
+                modelSetupLine = "MODEL=\"$(cat /tmp/model.txt)\"";
+              }
+            }
+
+            // Reasoning effort is kept at "xhigh" unconditionally, independent of which
+            // model is in play — an explicit model= override changes only the model,
+            // never the effort (there is no effort= plumbing to backend=codex yet; this
+            // keeps that a deliberate follow-up rather than an accidental side effect of
+            // this change).
+            const codexModelFlags = `${codexModelFlag || "-c model=\\\"gpt-5.6-sol\\\""} -c model_reasoning_effort=\\\"xhigh\\\"`;
+
+            const runLines = backend === "codex"
+              ? [
+                  `codex exec --dangerously-bypass-approvals-and-sandbox ${codexModelFlags} --json --output-last-message /tmp/codex-final.txt \"$PROMPT\" > /tmp/codex-events.jsonl 2>&1`,
+                  "CODEX_EXIT=$?",
+                  "set -e",
+                  "node /tmp/normalize-codex-result.js \"$CODEX_EXIT\" || true",
+                ]
+              : [
+                  `claude -p \"$PROMPT\" --append-system-prompt \"This is a one-shot headless run: no later turn will ever re-invoke you. Any background or async tool result you need must be polled to completion within this same turn, or it and the original request are permanently lost.\" --disallowedTools \"Monitor,ScheduleWakeup,CronCreate,CronList,CronDelete\" --output-format json --dangerously-skip-permissions${claudeModelFlag} > /tmp/result.json 2>&1`,
+                  "set -e",
+                ];
+            // Stop-hook backstop (issue #69): wired via a per-user settings.json rather than a
+            // .claude/settings.json committed to the target repo, since the target checkout is
+            // untrusted and this container is torn down after the run anyway.
+            const stopHookScript = path.join(agentInfraDir, "scripts", "check-stop-hook.js");
+            const stopHookSettings = JSON.stringify({
+              hooks: { Stop: [{ hooks: [{ type: "command", command: `node ${stopHookScript}`, timeout: 30 }] }] },
+            }, null, 2);
+            const script = [
+              "#!/bin/bash",
+              "set -e",
+              "export HOME=\"/home/dev\"",
+              "cd \"$TARGET_DIR\"",
+              "git config --global --add safe.directory \"$TARGET_DIR\"",
+              "git config user.name \"the-intern-bot[bot]\"",
+              "git config user.email \"the-intern-bot[bot]@users.noreply.github.com\"",
+              "mkdir -p \"$HOME/.claude\"",
+              // Unquoted heredoc delimiter here (STOPHOOKEOF, not a quoted variant) since this
+              // whole script string is itself wrapped in single quotes by the outer node -e
+              // invocation below; a quoted delimiter needs literal single quote characters, which
+              // would terminate that outer string early. The JSON body has no dollar signs or
+              // backticks, so skipping shell-expansion protection in the heredoc is safe.
+              "cat > \"$HOME/.claude/settings.json\" <<STOPHOOKEOF",
+              stopHookSettings,
+              "STOPHOOKEOF",
+              "git rev-parse HEAD > /tmp/stop_hook_baseline_sha.txt 2>/dev/null || true",
+              "git for-each-ref --format=\"%(objectname) %(refname)\" > /tmp/stop_hook_baseline_refs.txt 2>/dev/null || true",
+              "date -u +%Y-%m-%dT%H:%M:%SZ > /tmp/stop_hook_session_start.txt 2>/dev/null || true",
+              "PROMPT=\"$(cat /tmp/prompt.txt)\"",
+              ...(modelSetupLine ? [modelSetupLine] : []),
+              "set +e",
+              ...runLines,
+              "node /tmp/extract-result.js || true",
+              "",
+            ].join("\n");
+            fs.writeFileSync("/tmp/run_as_dev.sh", script, { mode: 0o755 });
+          '
+          chown dev:dev /tmp/run_as_dev.sh /tmp/extract-result.js /tmp/normalize-codex-result.js
+
+          # Authenticate the dev user's gh/git credential store once with the
+          # token minted above (issue #145) — separate from GH_TOKEN/GITHUB_TOKEN,
+          # which the su call below now strips before the agent CLI runs. `gh`
+          # and git (via `gh auth setup-git`'s credential helper) both re-read
+          # this on-disk store fresh on every invocation, so the background
+          # refresher below can keep it valid past GitHub's fixed 1hr
+          # installation-token cap without needing to reach the already-running
+          # agent process (re-exporting env vars mid-step doesn't propagate to
+          # an already-spawned process or its children).
+          if command -v gh >/dev/null 2>&1; then
+            INIT_TOKEN="$GH_TOKEN" env -u GH_TOKEN -u GITHUB_TOKEN su dev -c 'echo "$INIT_TOKEN" | gh auth login --with-token && gh auth setup-git'
+          fi
+
+          # Re-mints a token and rewrites that credential store every ~45min
+          # for the duration of the agent run below. Runs as this step's own
+          # (root) user, not as dev, so APP_ID/APP_PRIVATE_KEY never reach the
+          # dev user — the same untrusted context the agent CLI runs in.
+          # Killed by PID as soon as the agent process exits, before any
+          # always() cleanup steps.
+          node "$GITHUB_WORKSPACE/scripts/refresh-gh-token.js" &
+          REFRESHER_PID=$!
+          # su dev -c below runs under this step's default set -e, so a
+          # non-zero exit (e.g. the agent CLI failing) would skip straight
+          # past the kill/wait further down and leak the refresher process.
+          trap 'kill "$REFRESHER_PID" 2>/dev/null || true; wait "$REFRESHER_PID" 2>/dev/null || true' EXIT
+
+          env -u TG_BOT_TOKEN -u TG_ADMIN_CHAT_ID -u DATA_REPO_TOKEN -u APP_ID -u APP_PRIVATE_KEY -u GH_TOKEN -u GITHUB_TOKEN su dev -c /tmp/run_as_dev.sh
+
+          kill "$REFRESHER_PID" 2>/dev/null || true
+          wait "$REFRESHER_PID" 2>/dev/null || true
+          trap - EXIT
+
+          # the agent's own gh calls are how it normally reports back; if the session
+          # crashed or produced nothing usable, that never happens, so detect that
+          # here. handle-agent-outcome.js also checks whether the failure looks like
+          # a Claude usage-limit stall (issue #100): if so it queues an auto-retry on
+          # the pending-retries branch instead of the generic failure notification,
+          # and separately clears any queued retry (with a "resumed" ping) when this
+          # run succeeded.
+          RESULT_FILE=/tmp/result.json node "$GITHUB_WORKSPACE/scripts/handle-agent-outcome.js"
+
+      # Runs even if the step above failed: OpenAI's CI/CD guidance for this flow is
+      # to write back whatever codex left on disk regardless of run outcome, since a
+      # refresh can happen before a mid-run failure and a rotated refresh token is
+      # typically single-use — skipping the write-back on failure would strand the
+      # account on a dead token. rotate-codex-auth.js mints its own short-lived
+      # installation token scoped to this repo (via mint-installation-token.js),
+      # using the App's Secrets: read & write permission, rather than requiring a
+      # separate long-lived PAT — only the Actions-issued GITHUB_TOKEN is hard-
+      # blocked from managing secrets; an App installation token can, so long as
+      # the App has the Secrets permission. Encryption uses the repo's public key
+      # via libsodium (GitHub's documented approach for the secrets API) so the
+      # refreshed token is sealed before it ever leaves the runner.
+      - name: Persist refreshed Codex auth.json to secret
+        if: always() && needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.backend == 'codex'
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          node scripts/rotate-codex-auth.js persist
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+
+      # Pushes whatever accumulated in $LOG_FILE (issue #224) to the-intern-data
+      # (private) so a post-mortem is possible after the public log was silenced
+      # above — only runs when something in this job actually failed (failure()
+      # is true if any prior step failed and wasn't continue-on-error'd), so a
+      # successful run uploads nothing and the public log stays empty.
+      # continue-on-error like the backup step above: a failed upload of a
+      # debugging aid must not mask, or pile onto, the real failure that
+      # triggered it.
+      - name: Upload run log on failure
+        if: failure()
+        continue-on-error: true
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          node "$GITHUB_WORKSPACE/scripts/manage-run-log.js"
+        env:
+          RUN_LOG_PREFIX: specage/${{ needs.detect-image.outputs.target_repo }}
+          # Lets manage-run-log.js authenticate to the-intern-data (issue
+          # #124), same pattern as manage-summaries.js/manage-workspace-backup.js.
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+
+  notify-failure:
+    needs: [detect-image, ensure-agent-overlay, handle]
+    if: always() && (needs.detect-image.result == 'failure' || needs.ensure-agent-overlay.result == 'failure' || needs.handle.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout agent-infra
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Notify maintainer via Telegram
+        run: node scripts/notify-failure.js
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
+          REPO: ${{ github.repository }}
+          WORKFLOW_NAME: specage dispatch
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          FAILED_JOBS: >-
+            ${{ needs.detect-image.result == 'failure' && 'detect-image' || '' }}
+            ${{ needs.ensure-agent-overlay.result == 'failure' && 'ensure-agent-overlay' || '' }}
+            ${{ needs.handle.result == 'failure' && 'handle' || '' }}

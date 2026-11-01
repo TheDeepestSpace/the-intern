@@ -37,7 +37,7 @@ function mockFlow({ config = CONFIG, dispatchOk = true } = {}) {
     if (pathname.endsWith('/installation')) {
       return new Response(JSON.stringify({ id: 7 }), { status: 200 });
     }
-    if (req.method === 'POST' && pathname.endsWith('/actions/workflows/dispatcher.yml/dispatches')) {
+    if (req.method === 'POST' && pathname.endsWith('/dispatches')) {
       return dispatchOk ? new Response(null, { status: 204 }) : new Response('nope', { status: 422 });
     }
     throw new Error(`Unexpected fetch: ${req.method} ${pathname}`);
@@ -47,17 +47,18 @@ function mockFlow({ config = CONFIG, dispatchOk = true } = {}) {
 const send = (payload, e = env()) => worker.fetch(githubRequest({ eventType: 'push', body: payload }), e);
 
 describe('specage spec-branch push', () => {
-  it('dispatches dispatcher.yml without creating an issue', async () => {
+  it('fires a specage_push repository_dispatch without creating an issue', async () => {
     const spy = mockFlow();
     const res = await send(specPush());
     expect(res.status).toBe(200);
     expect(await res.text()).toBe('ok');
     const call = spy.mock.calls.find(([i]) => new URL(i.url ?? i).pathname.endsWith('/dispatches'));
     const body = JSON.parse(call[1].body);
-    expect(body.inputs.target_repo).toBe('acme/app');
-    expect(body.inputs.pr_number).toBeUndefined();
+    expect(body.event_type).toBe('specage_push');
+    expect(body.client_payload.target_repo).toBe('acme/app');
+    expect(body.client_payload.installation_id).toBe('7');
     expect(spy.mock.calls.some(([i]) => new URL(i.url ?? i).pathname.endsWith('/issues'))).toBe(false);
-    expect(body.inputs.comment_body).toBe(
+    expect(body.client_payload.text).toBe(
       `backend=codex Run the specage dispatch for commit ${SHA}. Spec and trail live in acme/specage-data on branches specages/demo/{spec,trail}. Follow .specage/PROTOCOL.md on the spec branch exactly.`
     );
   });
