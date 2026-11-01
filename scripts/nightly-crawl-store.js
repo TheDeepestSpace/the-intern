@@ -226,6 +226,25 @@ function isCiGreen({ checkRuns = [], combinedStatus = null } = {}) {
   return { green: true, reason: null };
 }
 
+// True only for a definite failure on the head commit. Running checks, or no
+// checks at all, are not failures: there is nothing to investigate yet.
+function isCiFailing({ checkRuns = [], combinedStatus = null } = {}) {
+  if (checkRuns.some((c) => c.status === 'completed' && FAILED_CONCLUSIONS.has(c.conclusion))) return true;
+  return combinedStatus?.total_count > 0 && (combinedStatus.state === 'failure' || combinedStatus.state === 'error');
+}
+
+const CI_FAILURE_MARKER = '<!-- the-intern-nightly-crawl:ci-failure -->';
+
+function ciFailureComment() {
+  return `${CI_FAILURE_MARKER}\n@the-intern-bot CI is failing on this Dependabot PR. Please investigate and resolve if possible.`;
+}
+
+// Asked at most once per PR, ever: any earlier comment carrying the marker
+// means the investigation was already requested.
+function hasCiFailureRequest(comments = []) {
+  return comments.some((c) => (c.body || '').includes(CI_FAILURE_MARKER));
+}
+
 const MERGEABLE_STATES_OK = new Set(['clean', 'has_hooks']);
 
 // The single decision table for a reviewed Dependabot PR. `record` is the
@@ -432,6 +451,10 @@ module.exports = {
   needsReview,
   parseVerdict,
   isCiGreen,
+  isCiFailing,
+  CI_FAILURE_MARKER,
+  ciFailureComment,
+  hasCiFailureRequest,
   decideDependabotAction,
   applyVerdict,
   markConfirmed,

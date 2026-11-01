@@ -26,6 +26,9 @@ import {
   buildReport,
   confirmationComment,
   suspiciousComment,
+  isCiFailing,
+  ciFailureComment,
+  hasCiFailureRequest,
 } from '../nightly-crawl-store.js';
 
 const HOUR = 60 * 60 * 1000;
@@ -370,5 +373,23 @@ describe('PR comments', () => {
     expect(text).toContain('- new maintainer\n- obfuscated code');
     expect(text).toContain(SUSPICIOUS_LABEL);
     expect(suspiciousComment({ reasons: [] })).toContain('(no reasons given)');
+  });
+});
+
+describe('ci failure request', () => {
+  const failing = { checkRuns: [{ name: 'test', status: 'completed', conclusion: 'failure' }] };
+
+  it('detects only definite failures', () => {
+    expect(isCiFailing(failing)).toBe(true);
+    expect(isCiFailing({ checkRuns: [], combinedStatus: { total_count: 1, state: 'failure' } })).toBe(true);
+    expect(isCiFailing({ checkRuns: [{ status: 'in_progress', conclusion: null }] })).toBe(false);
+    expect(isCiFailing({ checkRuns: [] })).toBe(false);
+    expect(isCiFailing({ checkRuns: [{ status: 'completed', conclusion: 'success' }] })).toBe(false);
+  });
+
+  it('dedupes on the marker comment', () => {
+    expect(hasCiFailureRequest([{ body: 'hi' }])).toBe(false);
+    expect(hasCiFailureRequest([{ body: ciFailureComment() }])).toBe(true);
+    expect(ciFailureComment()).toContain('@the-intern-bot');
   });
 });

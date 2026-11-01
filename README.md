@@ -25,6 +25,11 @@ installation set the worker serves webhooks for. Three phases, all driven by
    - **suspicious** → never merged; labeled `dep-suspicious` with the reasons
      in a comment, once per diff.
 
+   Any Dependabot PR whose head commit has failing CI also gets one comment
+   mentioning `@the-intern-bot` ("investigate and resolve if possible"). It is
+   posted at most once per PR: a later crawl that finds the marker comment
+   does nothing.
+
    Merges go through the plain PR merge API with the reviewed head SHA, so
    branch protection and required checks are respected, never bypassed.
    "CI green" means every check run on the head commit completed without

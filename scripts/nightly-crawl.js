@@ -233,6 +233,7 @@ async function plan(env = process.env, deps = {}) {
     openKeys: [],
     conflicts: [],
     dependabot: [],
+    ciFailures: [],
     reviews: [],
   };
   const dispatchedKeys = [];
@@ -297,6 +298,11 @@ async function plan(env = process.env, deps = {}) {
             needsReview: store.needsReview(state.dependabot[key], diffHash),
           };
           planOut.dependabot.push(candidate);
+          const ciFix = await requestCiFailureFix(token, repo, pr.number, detail.head?.sha, dryRun, d);
+          if (ciFix.requested) {
+            planOut.ciFailures.push({ key, url: detail.html_url, dispatched: !dryRun });
+            console.log(`${key}: CI failing${dryRun ? ' (dry run, not commented)' : ', asked the bot to investigate'}.`);
+          }
           console.log(`${key}: dependabot ${candidate.classification} update (${parsed.package}) — ${candidate.needsReview ? 'needs review' : 'verdict cached'}.`);
         }
       } catch (err) {
@@ -451,10 +457,25 @@ async function mergePr(token, repo, number, sha, method, deps) {
   }, deps.fetchImpl);
 }
 
-async function fetchCi(token, repo, sha, deps) {
+async function fetchCiInputs(token, repo, sha, deps) {
   const checks = await ghJson(token, `/repos/${repo}/commits/${sha}/check-runs?per_page=100`, {}, deps.fetchImpl);
   const combinedStatus = await ghJson(token, `/repos/${repo}/commits/${sha}/status`, {}, deps.fetchImpl);
-  return store.isCiGreen({ checkRuns: checks?.check_runs || [], combinedStatus });
+  return { checkRuns: checks?.check_runs || [], combinedStatus };
+}
+
+async function fetchCi(token, repo, sha, deps) {
+  return store.isCiGreen(await fetchCiInputs(token, repo, sha, deps));
+}
+
+// Asks the bot to look into a Dependabot PR whose CI failed. Once per PR:
+// skipped if an earlier crawl comment (marker) is already there.
+async function requestCiFailureFix(token, repo, number, sha, dryRun, deps) {
+  const inputs = await fetchCiInputs(token, repo, sha, deps);
+  if (!store.isCiFailing(inputs)) return { requested: false, reason: 'CI not failing' };
+  const comments = await ghPaginate(token, `/repos/${repo}/issues/${number}/comments?per_page=100`, deps.fetchImpl);
+  if (store.hasCiFailureRequest(comments)) return { requested: false, reason: 'already requested' };
+  if (!dryRun) await postComment(token, repo, number, store.ciFailureComment(), deps);
+  return { requested: true, reason: null };
 }
 
 async function act(env = process.env, deps = {}) {
