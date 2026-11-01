@@ -1,7 +1,7 @@
 // Pure decision logic for the nightly crawl (issue #257): conflict-sweep
 // dedupe, Dependabot PR classification (security vs regular), the 2-day
 // "confirmed safe" clock, verdict parsing, CI-green checks, and the
-// report/email text. No git, filesystem, or network I/O here — that lives in
+// report text. No git, filesystem, or network I/O here — that lives in
 // nightly-crawl.js (driver) and manage-nightly-crawl-state.js (persistence) —
 // so every rule below can be unit tested directly.
 const crypto = require('crypto');

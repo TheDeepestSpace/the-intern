@@ -5,7 +5,8 @@ name: nightly crawl
 #  2. dependabot sweep — one claude review agent per Dependabot PR; safe
 #     security updates merge at once, safe regular updates merge 2 days after
 #     a recorded confirmation, suspicious ones are flagged and never merged.
-#  3. report — email (Resend) or a the-intern-data issue, plus Telegram.
+#  3. report — comment on a static open issue in this repo (GitHub emails the
+#     @-mentioned owner), plus Telegram.
 # State (verdicts, confirmation clocks, conflict dedupe) lives on the
 # `nightly-crawl` branch of the-intern-data (scripts/manage-nightly-crawl-state.js).
 on:
@@ -172,6 +173,9 @@ jobs:
     # failed — a PR whose review job died simply has no verdict tonight.
     if: always() && needs.plan.result == 'success'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write # report comment on the static "Nightly crawl reports" issue
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -211,11 +215,9 @@ jobs:
           EVENTS_FILE: report-events.json
           REPORT_FILE: report.txt
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          REPORT_EMAIL_TO: ${{ secrets.REPORT_EMAIL_TO }}
-          REPORT_EMAIL_FROM: ${{ vars.REPORT_EMAIL_FROM }}
+          REPORT_TOKEN: ${{ github.token }}
+          REPORT_REPO: ${{ github.repository }}
           REPORT_MENTION: ${{ vars.REPORT_MENTION }}
-          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
 

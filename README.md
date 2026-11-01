@@ -44,13 +44,10 @@ between runs. Verdicts and the plan are also kept as run artifacts.
 | Name | Kind | Purpose |
 | --- | --- | --- |
 | `APP_ID`, `APP_PRIVATE_KEY` | secret (existing) | Enumerate installations and mint per-repo tokens |
-| `DATA_REPO_TOKEN` | secret (existing) | Read/write the `nightly-crawl` state branch on the-intern-data; **add `Issues: write`** on the-intern-data for the email fallback |
+| `DATA_REPO_TOKEN` | secret (existing) | Read/write the `nightly-crawl` state branch on the-intern-data |
 | `CLAUDE_CODE_OAUTH_TOKEN` | secret (existing) | Review agent |
 | `TG_BOT_TOKEN`, `TG_ADMIN_CHAT_ID` | secret (existing) | Telegram copy of the report + failure alerts |
-| `RESEND_API_KEY` | secret | Email delivery via [Resend](https://resend.com) (option (a)); without it the report is posted as an issue on the-intern-data that @-mentions the owner (option (b)) |
-| `REPORT_EMAIL_TO` | secret | Recipient(s), comma-separated |
-| `REPORT_EMAIL_FROM` | variable | Sender; defaults to `the-intern <onboarding@resend.dev>`, which only delivers to the Resend account's own address — set a verified-domain sender otherwise |
-| `REPORT_MENTION` | variable | GitHub login mentioned in the fallback issue (default `TheDeepestSpace`) |
+| `REPORT_MENTION` | variable | GitHub login @-mentioned in the report comment (default `TheDeepestSpace`) |
 | `NIGHTLY_MAX_REVIEWS` | variable | Cap on review agents per night (default 20; the rest wait for the next run) |
 | `NIGHTLY_REVIEW_MODEL` | variable | Optional `--model` for the review agent |
 

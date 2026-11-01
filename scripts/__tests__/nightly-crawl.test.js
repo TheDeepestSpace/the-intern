@@ -477,47 +477,35 @@ describe('report', () => {
 
   it('sends nothing when the night was a no-op', async () => {
     const env = setup({ merged: [], flagged: [], confirmed: [], pending: [{ key: 'x#1', reason: 'waiting' }], errors: [], conflicts: [] });
-    const sendEmail = vi.fn();
-    const result = await report({ ...env, RESEND_API_KEY: 'k', REPORT_EMAIL_TO: 'a@b.c' }, { sendEmail, postReportIssue: vi.fn(), sendTelegram: vi.fn() });
+    const postReportComment = vi.fn();
+    const result = await report(env, { postReportComment, sendTelegram: vi.fn() });
     expect(result.sent).toEqual([]);
-    expect(sendEmail).not.toHaveBeenCalled();
+    expect(postReportComment).not.toHaveBeenCalled();
     expect(fs.existsSync('report.txt')).toBe(true);
   });
 
-  it('emails when Resend is configured and also pings Telegram, without the issue fallback', async () => {
-    const env = { ...setup(), RESEND_API_KEY: 'k', REPORT_EMAIL_TO: 'a@b.c', TG_BOT_TOKEN: 't', TG_ADMIN_CHAT_ID: '1' };
-    const sendEmail = vi.fn(async () => ({ id: 'x' }));
-    const postReportIssue = vi.fn();
+  it('comments on the static issue and also pings Telegram', async () => {
+    const env = { ...setup(), TG_BOT_TOKEN: 't', TG_ADMIN_CHAT_ID: '1' };
+    const postReportComment = vi.fn(async () => ({ url: 'https://c' }));
     const sendTelegram = vi.fn();
-    const result = await report(env, { sendEmail, postReportIssue, sendTelegram });
-    expect(result.sent).toEqual(['email', 'telegram']);
-    expect(sendEmail.mock.calls[0][0].subject).toContain('1 merged');
-    expect(postReportIssue).not.toHaveBeenCalled();
+    const result = await report(env, { postReportComment, sendTelegram });
+    expect(result.sent).toEqual(['issue:https://c', 'telegram']);
+    expect(postReportComment.mock.calls[0][0].subject).toContain('1 merged');
     expect(sendTelegram.mock.calls[0][0]).toContain('✅ merged: a/b#1');
-  });
-
-  it('falls back to the data-repo issue when email is unconfigured or fails', async () => {
-    const env = { ...setup(), DATA_REPO_TOKEN: 'd' };
-    const postReportIssue = vi.fn(async () => ({ url: 'https://issue' }));
-    expect((await report(env, { sendEmail: vi.fn(), postReportIssue, sendTelegram: vi.fn() })).sent).toEqual(['issue:https://issue']);
-
-    const failing = vi.fn(async () => { throw new Error('resend down'); });
-    const result = await report({ ...env, RESEND_API_KEY: 'k', REPORT_EMAIL_TO: 'a@b.c' }, { sendEmail: failing, postReportIssue, sendTelegram: vi.fn() });
-    expect(result.sent).toEqual(['issue:https://issue']);
   });
 
   it('flags a total delivery failure via exit code', async () => {
     const env = setup();
-    const result = await report(env, { sendEmail: vi.fn(), postReportIssue: vi.fn(async () => { throw new Error('no'); }), sendTelegram: vi.fn() });
+    const result = await report(env, { postReportComment: vi.fn(async () => { throw new Error('no'); }), sendTelegram: vi.fn() });
     expect(result.sent).toEqual([]);
     expect(process.exitCode).toBe(1);
     process.exitCode = 0;
   });
 
   it('prints but does not deliver in dry-run mode', async () => {
-    const env = { ...setup(), DRY_RUN: 'true', RESEND_API_KEY: 'k', REPORT_EMAIL_TO: 'a@b.c' };
-    const sendEmail = vi.fn();
-    expect((await report(env, { sendEmail, postReportIssue: vi.fn(), sendTelegram: vi.fn() })).sent).toEqual([]);
-    expect(sendEmail).not.toHaveBeenCalled();
+    const env = { ...setup(), DRY_RUN: 'true' };
+    const postReportComment = vi.fn();
+    expect((await report(env, { postReportComment, sendTelegram: vi.fn() })).sent).toEqual([]);
+    expect(postReportComment).not.toHaveBeenCalled();
   });
 });

@@ -21,7 +21,7 @@ const { getInstallationToken, getPrivateKey, mintAppJwt } = require('./mint-inst
 const { DATA_REPO } = require('./data-repo-remote.js');
 const store = require('./nightly-crawl-store.js');
 const { readState, updateState } = require('./manage-nightly-crawl-state.js');
-const { emailConfigured, sendEmail, postReportIssue } = require('./send-report-email.js');
+const { postReportComment } = require('./send-report.js');
 
 const GH_API = 'https://api.github.com';
 const FETCH_TIMEOUT_MS = 30_000;
@@ -624,27 +624,14 @@ async function report(env = process.env, deps = {}) {
   }
 
   const sent = [];
-  const sendEmailFn = deps.sendEmail || sendEmail;
-  const postIssueFn = deps.postReportIssue || postReportIssue;
+  const postCommentFn = deps.postReportComment || postReportComment;
   const sendTelegramFn = deps.sendTelegram || sendTelegram;
 
-  if (emailConfigured(env)) {
-    try {
-      await sendEmailFn(built, env);
-      sent.push('email');
-    } catch (err) {
-      console.warn(`::warning::Email delivery failed, falling back to a the-intern-data issue: ${err.message}`);
-    }
-  } else {
-    console.log('RESEND_API_KEY/REPORT_EMAIL_TO not set; using the the-intern-data issue fallback.');
-  }
-  if (!sent.includes('email')) {
-    try {
-      const { url } = await postIssueFn(built, env);
-      sent.push(`issue${url ? `:${url}` : ''}`);
-    } catch (err) {
-      console.warn(`::warning::Report issue fallback failed: ${err.message}`);
-    }
+  try {
+    const { url } = await postCommentFn(built, env);
+    sent.push(`issue${url ? `:${url}` : ''}`);
+  } catch (err) {
+    console.warn(`::warning::Report issue comment failed: ${err.message}`);
   }
   if (env.TG_BOT_TOKEN && env.TG_ADMIN_CHAT_ID) {
     try {
