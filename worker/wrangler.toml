@@ -6,6 +6,11 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 AGENT_INFRA_OWNER = "TheDeepestSpace"
 AGENT_INFRA_REPO = "the-intern"
+# Comma-separated owner/repo list of specage-data repos whose specages/<project>/spec
+# pushes trigger a dispatch. Empty/unset = specage dispatch disabled.
+# SPECAGE_DATA_REPOS = "owner/specage-data"
+# Only pushes by this sender trigger a specage dispatch (default specage-app[bot]).
+# SPECAGE_BOT_LOGIN = "specage-app[bot]"
 
 # no-op change to trigger deploy-worker.yml after Node 22 fix (#27)
 

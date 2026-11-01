@@ -1,0 +1,257 @@
+name: nightly crawl
+# Issue #257: sweeps the open PRs of every repo the App is installed on.
+#  1. conflict sweep — bot-authored PRs that went dirty without the worker's
+#     push-triggered merge_conflict path catching them get a dispatch here.
+#  2. dependabot sweep — one claude review agent per Dependabot PR; safe
+#     security updates merge at once, safe regular updates merge 2 days after
+#     a recorded confirmation, suspicious ones are flagged and never merged.
+#  3. report — comment on a static open issue in this repo (GitHub emails the
+#     @-mentioned owner), plus Telegram.
+# State (verdicts, confirmation clocks, conflict dedupe) lives on the
+# `nightly-crawl` branch of the-intern-data (scripts/manage-nightly-crawl-state.js).
+on:
+  schedule:
+    # 04:30 UTC — offset from ci.yaml (06:00) and cleanup-data-branches (07:00).
+    - cron: '30 4 * * *'
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: 'Comma-separated owner/repo list to limit the crawl (default: every repo the App is installed on)'
+        required: false
+      dry_run:
+        description: 'Plan and review only — no dispatches, merges, labels, comments, state writes, or report'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One crawl at a time: plan and act both write the-intern-data's nightly-crawl
+# branch and act merges PRs — an overrunning night must not overlap the next.
+concurrency:
+  group: nightly-crawl
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      # repository_dispatch (merge_conflict) back into this repo needs
+      # contents: write on the Actions token (see usage-limit-poller.yml).
+      contents: write
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_reviews: ${{ steps.plan.outputs.has_reviews }}
+    steps:
+      - name: Checkout agent-infra
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Enumerate repos, dispatch conflict fixes, plan reviews
+        id: plan
+        run: node scripts/nightly-crawl.js plan
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NIGHTLY_CRAWL_REPOS: ${{ github.event.inputs.repos }}
+          DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && 'true' || 'false' }}
+          MAX_REVIEWS: ${{ vars.NIGHTLY_MAX_REVIEWS }}
+          PLAN_FILE: plan.json
+
+      - name: Upload plan for the act job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-plan-${{ github.run_id }}
+          path: plan.json
+          retention-days: 7
+
+  review:
+    needs: plan
+    if: needs.plan.outputs.has_reviews == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    container:
+      image: ghcr.io/thedeepestspace/the-intern-dev:latest
+      options: --user root
+    env:
+      # Same log silencing as dispatcher.yml (issue #224): the agent's
+      # output can quote private-repo diffs, so it only reaches the-intern-data
+      # (on failure), never the public Actions log.
+      LOG_FILE: /tmp/run.log
+    steps:
+      - name: Checkout agent-infra
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Read-only: the review agent must be able to read the PR and nothing
+      # else — merging/labeling/commenting is the act job's business, with
+      # its own token.
+      - name: Mint read-only installation token
+        id: token
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          node scripts/mint-installation-token.js
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          INSTALLATION_ID: ${{ matrix.installation_id }}
+          TARGET_REPO: ${{ matrix.repo }}
+          PERMISSIONS: '{"contents":"read","pull_requests":"read","metadata":"read"}'
+
+      - name: Run review agent (as non-root user)
+        env:
+          REPO: ${{ matrix.repo }}
+          PR_NUMBER: ${{ matrix.number }}
+          PR_TITLE: ${{ matrix.title }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          MODEL: ${{ vars.NIGHTLY_REVIEW_MODEL }}
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          id -u dev >/dev/null 2>&1 || useradd -m -s /bin/bash dev
+          mkdir -p /tmp/review /home/dev/.claude
+          PROMPT_FILE=/tmp/prompt.txt node scripts/nightly-crawl.js review-prompt
+
+          # Model comes from a repo variable (trusted), but it still goes
+          # through build-model-flag.js's allowlist and a shell variable
+          # rather than being interpolated into the command string.
+          node -e '
+            const fs = require("fs");
+            const { buildModelFlag } = require("./scripts/build-model-flag.js");
+            const modelResult = buildModelFlag(process.env.MODEL);
+            if (modelResult.warning) console.log(modelResult.warning);
+            fs.writeFileSync("/tmp/model.txt", modelResult.valid ? process.env.MODEL.trim() : "");
+            const script = [
+              "#!/bin/bash",
+              "export HOME=/home/dev",
+              "cd /tmp/review",
+              "PROMPT=\"$(cat /tmp/prompt.txt)\"",
+              "MODEL=\"$(cat /tmp/model.txt)\"",
+              "set +e",
+              `claude -p \"$PROMPT\" --append-system-prompt \"This is a one-shot headless run: no later turn will ever re-invoke you. Never install or execute code from the packages under review. Your final message must be the single JSON verdict object and nothing else.\" --disallowedTools \"Monitor,ScheduleWakeup,CronCreate,CronList,CronDelete\" --output-format json --dangerously-skip-permissions${modelResult.valid ? " " + modelResult.flag : ""} > /tmp/result.json 2>&1`,
+              "exit 0",
+              "",
+            ].join("\n");
+            fs.writeFileSync("/tmp/run_review.sh", script, { mode: 0o755 });
+          '
+          chown -R dev:dev /tmp/review /tmp/prompt.txt /tmp/model.txt /tmp/run_review.sh /home/dev
+
+          INIT_TOKEN="$GH_TOKEN" env -u GH_TOKEN su dev -c 'echo "$INIT_TOKEN" | gh auth login --with-token'
+          env -u GH_TOKEN su dev -c /tmp/run_review.sh
+
+          RESULT_FILE=/tmp/result.json VERDICT_FILE="verdict-${{ matrix.slug }}-${{ matrix.number }}.json" node scripts/nightly-crawl.js record-verdict
+
+      - name: Upload verdict for the act job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verdict-${{ matrix.slug }}-${{ matrix.number }}
+          path: verdict-${{ matrix.slug }}-${{ matrix.number }}.json
+          retention-days: 7
+
+      - name: Upload run log on failure
+        if: failure()
+        continue-on-error: true
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          node scripts/manage-run-log.js
+        env:
+          RUN_LOG_PREFIX: nightly-crawl/${{ matrix.repo }}/${{ matrix.number }}
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+
+  act:
+    needs: [plan, review]
+    # Runs whether reviews ran, were skipped (nothing to review), or partly
+    # failed — a PR whose review job died simply has no verdict tonight.
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write # report comment on the static "Nightly crawl reports" issue
+    steps:
+      - name: Checkout agent-infra
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download plan
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nightly-plan-${{ github.run_id }}
+
+      - name: Download verdicts
+        if: needs.plan.outputs.has_reviews == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: verdict-*
+          path: verdicts
+          merge-multiple: true
+
+      - name: Merge / confirm / flag reviewed Dependabot PRs
+        run: node scripts/nightly-crawl.js act
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && 'true' || 'false' }}
+          PLAN_FILE: plan.json
+          VERDICTS_DIR: verdicts
+          EVENTS_FILE: report-events.json
+
+      - name: Send report to the owner
+        run: node scripts/nightly-crawl.js report
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && 'true' || 'false' }}
+          EVENTS_FILE: report-events.json
+          REPORT_FILE: report.txt
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPORT_TOKEN: ${{ github.token }}
+          REPORT_REPO: ${{ github.repository }}
+          REPORT_MENTION: ${{ vars.REPORT_MENTION }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
+
+      - name: Upload report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-report-${{ github.run_id }}
+          path: |
+            report.txt
+            report-events.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  notify-failure:
+    needs: [plan, act]
+    if: always() && (needs.plan.result == 'failure' || needs.act.result == 'failure')
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Checkout agent-infra
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Notify maintainer via Telegram
+        run: node scripts/notify-failure.js
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
+          REPO: ${{ github.repository }}
+          WORKFLOW_NAME: nightly crawl
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          FAILED_JOBS: >-
+            ${{ needs.plan.result == 'failure' && 'plan' || '' }}
+            ${{ needs.act.result == 'failure' && 'act' || '' }}
