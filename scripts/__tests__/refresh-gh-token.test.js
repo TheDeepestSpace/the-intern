@@ -54,6 +54,30 @@ describe('mintToken', () => {
     expect(token).toBe('ghs_scoped');
   });
 
+  it('includes EXTRA_REPOS in the re-minted token scope', async () => {
+    const client = agent.get('https://api.github.com');
+    client
+      .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+      .reply(200, { id: 555 });
+    client
+      .intercept({
+        method: 'POST',
+        path: '/app/installations/555/access_tokens',
+        body: (body) =>
+          JSON.stringify(JSON.parse(body).repositories) === JSON.stringify(['widgets', 'data']),
+      })
+      .reply(201, { token: 'ghs_multi' });
+
+    const token = await mintToken({
+      APP_ID: '123',
+      APP_PRIVATE_KEY: TEST_PRIVATE_KEY_PEM,
+      TARGET_REPO: 'acme/widgets',
+      EXTRA_REPOS: 'acme/data, ',
+    });
+
+    expect(token).toBe('ghs_multi');
+  });
+
   it('mints an installation-wide token when SCOPE_TO_REPO is false', async () => {
     const client = agent.get('https://api.github.com');
     client

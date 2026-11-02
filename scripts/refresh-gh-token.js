@@ -12,7 +12,7 @@
 // only the minted token crosses that boundary, and only via an env var
 // (never argv, which `ps` would expose to the dev user).
 const { execFileSync } = require('child_process');
-const { getInstallationToken, getPrivateKey } = require('./mint-installation-token.js');
+const { getInstallationToken, getPrivateKey, parseExtraRepos } = require('./mint-installation-token.js');
 
 const DEFAULT_INTERVAL_MS = 45 * 60 * 1000;
 
@@ -33,6 +33,7 @@ async function mintToken(env = process.env) {
     installationId: env.INSTALLATION_ID,
     targetRepo: env.TARGET_REPO,
     scopeToRepo: env.SCOPE_TO_REPO !== 'false',
+    extraRepos: parseExtraRepos(env.EXTRA_REPOS),
   });
 }
 

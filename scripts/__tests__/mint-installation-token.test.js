@@ -305,6 +305,28 @@ describe('mint-installation-token', () => {
       expect(token).toBe('ghs_scopedtoken');
     });
 
+    it('includes extraRepos (owner/name or bare) in the repositories list, deduped', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({
+          method: 'POST',
+          path: '/app/installations/999/access_tokens',
+          body: (body) =>
+            JSON.stringify(JSON.parse(body).repositories) === JSON.stringify(['widgets', 'specage-data']),
+        })
+        .reply(201, { token: 'ghs_extra' });
+
+      const token = await getInstallationToken({
+        appId: '123',
+        privateKey: TEST_PRIVATE_KEY_PEM,
+        installationId: '999',
+        targetRepo: 'acme/widgets',
+        extraRepos: ['acme/specage-data', 'specage-data', 'widgets'],
+      });
+
+      expect(token).toBe('ghs_extra');
+    });
+
     it('does not scope access-token request body to repositories when scopeToRepo is false, even if targetRepo is provided for lookup', async () => {
       const client = agent.get('https://api.github.com');
       client

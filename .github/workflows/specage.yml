@@ -266,6 +266,9 @@ jobs:
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           INSTALLATION_ID: ${{ needs.detect-image.outputs.installation_id }}
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          # The agent also reads/pushes the spec in specage-data (keep in sync with
+          # worker SPECAGE_DATA_REPOS).
+          EXTRA_REPOS: TheDeepestSpace/specage-data
 
       - name: Checkout target repository
         if: needs.detect-image.outputs.target_repo != ''
@@ -370,6 +373,8 @@ jobs:
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           INSTALLATION_ID: ${{ needs.detect-image.outputs.installation_id }}
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          # Keeps the background refresher's re-mint scoped like the initial mint.
+          EXTRA_REPOS: TheDeepestSpace/specage-data
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
           RETRY_KEY: specage:${{ needs.detect-image.outputs.target_repo }}
@@ -393,7 +398,7 @@ jobs:
             const comment = process.env.COMMENT_BODY || "";
             const style = process.env.STYLE_GUIDE || "";
 
-            let prompt = `You are @the-intern-bot working on repository ${repo}. No issue or PR is attached to this run; create an issue yourself if you decide one is needed.\nYou have access to the GitHub CLI (\x27gh\x27) and full git tools. Use \x27gh\x27 to post comments, inspect code, run tests, or open PRs as needed.\n\nThis is a headless, single-shot session: your final message is never shown to anyone — only a \x27gh\x27 comment, commit, or other repo action reaches a human. Post a comment when there\x27s something worth telling a human (an answer, a landed change, a blocker); if the request is a question or otherwise doesn\x27t land a PR/issue that already carries the answer, don\x27t let it go unanswered. But don\x27t post just to confirm receipt, and if a threaded reply already covers the response, don\x27t also post a separate top-level comment restating it.\n\n`;
+            let prompt = `You are @the-intern-bot working on repository ${repo}. No issue or PR is attached to this run; create an issue yourself if you decide one is needed.\nYou have access to the GitHub CLI (\x27gh\x27) and full git tools. Use \x27gh\x27 to post comments, inspect code, run tests, or open PRs as needed.\nThe data repo TheDeepestSpace/specage-data is also accessible with your token; the project spec lives on its specages/<project>/spec branch.\n\nThis is a headless, single-shot session: your final message is never shown to anyone — only a \x27gh\x27 comment, commit, or other repo action reaches a human. Post a comment when there\x27s something worth telling a human (an answer, a landed change, a blocker); if the request is a question or otherwise doesn\x27t land a PR/issue that already carries the answer, don\x27t let it go unanswered. But don\x27t post just to confirm receipt, and if a threaded reply already covers the response, don\x27t also post a separate top-level comment restating it.\n\n`;
             if (style) {
               prompt += `${style}\n\n`;
             }
