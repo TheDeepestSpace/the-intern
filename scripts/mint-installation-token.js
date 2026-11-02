@@ -183,6 +183,28 @@ function parseExtraRepos(raw) {
   return raw.split(',').map((r) => r.trim()).filter(Boolean);
 }
 
+// Resolves the full extra-repo list from the environment: EXTRA_REPOS always,
+// plus SPECAGE_DATA_REPOS when the dispatch opted in with SPECAGE=true (the
+// `specage=true` comment param, issue #263). A data repo under a different
+// owner than TARGET_REPO is skipped with a warning rather than forwarded: the
+// token is minted against TARGET_REPO's installation, and naming a repo that
+// installation can't see fails the whole mint (422) instead of just that repo.
+function resolveExtraRepos(env) {
+  const extra = parseExtraRepos(env.EXTRA_REPOS);
+  if (String(env.SPECAGE || '').toLowerCase() !== 'true') return extra;
+
+  const targetOwner = (env.TARGET_REPO || '').split('/')[0].toLowerCase();
+  for (const repo of parseExtraRepos(env.SPECAGE_DATA_REPOS)) {
+    const owner = repo.includes('/') ? repo.split('/')[0].toLowerCase() : targetOwner;
+    if (targetOwner && owner !== targetOwner) {
+      console.warn(`::warning::Skipping specage data repo ${repo}: not under the same owner as ${env.TARGET_REPO}`);
+      continue;
+    }
+    extra.push(repo);
+  }
+  return extra;
+}
+
 function parsePermissions(raw) {
   if (!raw) return undefined;
   let parsed;
@@ -197,7 +219,7 @@ function parsePermissions(raw) {
   return parsed;
 }
 
-module.exports = { getInstallationToken, mintAppJwt, getPrivateKey, parsePermissions, parseExtraRepos };
+module.exports = { getInstallationToken, mintAppJwt, getPrivateKey, parsePermissions, parseExtraRepos, resolveExtraRepos };
 
 if (require.main === module) {
   (async () => {
@@ -208,7 +230,7 @@ if (require.main === module) {
       const targetRepo = process.env.TARGET_REPO;
       const permissions = parsePermissions(process.env.PERMISSIONS);
       const scopeToRepo = process.env.SCOPE_TO_REPO !== 'false';
-      const extraRepos = parseExtraRepos(process.env.EXTRA_REPOS);
+      const extraRepos = resolveExtraRepos(process.env);
 
       if (!appId || !privateKey) {
         console.error('APP_ID and APP_PRIVATE_KEY secrets are required');

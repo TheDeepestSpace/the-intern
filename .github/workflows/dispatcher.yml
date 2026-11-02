@@ -20,6 +20,14 @@ on:
 permissions:
   contents: read
 
+# Comma-separated owner/repo list of specage data repos. A `specage=true`
+# comment param (issue #263) additionally scopes the agent token to these and
+# names them in the agent prompt; without it the token scope is unchanged.
+# Keep in sync with worker SPECAGE_DATA_REPOS (wrangler.toml) and the
+# hardcoded EXTRA_REPOS in specage.yml (different deploys, no shared source).
+env:
+  SPECAGE_DATA_REPOS: TheDeepestSpace/specage-data
+
 jobs:
   detect-image:
     runs-on: ubuntu-latest
@@ -33,6 +41,7 @@ jobs:
       event_type: ${{ steps.parse.outputs.event_type }}
       comment_id: ${{ steps.parse.outputs.comment_id }}
       model: ${{ steps.parse.outputs.model }}
+      specage: ${{ steps.parse.outputs.specage }}
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -305,6 +314,10 @@ jobs:
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           INSTALLATION_ID: ${{ needs.detect-image.outputs.installation_id }}
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          # specage=true widens the scope to SPECAGE_DATA_REPOS (workflow env,
+          # issue #263) so the agent can read the spec branch; default false
+          # leaves the token scoped to TARGET_REPO alone.
+          SPECAGE: ${{ needs.detect-image.outputs.specage }}
 
       - name: Checkout target repository
         if: needs.detect-image.outputs.target_repo != ''
@@ -450,6 +463,10 @@ jobs:
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           INSTALLATION_ID: ${{ needs.detect-image.outputs.installation_id }}
           TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          # Keeps the background refresher's re-mint scoped like the initial
+          # mint (SPECAGE_DATA_REPOS comes from the workflow env); also gates
+          # the specage paragraph in the prompt below.
+          SPECAGE: ${{ needs.detect-image.outputs.specage }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
           EVENT_TYPE: ${{ needs.detect-image.outputs.event_type }}
           COMMENT_ID: ${{ needs.detect-image.outputs.comment_id }}
@@ -483,6 +500,14 @@ jobs:
             const workspaceRestored = process.env.WORKSPACE_RESTORED === "true";
             const eventType = process.env.EVENT_TYPE || "";
             const commentId = process.env.COMMENT_ID || "";
+            const specage = process.env.SPECAGE === "true";
+            const configuredSpecageDataRepos = (process.env.SPECAGE_DATA_REPOS || "").split(",").map((r) => r.trim()).filter(Boolean);
+            // Same owner rule as resolveExtraRepos: the token only covers data repos under the target's owner.
+            const targetOwner = repo.split("/")[0].toLowerCase();
+            const specageDataRepos = configuredSpecageDataRepos.filter((dataRepo) => {
+              const dataOwner = dataRepo.includes("/") ? dataRepo.split("/")[0].toLowerCase() : targetOwner;
+              return !targetOwner || dataOwner === targetOwner;
+            });
 
             let prompt = `You are @the-intern-bot working on repository ${repo}, issue/PR #${issue}.\nYou have access to the GitHub CLI (\x27gh\x27) and full git tools. Use \x27gh\x27 to post comments, inspect code, run tests, or open PRs as needed.\n\nThis is a headless, single-shot session: your final message is never shown to anyone — only a \x27gh\x27 comment, commit, or other repo action reaches a human. Post a comment when there\x27s something worth telling a human (an answer, a landed change, a blocker); if the request is a question or otherwise doesn\x27t land a PR/issue that already carries the answer, don\x27t let it go unanswered. But don\x27t post just to confirm receipt, and if a threaded reply already covers the response, don\x27t also post a separate top-level comment restating it.\n\n`;
             if (workspaceRestored) {
@@ -490,6 +515,11 @@ jobs:
             }
             if (eventType === "pull_request_review_comment" && commentId) {
               prompt += `This request came from an inline PR review comment that is part of a review thread (comment id ${commentId}). You must reply within that same thread using:\ngh api -X POST repos/${repo}/pulls/${issue}/comments/${commentId}/replies -f body="..."\nrather than \x27gh pr comment\x27 / \x27gh issue comment\x27, which posts a new general PR comment and breaks thread continuity.\n\n`;
+            }
+            if (specage && specageDataRepos.length) {
+              prompt += `This request was filed by specage (specage=true). Your token also has access to the specage data repo${specageDataRepos.length > 1 ? "s" : ""} ${specageDataRepos.join(", ")}. The project spec lives there on the branch specages/<project>/spec, where <project> is the specage project for ${repo} (if the issue does not name it, list the branches matching specages/*/spec and pick the one whose .specage/config.yaml has repo: ${repo}). Read the spec file, .specage/PROTOCOL.md (follow its Implement section) and GRAMMAR.md directly from that branch, e.g. gh api repos/<data_repo>/contents/<path>?ref=specages/<project>/spec -H \x27Accept: application/vnd.github.raw+json\x27, or git clone --branch specages/<project>/spec. Never push to the spec or trail branches.\n\n`;
+            } else if (specage && configuredSpecageDataRepos.length) {
+              prompt += `This request was filed by specage (specage=true), but your token has no access to a configured specage data repository for ${repo}. Report that access limitation instead of claiming to have read the spec.\n\n`;
             }
             if (style) {
               prompt += `${style}\n\n`;

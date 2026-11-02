@@ -80,6 +80,10 @@ function parseTrigger() {
   let backendExplicit = false;
   let model = 'default';
   let effort = 'default';
+  // specage=true (issue #263) opts the dispatch into specage-data access: the
+  // handle job widens the agent token to SPECAGE_DATA_REPOS and tells the agent
+  // where the spec lives. Anything other than a literal `true` stays false.
+  let specage = false;
 
   // Remove @the-intern-bot and optional backend keywords (claude/codex/agy) from cleanComment
   let cleanComment = commentBody
@@ -90,7 +94,7 @@ function parseTrigger() {
   // These only count as control tokens when they form a leading run right after the
   // mention - matching anywhere in the string would also strip incidental key=value
   // text later in the prompt (e.g. a quoted shell flag like `-c model="sol"`).
-  const leadingTokens = cleanComment.match(/^(?:(?:model|effort|backend)=\S+\s*)+/i);
+  const leadingTokens = cleanComment.match(/^(?:(?:model|effort|backend|specage)=\S+\s*)+/i);
 
   if (leadingTokens) {
     const tokenRun = leadingTokens[0];
@@ -106,6 +110,9 @@ function parseTrigger() {
       backend = matchBackend[1];
       backendExplicit = true;
     }
+
+    const matchSpecage = tokenRun.match(/\bspecage=(\S+)/i);
+    if (matchSpecage) specage = matchSpecage[1].toLowerCase() === 'true';
 
     cleanComment = cleanComment.slice(tokenRun.length).trim();
   }
@@ -126,6 +133,7 @@ function parseTrigger() {
     backend_explicit: backendExplicit,
     model,
     effort,
+    specage,
     event_type: eventType,
     comment_id: commentId,
   };

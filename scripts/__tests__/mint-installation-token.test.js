@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { MockAgent, setGlobalDispatcher, getGlobalDispatcher } from 'undici';
-import { getInstallationToken, mintAppJwt, getPrivateKey, parsePermissions } from '../mint-installation-token.js';
+import { resolveExtraRepos, getInstallationToken, mintAppJwt, getPrivateKey, parsePermissions } from '../mint-installation-token.js';
 
 // A throwaway RSA key generated fresh per test run; only used to exercise the
 // signing code path, never a real credential.
@@ -371,5 +371,67 @@ describe('mint-installation-token', () => {
         expect(() => parsePermissions(raw)).toThrow(/Invalid PERMISSIONS/);
       }
     );
+  });
+});
+
+describe('resolveExtraRepos', () => {
+  it('returns only EXTRA_REPOS when SPECAGE is unset', () => {
+    expect(resolveExtraRepos({ EXTRA_REPOS: 'acme/data', SPECAGE_DATA_REPOS: 'acme/specage-data', TARGET_REPO: 'acme/widgets' })).toEqual(['acme/data']);
+    expect(resolveExtraRepos({ TARGET_REPO: 'acme/widgets', SPECAGE_DATA_REPOS: 'acme/specage-data' })).toEqual([]);
+  });
+
+  it('returns only EXTRA_REPOS when SPECAGE is false or not literally true', () => {
+    const env = { SPECAGE_DATA_REPOS: 'acme/specage-data', TARGET_REPO: 'acme/widgets' };
+    expect(resolveExtraRepos({ ...env, SPECAGE: 'false' })).toEqual([]);
+    expect(resolveExtraRepos({ ...env, SPECAGE: 'yes' })).toEqual([]);
+    expect(resolveExtraRepos({ ...env, SPECAGE: '' })).toEqual([]);
+  });
+
+  it('adds SPECAGE_DATA_REPOS (comma-separated, owner/name or bare) when SPECAGE=true', () => {
+    expect(
+      resolveExtraRepos({
+        SPECAGE: 'true',
+        SPECAGE_DATA_REPOS: 'acme/specage-data, other-data,',
+        TARGET_REPO: 'acme/widgets',
+      })
+    ).toEqual(['acme/specage-data', 'other-data']);
+  });
+
+  it('appends specage data repos after EXTRA_REPOS', () => {
+    expect(
+      resolveExtraRepos({
+        SPECAGE: 'TRUE',
+        EXTRA_REPOS: 'acme/data',
+        SPECAGE_DATA_REPOS: 'acme/specage-data',
+        TARGET_REPO: 'acme/widgets',
+      })
+    ).toEqual(['acme/data', 'acme/specage-data']);
+  });
+
+  it('skips a specage data repo under a different owner than TARGET_REPO', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(
+        resolveExtraRepos({
+          SPECAGE: 'true',
+          SPECAGE_DATA_REPOS: 'TheDeepestSpace/specage-data,acme/specage-data',
+          TARGET_REPO: 'acme/widgets',
+        })
+      ).toEqual(['acme/specage-data']);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain('TheDeepestSpace/specage-data');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('is case-insensitive on the owner comparison', () => {
+    expect(
+      resolveExtraRepos({
+        SPECAGE: 'true',
+        SPECAGE_DATA_REPOS: 'thedeepestspace/specage-data',
+        TARGET_REPO: 'TheDeepestSpace/widgets',
+      })
+    ).toEqual(['thedeepestspace/specage-data']);
   });
 });
