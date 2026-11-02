@@ -72,7 +72,7 @@ function parseTrigger() {
       const rr = payload.review_request;
       const sha = rr.head_sha ? ` at commit \`${rr.head_sha}\`` : '';
       const round = rr.round && rr.max_rounds ? ` This is review round ${rr.round} of at most ${rr.max_rounds}.` : '';
-      commentBody = `Review PR #${issueNumber}${sha}.${round} Follow the Review section of .specage/PROTOCOL.md if the repo has a specage spec; otherwise do a general code review.`;
+      commentBody = `Review PR #${issueNumber}${sha}.${round} Follow the Review section of .specage/PROTOCOL.md if the repo has a specage spec; otherwise do a general code review.${rr.head_sha ? ` Before reviewing and again before submitting, confirm the PR head is still \`${rr.head_sha}\`; if it changed, do not submit a verdict (a newer review will be dispatched) and say so in a comment.` : ''}`;
       forceSpecage = true;
     } else {
       // Fallback extraction

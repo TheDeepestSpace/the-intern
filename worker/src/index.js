@@ -164,7 +164,7 @@ async function handleGitHub(request, env) {
   }
 }
 
-const REVIEW_COMMENT = /^\s*@the-intern-bot\s+review\b/i;
+const REVIEW_COMMENT = /^\s*@the-intern-bot\s+review\s*[.!]?\s*$/i;
 
 // Queues a review_request dispatch (dispatcher.yml) so the bot reviews a PR,
 // typically a specage implement PR that requested review from the bot. Two
@@ -212,6 +212,8 @@ async function handleReviewRequest(payload, env, trigger) {
   const dedupKey = `review:${fullName}#${number}@${sha}`;
   const roundsKey = `review_rounds:${fullName}#${number}`;
   const maxRounds = Number(env.MAX_REVIEW_ROUNDS) || 3;
+  // Dedup and the round cap are best-effort: KV has no atomic increment and is
+  // eventually consistent, so concurrent deliveries can slightly exceed the cap.
   let rounds = 0;
   try {
     if (trigger === 'review_requested') {
