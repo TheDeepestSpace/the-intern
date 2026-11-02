@@ -501,7 +501,13 @@ jobs:
             const eventType = process.env.EVENT_TYPE || "";
             const commentId = process.env.COMMENT_ID || "";
             const specage = process.env.SPECAGE === "true";
-            const specageDataRepos = (process.env.SPECAGE_DATA_REPOS || "").split(",").map((r) => r.trim()).filter(Boolean);
+            const configuredSpecageDataRepos = (process.env.SPECAGE_DATA_REPOS || "").split(",").map((r) => r.trim()).filter(Boolean);
+            // Same owner rule as resolveExtraRepos: the token only covers data repos under the target's owner.
+            const targetOwner = repo.split("/")[0].toLowerCase();
+            const specageDataRepos = configuredSpecageDataRepos.filter((dataRepo) => {
+              const dataOwner = dataRepo.includes("/") ? dataRepo.split("/")[0].toLowerCase() : targetOwner;
+              return !targetOwner || dataOwner === targetOwner;
+            });
 
             let prompt = `You are @the-intern-bot working on repository ${repo}, issue/PR #${issue}.\nYou have access to the GitHub CLI (\x27gh\x27) and full git tools. Use \x27gh\x27 to post comments, inspect code, run tests, or open PRs as needed.\n\nThis is a headless, single-shot session: your final message is never shown to anyone — only a \x27gh\x27 comment, commit, or other repo action reaches a human. Post a comment when there\x27s something worth telling a human (an answer, a landed change, a blocker); if the request is a question or otherwise doesn\x27t land a PR/issue that already carries the answer, don\x27t let it go unanswered. But don\x27t post just to confirm receipt, and if a threaded reply already covers the response, don\x27t also post a separate top-level comment restating it.\n\n`;
             if (workspaceRestored) {
@@ -512,6 +518,8 @@ jobs:
             }
             if (specage && specageDataRepos.length) {
               prompt += `This request was filed by specage (specage=true). Your token also has access to the specage data repo${specageDataRepos.length > 1 ? "s" : ""} ${specageDataRepos.join(", ")}. The project spec lives there on the branch specages/<project>/spec, where <project> is the specage project for ${repo} (if the issue does not name it, list the branches matching specages/*/spec and pick the one whose .specage/config.yaml has repo: ${repo}). Read the spec file, .specage/PROTOCOL.md (follow its Implement section) and GRAMMAR.md directly from that branch, e.g. gh api repos/<data_repo>/contents/<path>?ref=specages/<project>/spec -H \x27Accept: application/vnd.github.raw+json\x27, or git clone --branch specages/<project>/spec. Never push to the spec or trail branches.\n\n`;
+            } else if (specage && configuredSpecageDataRepos.length) {
+              prompt += `This request was filed by specage (specage=true), but your token has no access to a configured specage data repository for ${repo}. Report that access limitation instead of claiming to have read the spec.\n\n`;
             }
             if (style) {
               prompt += `${style}\n\n`;
