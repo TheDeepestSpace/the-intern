@@ -357,6 +357,53 @@ describe('parse-trigger', () => {
       expect(result.effort).toBe('high');
       expect(result.clean_prompt).toBe('fix backend=legacy references in the docs');
     });
+
+    it('defaults specage to false', () => {
+      process.env.INPUT_COMMENT_BODY = '@the-intern-bot implement this issue.';
+
+      const result = parseTrigger();
+
+      expect(result.specage).toBe(false);
+      expect(result.clean_prompt).toBe('implement this issue.');
+    });
+
+    it('extracts specage=true alongside other control tokens and strips it from the prompt', () => {
+      process.env.INPUT_COMMENT_BODY =
+        '@the-intern-bot specage=true backend=claude implement the claims on this issue per .specage/PROTOCOL.md section Implement.';
+
+      const result = parseTrigger();
+
+      expect(result.specage).toBe(true);
+      expect(result.backend).toBe('claude');
+      expect(result.clean_prompt).toBe(
+        'implement the claims on this issue per .specage/PROTOCOL.md section Implement.'
+      );
+    });
+
+    it('treats specage=false and any non-true value as false', () => {
+      process.env.INPUT_COMMENT_BODY = '@the-intern-bot specage=false fix this';
+      expect(parseTrigger().specage).toBe(false);
+
+      process.env.INPUT_COMMENT_BODY = '@the-intern-bot specage=yes fix this';
+      const result = parseTrigger();
+      expect(result.specage).toBe(false);
+      expect(result.clean_prompt).toBe('fix this');
+    });
+
+    it('is case-insensitive for specage=TRUE', () => {
+      process.env.INPUT_COMMENT_BODY = '@the-intern-bot SPECAGE=TRUE fix this';
+
+      expect(parseTrigger().specage).toBe(true);
+    });
+
+    it('ignores specage=true that is not a leading control token', () => {
+      process.env.INPUT_COMMENT_BODY = '@the-intern-bot document the specage=true comment param';
+
+      const result = parseTrigger();
+
+      expect(result.specage).toBe(false);
+      expect(result.clean_prompt).toBe('document the specage=true comment param');
+    });
   });
 
   describe('GITHUB_OUTPUT writing', () => {
@@ -376,6 +423,7 @@ describe('parse-trigger', () => {
       expect(contents).toContain('target_repo=acme/widgets');
       expect(contents).toContain('issue_number=1');
       expect(contents).toContain('backend=claude');
+      expect(contents).toContain('specage=false');
     });
 
     it('uses a heredoc-style delimiter for multi-line values', () => {

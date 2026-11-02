@@ -78,6 +78,55 @@ describe('mintToken', () => {
     expect(token).toBe('ghs_multi');
   });
 
+  it('adds SPECAGE_DATA_REPOS to the re-minted token scope when SPECAGE=true', async () => {
+    const client = agent.get('https://api.github.com');
+    client
+      .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+      .reply(200, { id: 555 });
+    client
+      .intercept({
+        method: 'POST',
+        path: '/app/installations/555/access_tokens',
+        body: (body) =>
+          JSON.stringify(JSON.parse(body).repositories) === JSON.stringify(['widgets', 'specage-data']),
+      })
+      .reply(201, { token: 'ghs_specage' });
+
+    const token = await mintToken({
+      APP_ID: '123',
+      APP_PRIVATE_KEY: TEST_PRIVATE_KEY_PEM,
+      TARGET_REPO: 'acme/widgets',
+      SPECAGE: 'true',
+      SPECAGE_DATA_REPOS: 'acme/specage-data',
+    });
+
+    expect(token).toBe('ghs_specage');
+  });
+
+  it('leaves the token scoped to TARGET_REPO alone when SPECAGE is not true', async () => {
+    const client = agent.get('https://api.github.com');
+    client
+      .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
+      .reply(200, { id: 555 });
+    client
+      .intercept({
+        method: 'POST',
+        path: '/app/installations/555/access_tokens',
+        body: (body) => JSON.stringify(JSON.parse(body).repositories) === JSON.stringify(['widgets']),
+      })
+      .reply(201, { token: 'ghs_plain' });
+
+    const token = await mintToken({
+      APP_ID: '123',
+      APP_PRIVATE_KEY: TEST_PRIVATE_KEY_PEM,
+      TARGET_REPO: 'acme/widgets',
+      SPECAGE: 'false',
+      SPECAGE_DATA_REPOS: 'acme/specage-data',
+    });
+
+    expect(token).toBe('ghs_plain');
+  });
+
   it('mints an installation-wide token when SCOPE_TO_REPO is false', async () => {
     const client = agent.get('https://api.github.com');
     client
