@@ -77,11 +77,13 @@ function resetToEmptyTree(dir) {
 }
 
 function assertOnlyStateFileStaged(dir) {
-  const staged = runGit(['diff', '--cached', '--name-only', '--no-renames'], { cwd: dir })
+  // Full index, not the cached diff: files inherited from an existing branch
+  // tip are unchanged and would be invisible to a diff.
+  const tracked = runGit(['ls-files'], { cwd: dir })
     .split('\n')
     .filter(Boolean);
-  if (staged.length !== 1 || staged[0] !== FILE_NAME) {
-    throw new Error(`refusing to commit to ${BRANCH_NAME}: expected only ${FILE_NAME} staged, got [${staged.join(', ')}]`);
+  if (tracked.length !== 1 || tracked[0] !== FILE_NAME) {
+    throw new Error(`refusing to commit to ${BRANCH_NAME}: expected only ${FILE_NAME} in the tree, got [${tracked.join(', ')}]`);
   }
 }
 
@@ -106,18 +108,20 @@ async function updateState(mutate) {
 
     let result;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      if (attempt > 1) {
-        runGit(['checkout', '--detach'], { ...gitOpts, allowFailure: true });
-        runGit(['branch', '-D', BRANCH_NAME], { ...gitOpts, allowFailure: true });
-      }
+      // Always drop any local ref first so a stale branch is never reused
+      // when the remote branch is absent.
+      runGit(['checkout', '--detach'], { ...gitOpts, allowFailure: true });
+      runGit(['branch', '-D', BRANCH_NAME], { ...gitOpts, allowFailure: true });
       try {
         await runWithRetryOnNotFound(remoteUrl, (url) => {
           remoteUrl = url;
           return runGit(['fetch', url, `${BRANCH_NAME}:${BRANCH_NAME}`], { ...gitOpts, stdio: ['pipe', 'pipe', 'pipe'] });
         });
-      } catch {
+      } catch (err) {
         // Branch may not exist yet (first-ever write); the orphan checkout
-        // below creates it.
+        // below creates it. Any other fetch failure must not fall through
+        // to a fresh orphan branch.
+        if (!/couldn't find remote ref/i.test(err.message)) throw err;
       }
 
       try {
