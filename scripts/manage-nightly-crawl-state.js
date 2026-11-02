@@ -63,6 +63,28 @@ async function readState() {
   return parseState(raw);
 }
 
+// An orphan checkout inherits the detached HEAD's index (the whole
+// the-intern tree, including .github/workflows, which the data-repo PAT may
+// not push). Start from an empty index and wipe the working files so the
+// state branch can only ever contain what we stage explicitly. Errors here
+// must propagate: a swallowed failure would leak the source tree.
+function resetToEmptyTree(dir) {
+  runGit(['read-tree', '--empty'], { cwd: dir });
+  for (const entry of fs.readdirSync(dir)) {
+    if (entry === '.git') continue;
+    fs.rmSync(path.join(dir, entry), { recursive: true, force: true });
+  }
+}
+
+function assertOnlyStateFileStaged(dir) {
+  const staged = runGit(['diff', '--cached', '--name-only', '--no-renames'], { cwd: dir })
+    .split('\n')
+    .filter(Boolean);
+  if (staged.length !== 1 || staged[0] !== FILE_NAME) {
+    throw new Error(`refusing to commit to ${BRANCH_NAME}: expected only ${FILE_NAME} staged, got [${staged.join(', ')}]`);
+  }
+}
+
 // Fetches the branch tip, applies `mutate(state) -> { state, ...rest }`, and
 // pushes; retries on non-fast-forward since the plan and act jobs of one run
 // (and the next night's run, if a run overran) can race on this branch.
@@ -102,7 +124,7 @@ async function updateState(mutate) {
         runGit(['checkout', BRANCH_NAME], { ...gitOpts, stdio: ['pipe', 'pipe', 'pipe'] });
       } catch {
         runGit(['checkout', '--orphan', BRANCH_NAME], gitOpts);
-        runGit(['rm', '-rf', '--ignore-unmatch', '.'], { ...gitOpts, allowFailure: true });
+        resetToEmptyTree(worktreeDir);
       }
 
       const raw = fs.existsSync(worktreeFile) ? fs.readFileSync(worktreeFile, 'utf8') : '';
@@ -115,6 +137,7 @@ async function updateState(mutate) {
 
       fs.writeFileSync(worktreeFile, `${JSON.stringify(nextState, null, 2)}\n`, 'utf8');
       runGit(['add', FILE_NAME], gitOpts);
+      assertOnlyStateFileStaged(worktreeDir);
       runGit(['commit', '-m', `nightly-crawl: update ${new Date().toISOString()}`], gitOpts);
 
       try {
