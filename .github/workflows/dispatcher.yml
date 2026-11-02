@@ -502,7 +502,7 @@ jobs:
             const commentId = process.env.COMMENT_ID || "";
             const specage = process.env.SPECAGE === "true";
             const configuredSpecageDataRepos = (process.env.SPECAGE_DATA_REPOS || "").split(",").map((r) => r.trim()).filter(Boolean);
-            // Same owner rule as resolveExtraRepos: the token only covers data repos under the target's owner.
+            // Same owner rule as resolveExtraRepos: the token only covers data repos under the owner of the target.
             const targetOwner = repo.split("/")[0].toLowerCase();
             const specageDataRepos = configuredSpecageDataRepos.filter((dataRepo) => {
               const dataOwner = dataRepo.includes("/") ? dataRepo.split("/")[0].toLowerCase() : targetOwner;
