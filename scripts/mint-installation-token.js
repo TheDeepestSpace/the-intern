@@ -110,6 +110,7 @@ async function getInstallationToken({
   retryDelayMs,
   permissions,
   scopeToRepo = true,
+  extraRepos = [],
 }) {
   if (!appId) throw new Error('Missing APP_ID secret');
   if (!privateKey) throw new Error('Missing APP_PRIVATE_KEY secret');
@@ -148,7 +149,9 @@ async function getInstallationToken({
         body:
           shouldScopeRepo || permissions
             ? JSON.stringify({
-                ...(shouldScopeRepo ? { repositories: [targetRepo.split('/')[1]] } : {}),
+                ...(shouldScopeRepo
+                  ? { repositories: [...new Set([targetRepo.split('/')[1], ...extraRepos.map(repoName)])] }
+                  : {}),
                 ...(permissions ? { permissions } : {}),
               })
             : undefined,
@@ -170,6 +173,16 @@ async function getInstallationToken({
   return data.token;
 }
 
+// Accepts `owner/name` or a bare `name` (same owner/installation as targetRepo).
+function repoName(repo) {
+  return repo.includes('/') ? repo.split('/')[1] : repo;
+}
+
+function parseExtraRepos(raw) {
+  if (!raw) return [];
+  return raw.split(',').map((r) => r.trim()).filter(Boolean);
+}
+
 function parsePermissions(raw) {
   if (!raw) return undefined;
   let parsed;
@@ -184,7 +197,7 @@ function parsePermissions(raw) {
   return parsed;
 }
 
-module.exports = { getInstallationToken, mintAppJwt, getPrivateKey, parsePermissions };
+module.exports = { getInstallationToken, mintAppJwt, getPrivateKey, parsePermissions, parseExtraRepos };
 
 if (require.main === module) {
   (async () => {
@@ -195,6 +208,7 @@ if (require.main === module) {
       const targetRepo = process.env.TARGET_REPO;
       const permissions = parsePermissions(process.env.PERMISSIONS);
       const scopeToRepo = process.env.SCOPE_TO_REPO !== 'false';
+      const extraRepos = parseExtraRepos(process.env.EXTRA_REPOS);
 
       if (!appId || !privateKey) {
         console.error('APP_ID and APP_PRIVATE_KEY secrets are required');
@@ -208,6 +222,7 @@ if (require.main === module) {
         targetRepo,
         permissions,
         scopeToRepo,
+        extraRepos,
       });
 
       // Tell GitHub Actions runner to mask this token across all step logs
