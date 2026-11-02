@@ -875,3 +875,92 @@ describe('handleGitHub push handling', () => {
     expect(await res.text()).toBe('ok');
   });
 });
+
+function reviewRequestedPayload(overrides = {}) {
+  return {
+    action: 'review_requested',
+    installation: { id: 42 },
+    sender: { login: 'the-intern-bot[bot]' },
+    requested_reviewer: { login: 'the-intern-bot[bot]' },
+    repository: { full_name: 'acme/widgets' },
+    pull_request: { number: 9, state: 'open', draft: false, head: { sha: 'abc123' } },
+    ...overrides,
+  };
+}
+
+function dispatchBody(fetchSpy) {
+  const call = fetchSpy.mock.calls.find(([input]) =>
+    new URL(input.url ?? input).pathname.endsWith('/dispatches')
+  );
+  return call ? JSON.parse(call[1].body) : null;
+}
+
+describe('handleGitHub review dispatch', () => {
+  it('dispatches review_request when the bot is requested as reviewer', async () => {
+    const fetchSpy = mockGithubDispatchFlow();
+    const res = await worker.fetch(
+      githubRequest({ eventType: 'pull_request', body: reviewRequestedPayload() }),
+      baseGithubEnv({ ALLOWED_USERS: 'alice' })
+    );
+    expect(await res.text()).toBe('ok');
+    const body = dispatchBody(fetchSpy);
+    expect(body.event_type).toBe('review_request');
+    expect(body.client_payload.raw.pull_request.number).toBe(9);
+    expect(body.client_payload.raw.review_request).toMatchObject({ head_sha: 'abc123', round: 1, max_rounds: 3 });
+  });
+
+  it('ignores review requests for other reviewers, drafts, and non-allowlisted senders', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const env = baseGithubEnv({ ALLOWED_USERS: 'alice' });
+    for (const [overrides, msg] of [
+      [{ requested_reviewer: { login: 'carol' } }, 'ignored: review not requested from the bot'],
+      [{ pull_request: { number: 9, draft: true, head: { sha: 'x' } } }, 'ignored: pull request closed or draft'],
+      [{ sender: { login: 'mallory' } }, 'ignored: author not in allowlist'],
+    ]) {
+      const res = await worker.fetch(
+        githubRequest({ eventType: 'pull_request', body: reviewRequestedPayload(overrides) }),
+        env
+      );
+      expect(await res.text()).toBe(msg);
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('dedupes per head sha and caps review rounds per PR', async () => {
+    mockGithubDispatchFlow();
+    const env = baseGithubEnv({ MAX_REVIEW_ROUNDS: '2' });
+    const send = sha =>
+      worker.fetch(
+        githubRequest({
+          eventType: 'pull_request',
+          body: reviewRequestedPayload({ pull_request: { number: 9, head: { sha } } }),
+        }),
+        env
+      );
+    expect(await (await send('a')).text()).toBe('ok');
+    expect(await (await send('a')).text()).toBe('ignored: review already dispatched for this commit');
+    expect(await (await send('b')).text()).toBe('ok');
+    expect(await (await send('c')).text()).toBe('ignored: review round cap reached');
+  });
+
+  it('dispatches review_request for an allowlisted "@the-intern-bot review" PR comment', async () => {
+    const fetchSpy = mockGithubDispatchFlow();
+    const res = await worker.fetch(
+      githubRequest({
+        eventType: 'issue_comment',
+        body: {
+          action: 'created',
+          installation: { id: 42 },
+          repository: { full_name: 'acme/widgets' },
+          comment: { user: { login: 'alice' }, body: '@the-intern-bot review' },
+          issue: { number: 9, pull_request: {}, user: { login: 'the-intern-bot[bot]' } },
+        },
+      }),
+      baseGithubEnv({ ALLOWED_USERS: 'alice' })
+    );
+    expect(await res.text()).toBe('ok');
+    const body = dispatchBody(fetchSpy);
+    expect(body.event_type).toBe('review_request');
+    expect(body.client_payload.raw.review_request.trigger).toBe('comment');
+  });
+});

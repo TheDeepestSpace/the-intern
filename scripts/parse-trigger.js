@@ -10,6 +10,7 @@ function parseTrigger() {
   let installationId = '';
   let eventType = '';
   let commentId = '';
+  let forceSpecage = false;
 
   if (eventName === 'repository_dispatch') {
     let payload = {};
@@ -62,6 +63,17 @@ function parseTrigger() {
       targetRepo = payload.repository?.full_name || '';
       issueNumber = String(payload.pull_request.number || '');
       commentBody = `A push to ${payload.merge_conflict.base_ref || 'the default branch'} left this PR unmergeable (mergeable_state: ${payload.merge_conflict.mergeable_state}). Merge or rebase the latest default branch into this PR's branch, resolve the conflicts, and push the fix.`;
+    } else if (payload.pull_request && payload.review_request) {
+      // review_request: the bot was asked to review a PR (typically a specage
+      // implement PR). Synthesized like ci_failure above; always specage=true
+      // so the reviewer can read the spec, trail and PROTOCOL.
+      targetRepo = payload.repository?.full_name || '';
+      issueNumber = String(payload.pull_request.number || '');
+      const rr = payload.review_request;
+      const sha = rr.head_sha ? ` at commit \`${rr.head_sha}\`` : '';
+      const round = rr.round && rr.max_rounds ? ` This is review round ${rr.round} of at most ${rr.max_rounds}.` : '';
+      commentBody = `Review PR #${issueNumber}${sha}.${round} Follow the Review section of .specage/PROTOCOL.md if the repo has a specage spec; otherwise do a general code review.`;
+      forceSpecage = true;
     } else {
       // Fallback extraction
       targetRepo = payload.repository?.full_name || process.env.INPUT_TARGET_REPO || '';
@@ -116,6 +128,8 @@ function parseTrigger() {
 
     cleanComment = cleanComment.slice(tokenRun.length).trim();
   }
+
+  if (forceSpecage) specage = true;
 
   cleanComment = cleanComment.replace(/\s+/g, ' ').trim();
 

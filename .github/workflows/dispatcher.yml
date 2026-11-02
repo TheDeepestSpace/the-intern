@@ -1,7 +1,7 @@
 name: the-intern-bot dispatcher
 on:
   repository_dispatch:
-    types: [issue_comment, pull_request_review, pull_request_review_comment, ci_failure, coderabbit_review, merge_conflict]
+    types: [issue_comment, pull_request_review, pull_request_review_comment, ci_failure, coderabbit_review, merge_conflict, review_request]
   workflow_dispatch:
     inputs:
       target_repo:
@@ -517,9 +517,12 @@ jobs:
               prompt += `This request came from an inline PR review comment that is part of a review thread (comment id ${commentId}). You must reply within that same thread using:\ngh api -X POST repos/${repo}/pulls/${issue}/comments/${commentId}/replies -f body="..."\nrather than \x27gh pr comment\x27 / \x27gh issue comment\x27, which posts a new general PR comment and breaks thread continuity.\n\n`;
             }
             if (specage && specageDataRepos.length) {
-              prompt += `This request was filed by specage (specage=true). Your token also has access to the specage data repo${specageDataRepos.length > 1 ? "s" : ""} ${specageDataRepos.join(", ")}. The project spec lives there on the branch specages/<project>/spec, where <project> is the specage project for ${repo} (if the issue does not name it, list the branches matching specages/*/spec and pick the one whose .specage/config.yaml has repo: ${repo}). Read the spec file, .specage/PROTOCOL.md (follow its Implement section) and GRAMMAR.md directly from that branch, e.g. gh api repos/<data_repo>/contents/<path>?ref=specages/<project>/spec -H \x27Accept: application/vnd.github.raw+json\x27, or git clone --branch specages/<project>/spec. Never push to the spec or trail branches.\n\n`;
+              prompt += `This request was filed by specage (specage=true). Your token also has access to the specage data repo${specageDataRepos.length > 1 ? "s" : ""} ${specageDataRepos.join(", ")}. The project spec lives there on the branch specages/<project>/spec, where <project> is the specage project for ${repo} (if the issue does not name it, list the branches matching specages/*/spec and pick the one whose .specage/config.yaml has repo: ${repo}). Read the spec file, .specage/PROTOCOL.md (follow its ${eventType === "review_request" ? "Review" : "Implement"} section) and GRAMMAR.md directly from that branch, e.g. gh api repos/<data_repo>/contents/<path>?ref=specages/<project>/spec -H \x27Accept: application/vnd.github.raw+json\x27, or git clone --branch specages/<project>/spec. Never push to the spec or trail branches.\n\n`;
             } else if (specage && configuredSpecageDataRepos.length) {
               prompt += `This request was filed by specage (specage=true), but your token has no access to a configured specage data repository for ${repo}. Report that access limitation instead of claiming to have read the spec.\n\n`;
+            }
+            if (eventType === "review_request") {
+              prompt += `This is a review dispatch. Review the PR against the linked spec statements and Spec: trailers, the tests, and trail consistency, then submit a review as the-intern-bot with gh (gh pr review --approve / --request-changes / --comment, with a short body listing findings). GitHub rejects approving or requesting changes on your own PR; if that happens, submit a --comment review whose first line is APPROVE or CHANGES REQUESTED. Do not push commits to the PR branch and do not merge: the human owner stays the final merger. Ignore your own earlier reviews as evidence. On approval, request human review only if the repo config or PROTOCOL says to.\n\n`;
             }
             if (style) {
               prompt += `${style}\n\n`;

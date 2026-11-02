@@ -68,3 +68,14 @@ stripped; without it the label/body heuristics are used alone. If the merge
 API answers 403, the App is missing `pull_requests: write` or
 `contents: write`; if 405, branch protection declined — both show up in the
 report's error section rather than being bypassed.
+
+## Review dispatch (specage implement PRs)
+
+The worker files a `review_request` dispatch (handled by `dispatcher.yml`) when:
+
+- `review_requested` names `the-intern-bot[bot]` on a PR (sender must be the bot itself, as implement agents do, or in `ALLOWED_USERS`), or
+- an allowlisted user comments `@the-intern-bot review` on a PR.
+
+The dispatch always runs with `specage=true`, so the reviewer can read the spec, trail and `.specage/PROTOCOL.md` (Review section) from specage-data. It checks the PR against the linked spec statements / `Spec:` trailers, tests and trail consistency, and submits a review as the bot (a `--comment` review headed `APPROVE` / `CHANGES REQUESTED` when GitHub refuses a self-review of a bot-authored PR). It never pushes or merges; the human owner stays the final merger.
+
+Loop guards (automatic `review_requested` path only; explicit comments bypass them): one dispatch per PR head sha, and at most `MAX_REVIEW_ROUNDS` (worker var, default 3) per PR, tracked in the `CI_FAILURE_DEDUP` KV. The bot's own reviews and comments never re-trigger a dispatch.

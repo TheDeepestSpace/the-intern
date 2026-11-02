@@ -69,6 +69,20 @@ async function handleGitHub(request, env) {
     return handleCodeRabbitReview(payload, env);
   }
 
+  // Review dispatch: the bot being requested as a PR reviewer, or an
+  // allowlisted `@the-intern-bot review` PR comment, files a review_request.
+  if (eventType === 'pull_request' && payload.action === 'review_requested') {
+    return handleReviewRequest(payload, env, 'review_requested');
+  }
+  if (
+    eventType === 'issue_comment' &&
+    payload.action === 'created' &&
+    payload.issue?.pull_request &&
+    REVIEW_COMMENT.test(payload.comment?.body || '')
+  ) {
+    return handleReviewRequest(payload, env, 'comment');
+  }
+
   // Extract comment / review / event author
   const author =
     payload.comment?.user?.login ||
@@ -144,6 +158,87 @@ async function handleGitHub(request, env) {
       return new Response(`dispatch failed: ${errorText}`, { status: 502 });
     }
 
+    return new Response('ok', { status: 200 });
+  } catch (err) {
+    return new Response(`internal error: ${err.message}`, { status: 500 });
+  }
+}
+
+const REVIEW_COMMENT = /^\s*@the-intern-bot\s+review\b/i;
+
+// Queues a review_request dispatch (dispatcher.yml) so the bot reviews a PR,
+// typically a specage implement PR that requested review from the bot. Two
+// triggers: `review_requested` naming the bot (sender must be the bot itself,
+// which is how implement agents request it, or an ALLOWED_USERS member) and an
+// `@the-intern-bot review` comment from an allowlisted user.
+//
+// Loop guards for the automatic (review_requested) path: one dispatch per
+// (PR, head sha) and at most MAX_REVIEW_ROUNDS (default 3) per PR, both in KV.
+// An explicit human comment bypasses both. The bot's own review/comment
+// events never come back here: they are not review_requested and the generic
+// flow ignores the bot's own comments. Only structural fields are forwarded.
+async function handleReviewRequest(payload, env, trigger) {
+  const botLogin = (env.BOT_LOGIN || 'the-intern-bot[bot]').toLowerCase();
+  const sender = (payload.sender?.login || payload.comment?.user?.login || '').toLowerCase();
+  const allowed = (env.ALLOWED_USERS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  const senderOk = sender === botLogin && trigger === 'review_requested'
+    ? true
+    : allowed.length === 0 || allowed.includes(sender);
+  if (!senderOk || (trigger === 'comment' && sender === botLogin)) {
+    return new Response('ignored: author not in allowlist', { status: 200 });
+  }
+
+  const pr = payload.pull_request;
+  if (trigger === 'review_requested') {
+    if ((payload.requested_reviewer?.login || '').toLowerCase() !== botLogin) {
+      return new Response('ignored: review not requested from the bot', { status: 200 });
+    }
+    if (!pr || pr.state === 'closed' || pr.draft) {
+      return new Response('ignored: pull request closed or draft', { status: 200 });
+    }
+  }
+
+  const installationId = payload.installation?.id;
+  if (!installationId) {
+    return new Response('missing installation id', { status: 400 });
+  }
+  const fullName = payload.repository?.full_name;
+  const number = pr?.number ?? payload.issue?.number;
+  if (!fullName || !number) {
+    return new Response('ignored: missing repository or pull request', { status: 200 });
+  }
+
+  const sha = pr?.head?.sha || '';
+  const dedupKey = `review:${fullName}#${number}@${sha}`;
+  const roundsKey = `review_rounds:${fullName}#${number}`;
+  const maxRounds = Number(env.MAX_REVIEW_ROUNDS) || 3;
+  let rounds = 0;
+  try {
+    if (trigger === 'review_requested') {
+      if (await env.CI_FAILURE_DEDUP.get(dedupKey)) {
+        return new Response('ignored: review already dispatched for this commit', { status: 200 });
+      }
+      rounds = Number(await env.CI_FAILURE_DEDUP.get(roundsKey)) || 0;
+      if (rounds >= maxRounds) {
+        return new Response('ignored: review round cap reached', { status: 200 });
+      }
+    }
+
+    const token = await getInstallationToken(env, installationId);
+    const dispatchRes = await dispatchRepoEvent(env, token, 'review_request', {
+      repository: { full_name: fullName },
+      pull_request: { number },
+      review_request: { trigger, head_sha: sha, round: rounds + 1, max_rounds: maxRounds },
+      installation: { id: installationId },
+    });
+    if (!dispatchRes.ok) {
+      return new Response(`dispatch failed: ${await dispatchRes.text()}`, { status: 502 });
+    }
+    if (trigger === 'review_requested') {
+      const ttl = { expirationTtl: 60 * 60 * 24 * 30 };
+      await env.CI_FAILURE_DEDUP.put(dedupKey, '1', ttl);
+      await env.CI_FAILURE_DEDUP.put(roundsKey, String(rounds + 1), ttl);
+    }
     return new Response('ok', { status: 200 });
   } catch (err) {
     return new Response(`internal error: ${err.message}`, { status: 500 });

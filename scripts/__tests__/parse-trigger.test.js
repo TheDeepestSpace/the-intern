@@ -195,6 +195,32 @@ describe('parse-trigger', () => {
     });
   });
 
+  describe('repository_dispatch: review_request shape', () => {
+    it('synthesizes a review instruction and forces specage=true', () => {
+      process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
+      process.env.GITHUB_EVENT_PATH = writeEventPayload({
+        action: 'review_request',
+        client_payload: {
+          raw: {
+            installation: { id: 4242 },
+            repository: { full_name: 'acme/widgets' },
+            pull_request: { number: 9 },
+            review_request: { trigger: 'review_requested', head_sha: 'abc123', round: 2, max_rounds: 3 },
+          },
+        },
+      });
+
+      const result = parseTrigger();
+
+      expect(result.target_repo).toBe('acme/widgets');
+      expect(result.issue_number).toBe('9');
+      expect(result.event_type).toBe('review_request');
+      expect(result.specage).toBe(true);
+      expect(result.clean_prompt).toContain('Review PR #9 at commit `abc123`');
+      expect(result.clean_prompt).toContain('round 2 of at most 3');
+    });
+  });
+
   describe('repository_dispatch: merge_conflict shape', () => {
     it('synthesizes a comment body from the mergeable_state and base ref', () => {
       process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
