@@ -8,7 +8,7 @@ instruction against any issue or PR:
 
 ```json
 { "event_type": "custom_prompt",
-  "client_payload": { "target_repo": "owner/repo", "pr_number": "12", "text": "<instruction>", "installation_id": "<optional>", "purpose": "<optional: review>" } }
+  "client_payload": { "target_repo": "owner/repo", "pr_number": "12", "text": "<instruction>", "installation_id": "<optional>" } }
 ```
 
 Same `client_payload` shape as the worker's `specage_push`. Filing one requires `contents: write`
@@ -16,8 +16,7 @@ on this repo, so the text is trusted like `workflow_dispatch` inputs: no `@the-i
 gate, and leading `key=value` control tokens (`specage=true`, `backend=`, `model=`, `effort=`)
 are honored. Without `installation_id` the token is minted from the target repo's installation.
 The specage server's `POST /agent/initiate-review` uses this to dispatch a review of a specage
-implement PR with `"purpose": "review"`, which makes a `specage=true` prompt point the agent at the
-Review section of specage PROTOCOL.md instead of Implement (the default).
+implement PR (specage PROTOCOL.md, Review section).
 
 ## Nightly crawl (`.github/workflows/nightly-crawl.yml`)
 
