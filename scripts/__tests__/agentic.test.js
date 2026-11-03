@@ -190,6 +190,15 @@ describe('trigger matching and resolution', () => {
     expect(explain(spec, ev({ repo: 'TheDeepestSpace/specage', issue_number: 3, extra: 1 })).reason).toMatch(/unknown parameter/);
   });
 
+  it('matches telegram messages, taking backend= from the text', () => {
+    const ev = body => ({ kind: 'telegram', chat_id: 1, message_id: 2, body });
+    const r = explain(spec, ev('hello backend=codex'));
+    expect(r.matched).toBe(true);
+    expect(r.agent).toBe('telegram');
+    expect(r.backend).toBe('codex');
+    expect(explain(spec, ev('hello')).backend).toBe('claude');
+  });
+
   it('reports ambiguity at runtime instead of guessing', () => {
     const s = loadSpec(`${BASE}  a:\n    trigger: {issue: {events: [opened]}}\n    prompt: hi\n  b:\n    trigger: {issue: {events: [opened]}}\n    prompt: hi\n`).spec;
     expect(explain(s, { kind: 'issue', repo: 'Acme/x', author: 'u', action: 'opened', number: 1 }).reason).toMatch(/ambiguous/);

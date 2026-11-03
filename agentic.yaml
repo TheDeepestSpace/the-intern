@@ -45,6 +45,34 @@ agents:
     model: $trigger.comment.param.model | default
     effort: $trigger.comment.param.effort | default
 
+  # Telegram chat: a message from the admin chat (the worker authenticates the
+  # chat id; telegram-session.yml is the runner). Flow:
+  #   1. Worker forwards the message as a `telegram_message` repository_dispatch.
+  #   2. parse-telegram-trigger.js pulls an optional `backend=x` out of the text;
+  #      the rest becomes the prompt.
+  #   3. The session starts in the-intern-data's `telegram` branch with
+  #      convo.md (rolling summary) as context, per instructions/telegram.md.
+  #   4. First action: react 👀 on the message (react-telegram.js, using
+  #      $CHAT_ID/$REPLY_TO_MESSAGE_ID); replies go out via send-telegram.js.
+  #   5. Heavy coding is delegated by @-mentioning the bot on an issue/PR, which
+  #      fires the `default` agent above. Before finishing, convo.md is
+  #      appended to and pushed back (runs are serialized: one shared branch).
+  # Unlike issue agents it is not scoped to one repo: it works across all
+  # onboarded repos (the runtime token is unscoped).
+  telegram:
+    trigger:
+      telegram:
+        params: { backend: string }
+    access:
+      repos:
+        - { name: the_intern, scope: read/write }
+        - { name: specage, scope: read/write }
+        - { name: specage_data, scope: read }
+    prompt_file: { repo: the_intern, path: instructions/telegram.md }
+    prompt_append: [safety]
+    backend: $trigger.telegram.param.backend | claude
+    timeout: 45m
+
   specage_planner:
     trigger:
       commit:
