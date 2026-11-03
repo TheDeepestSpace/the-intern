@@ -11,6 +11,10 @@ AGENT_INFRA_REPO = "the-intern"
 SPECAGE_DATA_REPOS = "TheDeepestSpace/specage-data"
 # Only pushes by this sender trigger a specage dispatch (default specage-app[bot]).
 SPECAGE_BOT_LOGIN = "specage-app[bot]"
+# Pushes to specages/<project>/review (commit message `review <owner/repo>#<n>`)
+# must come from BOT_LOGIN (default the-intern-bot[bot]) and run a review via
+# dispatcher.yml. Min seconds between reviews of one PR (KV TTL floor is 60).
+SPECAGE_REVIEW_COOLDOWN_SECONDS = "300"
 
 # no-op change to trigger deploy-worker.yml after Node 22 fix (#27)
 

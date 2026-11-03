@@ -136,3 +136,77 @@ describe('specage spec-branch push', () => {
     expect(res.status).toBe(401);
   });
 });
+
+describe('specage review-branch push', () => {
+  const reviewPush = (overrides = {}) => ({
+    ref: 'refs/heads/specages/demo/review',
+    after: SHA,
+    installation: { id: 42 },
+    sender: { login: 'the-intern-bot[bot]', type: 'Bot' },
+    repository: { full_name: 'acme/specage-data' },
+    head_commit: { message: 'review acme/app#12' },
+    ...overrides,
+  });
+  const dispatchCall = spy =>
+    spy.mock.calls.find(([i]) => new URL(i.url ?? i).pathname.endsWith('/workflows/dispatcher.yml/dispatches'));
+
+  it('runs dispatcher.yml for the PR in the commit message', async () => {
+    const spy = mockFlow();
+    const res = await send(reviewPush());
+    expect(await res.text()).toBe('ok');
+    const body = JSON.parse(dispatchCall(spy)[1].body);
+    expect(body.inputs.target_repo).toBe('acme/app');
+    expect(body.inputs.pr_number).toBe('12');
+    expect(body.inputs.installation_id).toBe('7');
+    expect(body.inputs.comment_body).toContain('specage=true Review specage PR acme/app#12');
+  });
+
+  it.each([
+    ['the specage app', { login: 'specage-app[bot]' }],
+    ['a human', { login: 'alice' }],
+    ['no sender', undefined],
+  ])('ignores pushes from %s', async (_n, sender) => {
+    const spy = mockFlow();
+    const res = await send(reviewPush({ sender }));
+    expect(await res.text()).toBe('ignored: sender not authorized');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it.each(['review acme/app#12 please', 'Review acme/app#12', 'review acme/app', 'review acme/app#x', ''])(
+    'ignores commit message %j',
+    async message => {
+      const spy = mockFlow();
+      const res = await send(reviewPush({ head_commit: { message } }));
+      expect(await res.text()).toBe('ignored: head commit message is not a review request');
+      expect(spy).not.toHaveBeenCalled();
+    }
+  );
+
+  it('ignores non-allowlisted data repos', async () => {
+    mockFlow();
+    const res = await send(reviewPush({ repository: { full_name: 'evil/data' } }));
+    expect(await res.text()).toBe('ignored: data repo not allowlisted');
+  });
+
+  it('ignores branch deletion', async () => {
+    mockFlow();
+    const res = await send(reviewPush({ deleted: true, after: '0'.repeat(40) }));
+    expect(await res.text()).toBe('ignored: review branch deleted');
+  });
+
+  it('skips a second review of the same PR within the cooldown, not other PRs', async () => {
+    mockFlow();
+    const e = env();
+    expect(await (await send(reviewPush(), e)).text()).toBe('ok');
+    const again = reviewPush({ after: 'f'.repeat(40) });
+    expect(await (await send(again, e)).text()).toBe('ignored: review for this PR ran recently');
+    expect(await (await send(reviewPush({ head_commit: { message: 'review acme/app#13' } }), e)).text()).toBe('ok');
+  });
+
+  it('returns 502 and leaves the cooldown unset when dispatch fails', async () => {
+    mockFlow({ dispatchOk: false });
+    const e = env();
+    expect((await send(reviewPush(), e)).status).toBe(502);
+    expect(await e.CI_FAILURE_DEDUP.get('specage_review:acme/app#12')).toBeNull();
+  });
+});

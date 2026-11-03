@@ -307,6 +307,9 @@ async function handlePush(payload, env) {
   if (SPECAGE_SPEC_REF.test(payload.ref || '')) {
     return handleSpecagePush(payload, env);
   }
+  if (SPECAGE_REVIEW_REF.test(payload.ref || '')) {
+    return handleSpecageReviewPush(payload, env);
+  }
   const defaultBranch = payload.repository?.default_branch;
   const pushedBranch = (payload.ref || '').replace(/^refs\/heads\//, '');
 
@@ -388,6 +391,8 @@ async function handlePush(payload, env) {
 }
 
 const SPECAGE_SPEC_REF = /^refs\/heads\/specages\/([^/]+)\/spec$/;
+const SPECAGE_REVIEW_REF = /^refs\/heads\/specages\/([^/]+)\/review$/;
+const SPECAGE_REVIEW_MESSAGE = /^review ([\w.-]+\/[\w.-]+)#(\d+)$/;
 
 function ghHeaders(token, accept = 'application/vnd.github+json') {
   return { Authorization: `Bearer ${token}`, Accept: accept, 'User-Agent': 'the-intern-bot-relay' };
@@ -479,6 +484,82 @@ async function handleSpecagePush(payload, env) {
       return new Response(`dispatch failed: ${await dispatchRes.text()}`, { status: 502 });
     }
     await env.CI_FAILURE_DEDUP.put(dedupKey, '1', { expirationTtl: 60 * 60 * 24 * 14 });
+    return new Response('ok', { status: 200 });
+  } catch (err) {
+    return new Response(`internal error: ${err.message}`, { status: 500 });
+  }
+}
+
+// Push-driven specage review: the implement agent (the-intern bot, not the
+// specage app) pushes an empty commit to specages/<project>/review in an
+// allowlisted data repo, with the exact message `review <owner/repo>#<number>`.
+// The sender must be BOT_LOGIN; a push whose head commit message doesn't match
+// is ignored. Runs dispatcher.yml (workflow_dispatch) against that PR, capped
+// to one run per PR per SPECAGE_REVIEW_COOLDOWN_SECONDS (default 300) via KV,
+// marked only after a successful dispatch.
+async function handleSpecageReviewPush(payload, env) {
+  const project = payload.ref.match(SPECAGE_REVIEW_REF)[1];
+  const dataRepo = payload.repository?.full_name || '';
+  const allowed = (env.SPECAGE_DATA_REPOS || '')
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (!allowed.includes(dataRepo.toLowerCase())) {
+    return new Response('ignored: data repo not allowlisted', { status: 200 });
+  }
+
+  const internLogin = (env.BOT_LOGIN || 'the-intern-bot[bot]').toLowerCase();
+  const sender = (payload.sender?.login || '').toLowerCase();
+  if (sender !== internLogin) {
+    return new Response('ignored: sender not authorized', { status: 200 });
+  }
+  const sha = payload.after;
+  if (payload.deleted || !sha || /^0+$/.test(sha)) {
+    return new Response('ignored: review branch deleted', { status: 200 });
+  }
+  const match = (payload.head_commit?.message || '').trim().match(SPECAGE_REVIEW_MESSAGE);
+  if (!match) {
+    return new Response('ignored: head commit message is not a review request', { status: 200 });
+  }
+  const [, prRepo, prNumber] = match;
+
+  const dedupKey = `specage_review:${prRepo.toLowerCase()}#${prNumber}`;
+  const cooldown = Math.max(60, Number(env.SPECAGE_REVIEW_COOLDOWN_SECONDS) || 300);
+  try {
+    if (await env.CI_FAILURE_DEDUP.get(dedupKey)) {
+      return new Response('ignored: review for this PR ran recently', { status: 200 });
+    }
+
+    const owner = env.AGENT_INFRA_OWNER || 'TheDeepestSpace';
+    const repo = env.AGENT_INFRA_REPO || 'the-intern';
+    const appJwt = mintAppJwt(env.APP_ID, normalizeKey(getPrivateKey(env)));
+    const projectInstall = await getInstallationIdForRepo(appJwt, prRepo);
+    const internInstall = env.AGENT_INFRA_INSTALLATION_ID || (await getInstallationIdForRepo(appJwt, `${owner}/${repo}`));
+    if (!projectInstall || !internInstall) {
+      return new Response('app not installed on project or agent-infra repo', { status: 502 });
+    }
+    const internToken = await getInstallationToken(env, internInstall);
+
+    const dispatchRes = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/actions/workflows/dispatcher.yml/dispatches`,
+      {
+        method: 'POST',
+        headers: { ...ghHeaders(internToken), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ref: env.AGENT_INFRA_REF || 'main',
+          inputs: {
+            target_repo: prRepo,
+            pr_number: prNumber,
+            installation_id: String(projectInstall),
+            comment_body: `specage=true Review specage PR ${prRepo}#${prNumber}. The spec lives in ${dataRepo} on specages/${project}/spec; follow the ## Review section (not Implement) of protocol/PROTOCOL.md there. Never push to the specages/${project}/review, spec or trail branches.`,
+          },
+        }),
+      }
+    );
+    if (!dispatchRes.ok) {
+      return new Response(`dispatch failed: ${await dispatchRes.text()}`, { status: 502 });
+    }
+    await env.CI_FAILURE_DEDUP.put(dedupKey, sha, { expirationTtl: cooldown });
     return new Response('ok', { status: 200 });
   } catch (err) {
     return new Response(`internal error: ${err.message}`, { status: 500 });
