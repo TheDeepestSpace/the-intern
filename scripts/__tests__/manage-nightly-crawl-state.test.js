@@ -94,6 +94,18 @@ describe('manage-nightly-crawl-state', () => {
     expect(sh(`git ls-remote --heads ${dataRemoteDir}`, workDir)).toBe('');
   });
 
+  it('builds the first orphan commit from only the state file (no workflow files)', async () => {
+    fs.mkdirSync(path.join(workDir, '.github', 'workflows'), { recursive: true });
+    fs.writeFileSync(path.join(workDir, '.github', 'workflows', 'ci.yaml'), 'name: ci\n');
+    sh('git add -A && git commit -m "add workflow"', workDir);
+
+    await updateState((state) => ({ state: markConflictDispatched(state, 'a/b#1', NOW) }));
+
+    const files = sh(`git ls-tree -r --name-only ${BRANCH_NAME}`, dataRemoteDir).split('\n');
+    expect(files).toEqual([FILE_NAME]);
+    expect(sh(`git rev-list --count ${BRANCH_NAME}`, dataRemoteDir)).toBe('1');
+  });
+
   it('leaves the caller checkout untouched', async () => {
     await updateState((state) => ({ state: markConflictDispatched(state, 'a/b#1', NOW) }));
     expect(sh('git rev-parse --abbrev-ref HEAD', workDir)).toBe('main');
