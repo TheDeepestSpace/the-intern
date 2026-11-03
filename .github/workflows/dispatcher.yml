@@ -467,6 +467,9 @@ jobs:
           # mint (SPECAGE_DATA_REPOS comes from the workflow env); also gates
           # the specage paragraph in the prompt below.
           SPECAGE: ${{ needs.detect-image.outputs.specage }}
+          # custom_prompt only: "review" selects the Review section of the
+          # specage PROTOCOL.md; anything else keeps Implement.
+          PURPOSE: ${{ github.event.client_payload.purpose }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
           EVENT_TYPE: ${{ needs.detect-image.outputs.event_type }}
           COMMENT_ID: ${{ needs.detect-image.outputs.comment_id }}
@@ -499,6 +502,7 @@ jobs:
             const style = process.env.STYLE_GUIDE || "";
             const workspaceRestored = process.env.WORKSPACE_RESTORED === "true";
             const eventType = process.env.EVENT_TYPE || "";
+            const protocolSection = eventType === "custom_prompt" && (process.env.PURPOSE || "").toLowerCase() === "review" ? "Review" : "Implement";
             const commentId = process.env.COMMENT_ID || "";
             const specage = process.env.SPECAGE === "true";
             const configuredSpecageDataRepos = (process.env.SPECAGE_DATA_REPOS || "").split(",").map((r) => r.trim()).filter(Boolean);
@@ -517,7 +521,7 @@ jobs:
               prompt += `This request came from an inline PR review comment that is part of a review thread (comment id ${commentId}). You must reply within that same thread using:\ngh api -X POST repos/${repo}/pulls/${issue}/comments/${commentId}/replies -f body="..."\nrather than \x27gh pr comment\x27 / \x27gh issue comment\x27, which posts a new general PR comment and breaks thread continuity.\n\n`;
             }
             if (specage && specageDataRepos.length) {
-              prompt += `This request was filed by specage (specage=true). Your token also has access to the specage data repo${specageDataRepos.length > 1 ? "s" : ""} ${specageDataRepos.join(", ")}. The project spec lives there on the branch specages/<project>/spec, where <project> is the specage project for ${repo} (if the issue does not name it, list the branches matching specages/*/spec and pick the one whose .specage/config.yaml has repo: ${repo}). Read the spec file, .specage/PROTOCOL.md (follow its Implement section) and GRAMMAR.md directly from that branch, e.g. gh api repos/<data_repo>/contents/<path>?ref=specages/<project>/spec -H \x27Accept: application/vnd.github.raw+json\x27, or git clone --branch specages/<project>/spec. Never push to the spec or trail branches.\n\n`;
+              prompt += `This request was filed by specage (specage=true). Your token also has access to the specage data repo${specageDataRepos.length > 1 ? "s" : ""} ${specageDataRepos.join(", ")}. The project spec lives there on the branch specages/<project>/spec, where <project> is the specage project for ${repo} (if the issue does not name it, list the branches matching specages/*/spec and pick the one whose .specage/config.yaml has repo: ${repo}). Read the spec file, .specage/PROTOCOL.md (follow its ${protocolSection} section) and GRAMMAR.md directly from that branch, e.g. gh api repos/<data_repo>/contents/<path>?ref=specages/<project>/spec -H \x27Accept: application/vnd.github.raw+json\x27, or git clone --branch specages/<project>/spec. Never push to the spec or trail branches.\n\n`;
             } else if (specage && configuredSpecageDataRepos.length) {
               prompt += `This request was filed by specage (specage=true), but your token has no access to a configured specage data repository for ${repo}. Report that access limitation instead of claiming to have read the spec.\n\n`;
             }
