@@ -39,6 +39,12 @@ jobs:
         with:
           node-version: 22
 
+      # Root deps (yaml) are needed to validate and bundle agentic.yaml into
+      # the worker (worker/package.json pretest -> scripts/bundle-agentic.js).
+      - name: Install root dependencies
+        working-directory: .
+        run: npm install
+
       - name: Install dependencies
         run: npm install
 

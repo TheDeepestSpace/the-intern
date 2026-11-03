@@ -12,21 +12,33 @@ permissions:
 jobs:
   parse-trigger:
     runs-on: ubuntu-latest
-    # Split out from `respond` so the backend is known before that job starts —
-    # a job's `concurrency:` group is resolved before any of its own steps run,
-    # so it can't reference a step output from within the same job.
+    # Split out from `respond` so the backend (and timeout) are known before
+    # that job starts — a job's `concurrency:` group is resolved before any of
+    # its own steps run, so it can't reference a step output from within the
+    # same job. Everything comes from agentic.yaml's `telegram` agent via
+    # resolve-agent.js (fail closed: invalid file or no match = no run).
     outputs:
+      agent: ${{ steps.parse.outputs.agent }}
       backend: ${{ steps.parse.outputs.backend }}
-      clean_text: ${{ steps.parse.outputs.clean_text }}
+      model: ${{ steps.parse.outputs.model }}
+      effort: ${{ steps.parse.outputs.effort }}
+      timeout_minutes: ${{ steps.parse.outputs.timeout_minutes }}
+      access: ${{ steps.parse.outputs.access }}
+      prompt_repo: ${{ steps.parse.outputs.prompt_repo }}
+      prompt_ref: ${{ steps.parse.outputs.prompt_ref }}
+      prompt_path: ${{ steps.parse.outputs.prompt_path }}
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Parse backend from Telegram message
+      - name: Install script dependencies
+        run: npm ci --omit=dev --include=prod --no-audit --no-fund
+
+      - name: Resolve agent from agentic.yaml
         id: parse
-        run: node scripts/parse-telegram-trigger.js
+        run: node scripts/resolve-agent.js
 
   respond:
     needs: parse-trigger
@@ -34,10 +46,10 @@ jobs:
     # `data_token` (the-intern-data reach, issue #141) expires after 1 hour,
     # non-configurably, and — unlike `token` above, which the background
     # refresher in the "Run agent" step now keeps valid past that cap
-    # (issue #145) — has no equivalent refresh yet. Bound this job below that
-    # so a stuck agent run fails fast instead of limping on with an expired
-    # data_token for the rest of the default 6-hour job timeout.
-    timeout-minutes: 45
+    # (issue #145) — has no equivalent refresh yet. The `telegram` agent's
+    # timeout in agentic.yaml (45m) stays below that so a stuck agent run
+    # fails fast instead of limping on with an expired data_token.
+    timeout-minutes: ${{ fromJSON(needs.parse-trigger.outputs.timeout_minutes) }}
     # codex-backend runs need global serialization across the whole repo (not just
     # per-chat): codex proactively rotates its own refresh token in place, and
     # rotated refresh tokens are typically single-use, so an overlapping codex run
@@ -74,14 +86,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # Deliberately NOT scoped to TARGET_REPO (unlike dispatcher.yml's mint
-      # step) — a live Telegram chat session needs to act across every repo
-      # the App installation covers (the-intern, svsch, the-intern-testing,
-      # the-intern-data), e.g. commenting/reacting/dispatching on issues in
-      # other repos mid-conversation. This is a deliberate, user-requested
-      # reach vs. safety tradeoff for this workflow only; dispatcher.yml
-      # stays scoped to targetRepo since it only ever needs to act on the
-      # repo it was dispatched for.
+      # Scoped by the `telegram` agent's access list in agentic.yaml, which is
+      # deliberately `*` (every repo the App installation covers: the-intern,
+      # svsch, the-intern-testing, the-intern-data) — a live chat session
+      # comments/reacts/dispatches on issues in other repos mid-conversation.
+      # This is a deliberate, user-requested reach vs. safety tradeoff for
+      # this agent only; issue agents stay scoped to their own repo.
       - name: Mint installation token
         id: token
         run: |
@@ -91,7 +101,21 @@ jobs:
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           TARGET_REPO: ${{ github.repository }}
-          SCOPE_TO_REPO: 'false'
+          ACCESS: ${{ needs.parse-trigger.outputs.access }}
+
+      # The agent's `prompt_file` (instructions/telegram.md in this repo; the
+      # resolved sha is logged). Read with the unscoped token above.
+      - name: Fetch prompt file
+        if: needs.parse-trigger.outputs.prompt_repo != ''
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          node scripts/fetch-prompt-file.js
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          PROMPT_REPO: ${{ needs.parse-trigger.outputs.prompt_repo }}
+          PROMPT_REF: ${{ needs.parse-trigger.outputs.prompt_ref }}
+          PROMPT_PATH: ${{ needs.parse-trigger.outputs.prompt_path }}
+          OUT_FILE: prompt_file.txt
 
       # Gives the agent shell (issue #141) short-lived, single-repo-scoped
       # read/write reach into the-intern-data, without exposing the
@@ -158,19 +182,20 @@ jobs:
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
 
-      # Re-parses the same triggering event (rather than consuming
-      # needs.parse-trigger.outputs.clean_text directly below) and writes the
-      # message text straight to a file instead of a step `env:` key (issue
-      # #226) — a step-level `env:` mapping referencing this content gets
-      # auto-echoed by the Actions runner as plaintext before the step's
-      # script ever runs, regardless of any stdout/stderr redirect the script
-      # itself does.
-      - name: Write clean message text to file for agent step
+      # Re-resolves the same triggering event (rather than passing the message
+      # text through a job output) and writes it straight to a file instead of
+      # a step `env:` key (issue #226) — a step-level `env:` mapping
+      # referencing this content gets auto-echoed by the Actions runner as
+      # plaintext before the step's script ever runs, regardless of any
+      # stdout/stderr redirect the script itself does.
+      - name: Write clean message text and resolved agent to files for agent step
         run: |
           exec >> "$LOG_FILE" 2>&1
-          node scripts/parse-telegram-trigger.js
+          npm ci --omit=dev --include=prod --no-audit --no-fund
+          node scripts/resolve-agent.js
         env:
-          CLEAN_TEXT_FILE: clean_text.txt
+          CLEAN_PROMPT_FILE: clean_text.txt
+          AGENT_FILE: agent.json
 
       - name: Run agent (fresh session with convo.md context)
         working-directory: tg-state
@@ -182,14 +207,18 @@ jobs:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
           # Let the background token refresher below (issue #145) re-mint with
-          # the same scoping the initial "Mint installation token" step above
-          # used (unscoped, since this session can act across every repo the
-          # App installation covers), once that token expires past its fixed
-          # 1hr cap.
+          # the same ACCESS scoping the initial "Mint installation token" step
+          # above used (unscoped, since this session can act across every repo
+          # the App installation covers), once that token expires past its
+          # fixed 1hr cap.
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           TARGET_REPO: ${{ github.repository }}
-          SCOPE_TO_REPO: 'false'
+          ACCESS: ${{ needs.parse-trigger.outputs.access }}
+          # Resolved from agentic.yaml; model/effort are not yet wired into the
+          # CLI invocations below.
+          MODEL: ${{ needs.parse-trigger.outputs.model }}
+          EFFORT: ${{ needs.parse-trigger.outputs.effort }}
           RETRY_SOURCE: telegram
           WORKFLOW_FILE: telegram-session.yml
           DISPATCH_REF: ${{ github.ref_name }}
@@ -261,11 +290,15 @@ jobs:
 
           node -e '
             const fs = require("fs");
-            let instructions = "";
-            try {
-              instructions = fs.readFileSync("../instructions/telegram.md", "utf8");
-            } catch (err) {
-              if (err.code !== "ENOENT") throw err;
+            // The agent prompt: its prompt_file (fetched above) plus the
+            // prompt_append snippets, both from agentic.yaml via agent.json.
+            const agent = JSON.parse(fs.readFileSync("../agent.json", "utf8"));
+            let instructions = agent.prompt || "";
+            if (agent.prompt_file) {
+              instructions = fs.readFileSync("../prompt_file.txt", "utf8");
+            }
+            for (const snippet of agent.prompt_append || []) {
+              instructions += `\n\n${snippet}`;
             }
 
             let style = "";

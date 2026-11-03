@@ -1,9 +1,9 @@
-const YAML = require('yaml');
-
 // Loader, validator, trigger matcher and `explain` for agentic.yaml — the
 // declarative source of truth for who triggers which agent, what it can touch,
-// and what it runs. Pure functions only (no I/O, no network) so the worker,
-// CI and tests can all share it.
+// and what it runs. Pure functions only (no I/O, no network, no dependencies)
+// so the worker (which bundles this file verbatim, see
+// scripts/bundle-agentic.js), CI and tests can all share it. YAML parsing lives
+// in ./agentic-yaml.js so this file stays dependency-free.
 
 const TRIGGER_KINDS = ['comment', 'commit', 'pull_request', 'issue', 'schedule', 'manual', 'telegram'];
 const SCOPES = ['read', 'read/write'];
@@ -20,9 +20,12 @@ const TOP_KEYS = ['version', 'bot', 'defaults', 'repos', 'allowed_owners', 'prom
 const REPO_RE = /^[\w.-]+\/[\w.-]+$/;
 const VAR_RE = /\$([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*)/gi;
 const ONLY_VAR_RE = /^\$([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*)$/i;
+// Backend keyword accepted right after a catch-all mention (`@bot codex ...`).
+const BACKEND_KEYWORDS = ['claude', 'codex', 'agy'];
 
 const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isVar = v => typeof v === 'string' && ONLY_VAR_RE.test(v);
+const esc = x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 function unknownKeys(obj, allowed, where, errors) {
   for (const k of Object.keys(obj)) {
@@ -59,6 +62,14 @@ function parseDuration(v) {
   const m = /^(\d+)(s|m|h)$/.exec(String(v));
   if (!m) return null;
   return Number(m[1]) * { s: 1, m: 60, h: 3600 }[m[2]];
+}
+
+// Declared params of a trigger definition (comment/telegram `params`, manual
+// `parameters`), or {} for kinds without any.
+function declaredParams(kind, def) {
+  if (kind === 'manual') return def.parameters || {};
+  if (kind === 'comment' || kind === 'telegram') return def.params || {};
+  return {};
 }
 
 // The variables a trigger makes available. `values` is null at load time
@@ -128,6 +139,23 @@ function lookup(ctx, dotted) {
 // captures, typed manual parameters) — never free-form comment params or text.
 function trustedForAccess(dotted) {
   return /^(repo|trigger\.(comment|commit|pull_request|issue)\.repo|trigger\.commit\.matcher\.[a-z_]\w*|trigger\.manual\.parameters\.[a-z_]\w*)$/i.test(dotted);
+}
+
+// Vars allowed as a prompt_file `ref`: the pushed commit/branch of a commit
+// trigger, so the prompt is pinned to exactly what the trusted author pushed.
+function trustedForRef(dotted) {
+  return /^trigger\.commit\.(sha|branch)$/i.test(dotted);
+}
+
+// `$trigger.<kind>.param.<x>` / `$trigger.manual.parameters.<x>` -> declared
+// type of that param, or null when the reference is not a declared param.
+function paramRefType(dotted, kind, def) {
+  const m = /^trigger\.(comment|telegram)\.param\.([a-z_]\w*)$|^trigger\.(manual)\.parameters\.([a-z_]\w*)$/i.exec(dotted);
+  if (!m) return null;
+  const k = m[1] || m[3];
+  const name = m[2] || m[4];
+  if (k !== kind) return null;
+  return declaredParams(kind, def)[name] || null;
 }
 
 function checkVars(str, ctx, extra, where, errors) {
@@ -250,13 +278,22 @@ function validateAgent(name, agent, spec, errors) {
     else repos.forEach((r, i) => {
       const w = `${where}.access.repos[${i}]`;
       if (!isObj(r)) return errors.push(`${w}: must be a map`);
-      unknownKeys(r, ['name', 'scope', 'branches', 'paths'], w, errors);
+      unknownKeys(r, ['name', 'scope', 'branches', 'paths', 'when'], w, errors);
       checkRepoRef(r.name, spec, ctx, `${w}.name`, errors);
       if (typeof r.name === 'string') aliasesInAccess.add(r.name);
       if (!SCOPES.includes(r.scope)) errors.push(`${w}.scope: must be one of ${SCOPES.join('|')}`);
       for (const k of ['branches', 'paths']) {
         if (r[k] !== undefined && !(Array.isArray(r[k]) && r[k].every(s => typeof s === 'string'))) {
           errors.push(`${w}.${k}: must be a list of strings`);
+        }
+      }
+      // `when`: the entry is granted only when a declared *boolean* param of
+      // the trigger is true (e.g. `specage=true`). The repo itself is still a
+      // reviewed literal — free text never decides *which* repo, only
+      // whether a listed one is included.
+      if (r.when !== undefined) {
+        if (!isVar(r.when) || paramRefType(r.when.slice(1), kind, tdef) !== 'boolean') {
+          errors.push(`${w}.when: must reference a declared boolean param of the trigger`);
         }
       }
     });
@@ -294,7 +331,14 @@ function validateAgent(name, agent, spec, errors) {
       if (typeof f.path !== 'string' || !f.path || f.path.startsWith('/') || f.path.split('/').includes('..')) {
         errors.push(`${w}.path: relative path without '..' required`);
       }
-      if (f.ref !== undefined && (typeof f.ref !== 'string' || !f.ref)) errors.push(`${w}.ref: must be a string`);
+      if (f.ref !== undefined) {
+        if (typeof f.ref !== 'string' || !f.ref) errors.push(`${w}.ref: must be a string`);
+        else if (isVar(f.ref)) {
+          const n = f.ref.slice(1);
+          if (!trustedForRef(n)) errors.push(`${w}.ref: '${f.ref}' is not a trusted source for a ref`);
+          else if (!lookup(ctx, n).found) errors.push(`${w}.ref: unknown variable '${f.ref}' (not provided by the trigger)`);
+        }
+      }
     }
   }
   if (agent.prompt_append !== undefined) {
@@ -316,7 +360,16 @@ function validateAgent(name, agent, spec, errors) {
   // actions
   if (agent.actions !== undefined) {
     if (!Array.isArray(agent.actions)) errors.push(`${where}.actions: must be a list`);
-    else agent.actions.forEach((a, i) => validateAction(`${where}.actions[${i}]`, a, spec, ctx, aliasesInAccess, errors));
+    else {
+      const names = new Set();
+      agent.actions.forEach((a, i) => {
+        validateAction(`${where}.actions[${i}]`, a, spec, ctx, aliasesInAccess, errors);
+        if (isObj(a) && typeof a.name === 'string') {
+          if (names.has(a.name)) errors.push(`${where}.actions[${i}].name: duplicate '${a.name}'`);
+          names.add(a.name);
+        }
+      });
+    }
   }
 }
 
@@ -407,16 +460,11 @@ function checkAmbiguity(spec, errors) {
   }
 }
 
-// Returns { spec, errors }. `spec` is normalized (defaults/repo aliases not yet
-// applied to agents — see resolveAgent) and only usable when errors is empty.
-function loadSpec(text) {
+// Returns { spec, errors } for an already-parsed YAML document. `spec` is
+// normalized (defaults/repo aliases not yet applied to agents — see
+// resolveAgent) and only usable when errors is empty.
+function loadSpecObject(raw) {
   const errors = [];
-  let raw;
-  try {
-    raw = YAML.parse(text);
-  } catch (e) {
-    return { spec: null, errors: [`invalid YAML: ${e.message.split('\n')[0]}`] };
-  }
   if (!isObj(raw)) return { spec: null, errors: ['top level must be a map'] };
   unknownKeys(raw, TOP_KEYS, 'top level', errors);
   if (raw.version !== 1) errors.push('version: must be 1');
@@ -430,6 +478,7 @@ function loadSpec(text) {
     snippets: raw.snippets || {},
     agents: raw.agents || {},
   };
+  if (typeof spec.bot !== 'string' || !/^[\w-]+$/.test(spec.bot)) errors.push('bot: must be a GitHub login');
   if (!isObj(spec.defaults)) { errors.push('defaults: must be a map'); spec.defaults = {}; }
   else {
     unknownKeys(spec.defaults, DEFAULT_KEYS, 'defaults', errors);
@@ -461,12 +510,42 @@ function loadSpec(text) {
 const toRepo = (spec, ref) => spec.repos[ref] || ref;
 const lc = s => String(s || '').toLowerCase();
 const authorList = a => (a === undefined ? null : [].concat(a).map(lc));
+const botLogin = spec => `${spec.bot}[bot]`;
+
+// Coerces a raw `key=value` string to a declared param type; undefined when
+// it doesn't fit (then it stays prompt text / is ignored).
+function coerceParam(type, v) {
+  if (type === 'integer') return /^\d+$/.test(v) ? Number(v) : undefined;
+  if (type === 'boolean') return /^(true|false)$/i.test(v) ? v.toLowerCase() === 'true' : undefined;
+  return v;
+}
+
+// Validates typed parameters (manual triggers, action parameters). Returns an
+// error string or null.
+function checkTyped(declared, given, what = 'parameter') {
+  for (const [k, t] of Object.entries(declared)) {
+    const v = given[k];
+    if (v === undefined) return `missing ${what} '${k}'`;
+    if (t === 'integer' && !Number.isInteger(v)) return `${what} '${k}' must be an integer`;
+    if (t === 'string' && typeof v !== 'string') return `${what} '${k}' must be a string`;
+    if (t === 'boolean' && typeof v !== 'boolean') return `${what} '${k}' must be a boolean`;
+  }
+  for (const k of Object.keys(given)) if (!(k in declared)) return `unknown ${what} '${k}'`;
+  return null;
+}
 
 // Does `event` fire this agent? Returns null or { kind, values } where values
-// are the trigger fields ($trigger.<kind>.*) taken from the event.
-// event: { kind, repo, author, ... } — normalized by the caller (the worker);
-// comment: body, on, issue_number | commit: branch, sha, paths |
-// telegram: body, chat_id, message_id | pull_request/issue: action, labels, number | manual: agent, parameters | schedule: agent
+// are the trigger fields ($trigger.<kind>.*) taken from the event, plus `text`
+// (the request with control tokens removed) for comment/telegram.
+// event: { kind, repo, author, ... } — normalized by the caller (see
+// eventFromWebhook / eventFromTelegram):
+//   comment: body, on, issue_number, implicit? | commit: branch, sha, paths |
+//   telegram: body, chat_id, message_id | pull_request/issue: action, labels, number |
+//   manual: agent, parameters | schedule: agent
+// `implicit` on a comment means the mention gate is already satisfied by
+// context — a reply on a thread the bot itself authored, a workflow_dispatch
+// run, or an event the system synthesized (CI failure etc.) — so a catch-all
+// (`verb: '*'`) agent matches without the literal @mention.
 function matchAgent(spec, name, event) {
   const agent = spec.agents[name];
   const kind = Object.keys(agent.trigger)[0];
@@ -480,26 +559,39 @@ function matchAgent(spec, name, event) {
   if (kind === 'comment') {
     if (def.on && !def.on.includes(event.on)) return null;
     const verb = def.verb || name;
-    const esc = x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const bot = `@${esc(spec.bot)}(?:\\[bot\\])?`;
-    // verb '*' = catch-all: any mention (anywhere in the body), optionally
-    // followed by a backend keyword, like the pre-yaml mention gate.
-    const m = verb === '*'
-      ? new RegExp(`(?:^|\\s)${bot}(?![\\w-])(?:\\s+(?:(claude|codex|agy)\\b)?)?\\s*(.*)$`, 'is').exec(event.body || '')
-      : new RegExp(`^\\s*${bot}\\s+(${esc(verb)})\\b(.*)$`, 'is').exec(event.body || '');
-    if (!m) return null;
+    const body = event.body || '';
     const declared = def.params || {};
     const params = {};
-    if (verb === '*' && m[1] && 'backend' in declared) params.backend = m[1].toLowerCase();
-    // Only a leading run of key=value tokens counts; later ones stay prompt text.
-    const lead = /^\s*(?:[a-z_]\w*=\S+\s*)*/i.exec(m[2])[0];
-    for (const [, k, v] of lead.matchAll(/(?:^|\s)([a-z_]\w*)=(\S+)/gi)) {
-      if (!(k in declared)) continue; // undeclared key=value stays prompt text
-      if (declared[k] === 'integer' && !/^\d+$/.test(v)) continue;
-      if (declared[k] === 'boolean' && !/^(true|false)$/.test(v)) continue;
-      params[k] = declared[k] === 'integer' ? Number(v) : declared[k] === 'boolean' ? v === 'true' : v;
+    let text;
+    if (verb === '*') {
+      // Catch-all: any mention (anywhere in the body), optionally followed by
+      // a backend keyword, like the pre-yaml mention gate.
+      const m = new RegExp(`(?:^|\\s)${bot}(?![\\w-])(?:\\s+(${BACKEND_KEYWORDS.join('|')})(?![\\w-]))?`, 'i').exec(body);
+      if (!m && !event.implicit) return null;
+      if (m && m[1] && 'backend' in declared) params.backend = m[1].toLowerCase();
+      // Every mention (and a backend keyword right after it) is stripped from
+      // the request text, as parse-trigger.js always did.
+      text = body.replace(new RegExp(`${bot}(?![\\w-])\\s*(?:(?:${BACKEND_KEYWORDS.join('|')})(?![\\w-])\\s*)?`, 'gi'), '').trim();
+    } else {
+      const m = new RegExp(`^\\s*${bot}\\s+(${esc(verb)})(?![\\w-])(.*)$`, 'is').exec(body);
+      if (!m) return null;
+      text = m[2].trim();
     }
-    return { kind, values: { repo: event.repo, author: event.author, issue_number: event.issue_number, params } };
+    // Only a leading run of declared key=value tokens counts; the run ends at
+    // the first undeclared one, which stays prompt text (e.g. `-c model=x`
+    // later in the request is never a control token).
+    let rest = text;
+    for (;;) {
+      const t = /^([a-z_]\w*)=(\S+)\s*/i.exec(rest);
+      if (!t || !(t[1].toLowerCase() in declared)) break;
+      const k = t[1].toLowerCase();
+      const v = coerceParam(declared[k], t[2]);
+      if (v !== undefined) params[k] = v;
+      rest = rest.slice(t[0].length);
+    }
+    text = rest.replace(/\s+/g, ' ').trim();
+    return { kind, values: { repo: event.repo, author: event.author, issue_number: event.issue_number, params, text } };
   }
   if (kind === 'commit') {
     if (repo !== lc(toRepo(spec, def.repo))) return null;
@@ -516,26 +608,30 @@ function matchAgent(spec, name, event) {
     return { kind, values: { repo: event.repo, author: event.author, number: event.number } };
   }
   if (kind === 'telegram') {
-    // Same convention as parse-telegram-trigger.js: backend=x anywhere in the text.
+    // Same convention as the old parse-telegram-trigger.js: declared
+    // `key=value` tokens anywhere in the text are control tokens and are
+    // removed from the message.
     const declared = def.params || {};
     const params = {};
-    const m = /\bbackend=(\S+)/i.exec(event.body || '');
-    if (m && 'backend' in declared) params.backend = m[1].toLowerCase();
-    return { kind, values: { chat_id: event.chat_id, message_id: event.message_id, params } };
+    const body = event.body || '';
+    for (const [, k, v] of body.matchAll(/(?:^|\s)([a-z_]\w*)=(\S+)/gi)) {
+      const key = k.toLowerCase();
+      if (!(key in declared)) continue;
+      const val = coerceParam(declared[key], v);
+      if (val !== undefined) params[key] = val;
+    }
+    const names = Object.keys(declared);
+    const text = names.length
+      ? body.replace(new RegExp(`(?:^|\\s)(?:${names.map(esc).join('|')})=\\S+`, 'gi'), ' ').replace(/\s+/g, ' ').trim()
+      : body.replace(/\s+/g, ' ').trim();
+    return { kind, values: { chat_id: event.chat_id, message_id: event.message_id, params, text } };
   }
   if (kind === 'schedule') return event.agent === name ? { kind, values: {} } : null;
   if (kind === 'manual') {
     if (event.agent !== name) return null;
-    const declared = def.parameters || {};
     const parameters = event.parameters || {};
-    for (const [k, t] of Object.entries(declared)) {
-      const v = parameters[k];
-      if (v === undefined) return { error: `missing parameter '${k}'` };
-      if (t === 'integer' && !Number.isInteger(v)) return { error: `parameter '${k}' must be an integer` };
-      if (t === 'string' && typeof v !== 'string') return { error: `parameter '${k}' must be a string` };
-      if (t === 'boolean' && typeof v !== 'boolean') return { error: `parameter '${k}' must be a boolean` };
-    }
-    for (const k of Object.keys(parameters)) if (!(k in declared)) return { error: `unknown parameter '${k}'` };
+    const error = checkTyped(def.parameters || {}, parameters);
+    if (error) return { error };
     return { kind, values: { parameters } };
   }
   return null;
@@ -560,33 +656,46 @@ function resolveSetting(raw, ctx) {
   return head;
 }
 
+function allowedOwners(spec) {
+  return new Set([
+    ...spec.allowed_owners.map(lc),
+    ...Object.values(spec.repos).map(r => lc(r.split('/')[0])),
+  ]);
+}
+
+// alias | owner/repo | $trusted-var -> owner/repo, or throws. Never a silent
+// partial scope: a capture that isn't a declared alias, or an owner outside
+// the allowlist, is an error.
+function resolveRepoRef(spec, ctx, ref) {
+  if (ref === ALL_REPOS) return ref;
+  let full = ref;
+  if (isVar(ref)) {
+    const r = lookup(ctx, ref.slice(1));
+    full = r.found ? r.value : undefined;
+    if (typeof full !== 'string' || !full) throw new Error(`access: '${ref}' resolved to nothing`);
+    // Branch captures are bare project names: they must be declared in `repos`.
+    if (full in spec.repos) full = spec.repos[full];
+  } else if (ref in spec.repos) full = spec.repos[ref];
+  if (!REPO_RE.test(full)) throw new Error(`access: '${full}' is not a valid owner/repo`);
+  if (!allowedOwners(spec).has(lc(full.split('/')[0]))) throw new Error(`access: owner of '${full}' is not allowlisted`);
+  return full;
+}
+
 // Fully resolves an agent for a matched trigger: defaults applied, repos
 // validated against the owner allowlist, access list concretized.
 // Throws on any invalid resolved repo — never a silent partial scope.
 function resolveAgent(spec, name, match) {
   const agent = spec.agents[name];
   const ctx = triggerContext(match.kind, agent.trigger[match.kind] || {}, match.values);
-  const owners = new Set([
-    ...spec.allowed_owners.map(lc),
-    ...Object.values(spec.repos).map(r => lc(r.split('/')[0])),
-  ]);
-  const resolveRepo = (ref) => {
-    if (ref === ALL_REPOS) return ref;
-    let full = ref;
-    if (isVar(ref)) {
-      const r = lookup(ctx, ref.slice(1));
-      full = r.found ? r.value : undefined;
-      if (typeof full !== 'string' || !full) throw new Error(`access: '${ref}' resolved to nothing`);
-      // Branch captures are bare project names: they must be declared in `repos`.
-      if (full in spec.repos) full = spec.repos[full];
-    } else if (ref in spec.repos) full = spec.repos[ref];
-    if (!REPO_RE.test(full)) throw new Error(`access: '${full}' is not a valid owner/repo`);
-    if (!owners.has(lc(full.split('/')[0]))) throw new Error(`access: owner of '${full}' is not allowlisted`);
-    return full;
-  };
+  const resolveRepo = ref => resolveRepoRef(spec, ctx, ref);
   const d = spec.defaults;
   const pick = (k, fb) => agent[k] !== undefined ? agent[k] : d[k] !== undefined ? d[k] : fb;
-  const access = (agent.access?.repos || []).map(r => ({
+  const granted = (agent.access?.repos || []).filter(r => {
+    if (r.when === undefined) return true;
+    const v = lookup(ctx, r.when.slice(1));
+    return v.found && v.value === true;
+  });
+  const access = granted.map(r => ({
     repo: resolveRepo(r.name),
     scope: r.scope,
     ...(r.branches ? { branches: r.branches } : {}),
@@ -595,12 +704,24 @@ function resolveAgent(spec, name, match) {
   let prompt = null;
   let prompt_file = null;
   if (agent.prompt_file) {
-    prompt_file = { repo: resolveRepo(agent.prompt_file.repo), ref: agent.prompt_file.ref || null, path: agent.prompt_file.path };
+    let ref = agent.prompt_file.ref || null;
+    if (ref && isVar(ref)) {
+      const r = lookup(ctx, ref.slice(1));
+      if (!r.found || typeof r.value !== 'string' || !r.value) throw new Error(`prompt_file.ref: '${ref}' resolved to nothing`);
+      ref = r.value;
+    }
+    prompt_file = { repo: resolveRepo(agent.prompt_file.repo), ref, path: agent.prompt_file.path };
   } else {
     prompt = interpolate(agent.prompt, ctx);
   }
+  const actions = (agent.actions || []).map(a => ({
+    name: a.name,
+    parameters: a.parameters || {},
+    kind: ACTION_KINDS.find(k => k in a),
+  }));
   return {
     agent: name,
+    trigger: match.kind,
     backend: resolveSetting(pick('backend', 'claude'), ctx),
     model: resolveSetting(pick('model', 'default'), ctx),
     effort: resolveSetting(pick('effort', 'default'), ctx),
@@ -615,7 +736,50 @@ function resolveAgent(spec, name, match) {
     // Pinned = ref given; otherwise the default branch of that repo.
     prompt_pinned: prompt_file ? Boolean(prompt_file.ref) : null,
     params: match.values.params || match.values.parameters || {},
+    // Request text (comment/telegram) with control tokens removed; null for
+    // triggers that carry no free text.
+    text: match.values.text ?? null,
+    actions,
+    repo: ctx.repo ?? null,
+    issue_number: ctx.issue_number ?? null,
   };
+}
+
+// Executes the declarative part of an action an agent emitted at runtime:
+// validates `params` against the action's declared parameters, resolves the
+// `with` templates and checks the result against the *target* agent's manual
+// trigger. Returns { kind: 'dispatch_agent', agent, parameters }; throws on
+// anything undeclared or mistyped. Only dispatch_agent is executable today.
+function resolveAction(spec, name, match, actionName, params = {}) {
+  const agent = spec.agents[name];
+  const action = (agent.actions || []).find(a => a.name === actionName);
+  if (!action) throw new Error(`agent '${name}' declares no action '${actionName}'`);
+  const err = checkTyped(action.parameters || {}, params);
+  if (err) throw new Error(`action '${actionName}': ${err}`);
+  const kind = ACTION_KINDS.find(k => k in action);
+  if (kind !== 'dispatch_agent') throw new Error(`action '${actionName}': '${kind}' actions are not executable yet`);
+  const ctx = triggerContext(match.kind, agent.trigger[match.kind] || {}, match.values);
+  const resolved = resolveAgent(spec, name, match);
+  const cfg = action.dispatch_agent;
+  const parameters = {};
+  for (const [k, v] of Object.entries(cfg.with || {})) {
+    let out = v;
+    if (k === 'repo') {
+      out = resolveRepoRef(spec, ctx, v);
+      if (!accessAllows(resolved, out)) throw new Error(`action '${actionName}': repo '${out}' is not in the agent's access`);
+    } else if (isVar(v)) {
+      // A bare `$var` keeps its type (an integer action param stays a number).
+      const n = v.slice(1);
+      out = n in params ? params[n] : lookup(ctx, n).value;
+    } else if (typeof v === 'string') {
+      out = interpolate(v, ctx, params);
+    }
+    parameters[k] = out;
+  }
+  const target = spec.agents[cfg.agent];
+  const targetErr = checkTyped((target.trigger.manual || {}).parameters || {}, parameters);
+  if (targetErr) throw new Error(`action '${actionName}' -> '${cfg.agent}': ${targetErr}`);
+  return { kind, agent: cfg.agent, parameters };
 }
 
 // Is `repo` (and optionally branch/path) reachable under a resolved access list?
@@ -657,6 +821,89 @@ function explain(spec, event) {
   }
 }
 
+// Normalizes a GitHub webhook delivery (what the worker receives, and what it
+// forwards verbatim to dispatcher.yml) into a trigger event, or null when the
+// event type carries no agent trigger. Shared by the worker and
+// scripts/resolve-agent.js so both sides route identically.
+function eventFromWebhook(spec, eventType, payload) {
+  const repo = payload.repository?.full_name || '';
+  if (eventType === 'push') {
+    const ref = payload.ref || '';
+    if (!ref.startsWith('refs/heads/')) return null;
+    const sha = payload.after || '';
+    const paths = new Set();
+    for (const c of payload.commits || []) {
+      for (const k of ['added', 'modified', 'removed']) for (const p of c[k] || []) paths.add(p);
+    }
+    return {
+      kind: 'commit',
+      repo,
+      author: payload.sender?.login || '',
+      branch: ref.slice('refs/heads/'.length),
+      sha,
+      deleted: Boolean(payload.deleted) || !sha || /^0+$/.test(sha),
+      message: payload.head_commit?.message || '',
+      paths: [...paths],
+    };
+  }
+  let on;
+  let author;
+  let body;
+  let issue_number;
+  let thread_author;
+  let comment_id;
+  if (eventType === 'issue_comment') {
+    on = payload.issue?.pull_request ? 'pr' : 'issue';
+    author = payload.comment?.user?.login;
+    body = payload.comment?.body;
+    issue_number = payload.issue?.number;
+    thread_author = payload.issue?.user?.login;
+  } else if (eventType === 'pull_request_review') {
+    on = 'pr';
+    author = payload.review?.user?.login;
+    body = payload.review?.body;
+    issue_number = payload.pull_request?.number;
+    thread_author = payload.pull_request?.user?.login;
+  } else if (eventType === 'pull_request_review_comment') {
+    on = 'review_thread';
+    author = payload.comment?.user?.login;
+    body = payload.comment?.body;
+    issue_number = payload.pull_request?.number;
+    thread_author = payload.pull_request?.user?.login;
+    comment_id = payload.comment?.id;
+  } else {
+    return null;
+  }
+  author = author || payload.sender?.login || '';
+  const bot = lc(botLogin(spec));
+  // A reply on a thread the bot itself opened is an implicit request — unless
+  // the bot wrote it (or every status update would re-trigger a dispatch).
+  const implicit = Boolean(thread_author) && lc(thread_author) === bot && lc(author) !== bot;
+  return {
+    kind: 'comment',
+    repo,
+    author,
+    on,
+    issue_number: issue_number ?? null,
+    body: typeof body === 'string' ? body : '',
+    thread_author: thread_author || '',
+    implicit,
+    ...(comment_id !== undefined ? { comment_id } : {}),
+  };
+}
+
+// Normalizes a Telegram message (Bot API `message` object, or the worker's
+// forwarded client_payload) into a trigger event.
+function eventFromTelegram(message) {
+  return {
+    kind: 'telegram',
+    chat_id: message.chat?.id ?? message.chat_id ?? null,
+    message_id: message.message_id ?? null,
+    body: message.text || message.caption || '',
+  };
+}
+
 module.exports = {
-  loadSpec, matchAgent, route, resolveAgent, explain, accessAllows, branchPattern, parseDuration,
+  loadSpecObject, matchAgent, route, resolveAgent, resolveAction, explain, accessAllows, branchPattern,
+  parseDuration, eventFromWebhook, eventFromTelegram, botLogin, ALL_REPOS,
 };

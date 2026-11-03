@@ -1,0 +1,5 @@
+# agentic.yaml is the security boundary (who triggers which agent, what each
+# token may touch, which prompt runs): every change needs an owner review.
+/agentic.yaml @TheDeepestSpace
+/scripts/lib/agentic.js @TheDeepestSpace
+/scripts/lib/agentic-yaml.js @TheDeepestSpace

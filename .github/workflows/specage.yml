@@ -1,7 +1,13 @@
-name: specage dispatch
+# Runs agentic.yaml agents with a `commit` trigger (the specage planner and
+# reviewer): the worker matched a push against the file and filed an
+# `agent_commit` repository_dispatch naming the agent and the push facts.
+# resolve-agent.js re-routes that event through the same file (and refuses to
+# run if it disagrees), and the agent works in the first repo of its access
+# list (the project named by the branch capture). No issue/PR is attached.
+name: agent run (commit trigger)
 on:
   repository_dispatch:
-    types: [specage_push]
+    types: [agent_commit]
 
 permissions:
   contents: read
@@ -11,11 +17,20 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.check.outputs.image }}
+      agent: ${{ steps.parse.outputs.agent }}
+      # The pushed-to repo (the trigger), and the repo the agent works in.
       target_repo: ${{ steps.parse.outputs.target_repo }}
-      clean_prompt: ${{ steps.parse.outputs.clean_prompt }}
+      workspace_repo: ${{ steps.parse.outputs.workspace_repo }}
       installation_id: ${{ steps.parse.outputs.installation_id }}
       backend: ${{ steps.parse.outputs.backend }}
       model: ${{ steps.parse.outputs.model }}
+      effort: ${{ steps.parse.outputs.effort }}
+      timeout_minutes: ${{ steps.parse.outputs.timeout_minutes }}
+      access: ${{ steps.parse.outputs.access }}
+      prompt_repo: ${{ steps.parse.outputs.prompt_repo }}
+      prompt_ref: ${{ steps.parse.outputs.prompt_ref }}
+      prompt_path: ${{ steps.parse.outputs.prompt_path }}
+      actions_count: ${{ steps.parse.outputs.actions_count }}
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -23,23 +38,29 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Parse trigger and extract target repo / params
+      - name: Install script dependencies
+        run: npm ci --omit=dev --include=prod --no-audit --no-fund
+
+      - name: Resolve agent from agentic.yaml
         id: parse
-        run: node scripts/parse-specage-trigger.js
+        run: node scripts/resolve-agent.js
         env:
           CLEAN_PROMPT_FILE: clean_prompt.txt
+          AGENT_FILE: agent.json
 
-      # Carries clean_prompt across to the `handle` job as a file rather than a
-      # step `env:` key there (issue #226) — a step-level `env:` mapping
-      # referencing this content gets auto-echoed by the Actions runner as
-      # plaintext before the step's script ever runs. needs.*.outputs can't
-      # reach `handle` any other way since it's a separate job on a separate
-      # runner/container.
-      - name: Upload clean prompt for handle job
+      # Carries the request text and the resolved agent across to the `handle`
+      # job as files rather than step `env:` keys there (issue #226) — a
+      # step-level `env:` mapping referencing this content gets auto-echoed by
+      # the Actions runner as plaintext before the step's script ever runs.
+      # needs.*.outputs can't reach `handle` any other way since it's a
+      # separate job on a separate runner/container.
+      - name: Upload request text and resolved agent for handle job
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: clean-prompt-${{ github.run_id }}
-          path: clean_prompt.txt
+          path: |
+            clean_prompt.txt
+            agent.json
           retention-days: 1
 
       - name: Mint temporary token for image check
@@ -49,13 +70,14 @@ jobs:
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           INSTALLATION_ID: ${{ steps.parse.outputs.installation_id }}
-          TARGET_REPO: ${{ steps.parse.outputs.target_repo }}
+          TARGET_REPO: ${{ steps.parse.outputs.workspace_repo }}
+          ACCESS: ${{ steps.parse.outputs.access }}
 
       - name: Check for repo-specific devcontainer image on GHCR
         id: check
         env:
           GH_TOKEN: ${{ steps.temp_token.outputs.token }}
-          REPO_NAME: ${{ steps.parse.outputs.target_repo }}
+          REPO_NAME: ${{ steps.parse.outputs.workspace_repo }}
         run: |
           FALLBACK_IMAGE="ghcr.io/thedeepestspace/the-intern-dev:latest"
           if [ -z "$REPO_NAME" ]; then
@@ -127,7 +149,8 @@ jobs:
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           INSTALLATION_ID: ${{ needs.detect-image.outputs.installation_id }}
-          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          TARGET_REPO: ${{ needs.detect-image.outputs.workspace_repo }}
+          ACCESS: ${{ needs.detect-image.outputs.access }}
 
       - name: Set up Docker Buildx
         if: steps.fallback_check.outputs.is_fallback != 'true'
@@ -152,7 +175,7 @@ jobs:
         id: overlay_meta
         if: steps.fallback_check.outputs.is_fallback != 'true'
         env:
-          REPO_NAME: ${{ needs.detect-image.outputs.target_repo }}
+          REPO_NAME: ${{ needs.detect-image.outputs.workspace_repo }}
           BASE_IMAGE: ${{ needs.detect-image.outputs.image }}
         run: |
           REPO_SLUG="${REPO_NAME##*/}"
@@ -220,16 +243,18 @@ jobs:
     # DATA_REPO_TOKEN secret (issue #124), not this job's own GITHUB_TOKEN.
     permissions:
       contents: read
-    # Per-project-repo serialization (queue: max) keeps two specage pushes for the
-    # same project from racing on checkout/push. No issue is involved. codex-backend runs additionally need
+    # Per-workspace-repo serialization (queue: max) keeps two commit-triggered
+    # runs for the same project from racing on checkout/push. No issue is involved. codex-backend runs additionally need
     # global serialization: codex proactively rotates its own refresh token in place,
     # and rotated refresh tokens are typically single-use, so two overlapping
     # codex-backend runs restoring/persisting CODEX_AUTH_JSON at once would race and
     # strand each other on a stale token.
     concurrency:
-      group: ${{ needs.detect-image.outputs.backend == 'codex' && 'the-intern-codex-auth' || format('specage-{0}', needs.detect-image.outputs.target_repo) }}
+      group: ${{ needs.detect-image.outputs.backend == 'codex' && 'the-intern-codex-auth' || format('commit-{0}', needs.detect-image.outputs.workspace_repo) }}
       cancel-in-progress: false
       queue: max
+    # The agent's `timeout` from agentic.yaml (defaults.timeout otherwise).
+    timeout-minutes: ${{ fromJSON(needs.detect-image.outputs.timeout_minutes) }}
     container:
       image: ${{ needs.ensure-agent-overlay.outputs.image }}
       options: --user root
@@ -247,15 +272,17 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # Retrieves the file the detect-image job uploaded above instead of
-      # consuming needs.detect-image.outputs.clean_prompt via a step `env:`
-      # key below (issue #226) — see that job's upload step for why.
-      - name: Download clean prompt from detect-image job
-        if: needs.detect-image.outputs.target_repo != ''
+      # Retrieves the files the detect-image job uploaded above instead of
+      # consuming needs.detect-image.outputs.* via a step `env:` key below
+      # (issue #226) — see that job's upload step for why.
+      - name: Download request text and resolved agent from detect-image job
+        if: needs.detect-image.outputs.workspace_repo != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: clean-prompt-${{ github.run_id }}
 
+      # Scoped to exactly the agent's `access` list from agentic.yaml (ACCESS):
+      # e.g. the project repo read/write plus the data repo read-only.
       - name: Mint installation token
         id: token
         run: |
@@ -265,16 +292,40 @@ jobs:
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           INSTALLATION_ID: ${{ needs.detect-image.outputs.installation_id }}
-          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
-          # The agent also reads/pushes the spec in specage-data (keep in sync with
-          # worker SPECAGE_DATA_REPOS).
-          EXTRA_REPOS: TheDeepestSpace/specage-data
+          TARGET_REPO: ${{ needs.detect-image.outputs.workspace_repo }}
+          ACCESS: ${{ needs.detect-image.outputs.access }}
 
-      - name: Checkout target repository
-        if: needs.detect-image.outputs.target_repo != ''
+      # See dispatcher.yml: the agent's `prompt_file` is fetched with its own
+      # read-only token (pinned ref or default branch; sha logged).
+      - name: Mint read-only token for the prompt file repo
+        id: prompt_token
+        if: needs.detect-image.outputs.prompt_repo != ''
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          node scripts/mint-installation-token.js
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          ACCESS: '[{"repo":"${{ needs.detect-image.outputs.prompt_repo }}","scope":"read"}]'
+          PERMISSIONS: '{"contents":"read","metadata":"read"}'
+
+      - name: Fetch prompt file
+        if: needs.detect-image.outputs.prompt_repo != ''
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          node scripts/fetch-prompt-file.js
+        env:
+          GH_TOKEN: ${{ steps.prompt_token.outputs.token }}
+          PROMPT_REPO: ${{ needs.detect-image.outputs.prompt_repo }}
+          PROMPT_REF: ${{ needs.detect-image.outputs.prompt_ref }}
+          PROMPT_PATH: ${{ needs.detect-image.outputs.prompt_path }}
+          OUT_FILE: prompt_file.txt
+
+      - name: Checkout workspace repository
+        if: needs.detect-image.outputs.workspace_repo != ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: ${{ needs.detect-image.outputs.target_repo }}
+          repository: ${{ needs.detect-image.outputs.workspace_repo }}
           token: ${{ steps.token.outputs.token }}
           path: target
 
@@ -289,7 +340,7 @@ jobs:
       # the devcontainer postStartCommand step below (issue #207) — without either
       # step duplicating a slightly-different copy of this logic.
       - name: Ensure dev user and workspace ownership
-        if: needs.detect-image.outputs.target_repo != ''
+        if: needs.detect-image.outputs.workspace_repo != ''
         working-directory: target
         run: |
           exec >> "$LOG_FILE" 2>&1
@@ -318,7 +369,7 @@ jobs:
       # step killed by its own timeout-minutes can't be trusted to exit cleanly on
       # its own.
       - name: Run devcontainer postStartCommand
-        if: needs.detect-image.outputs.target_repo != ''
+        if: needs.detect-image.outputs.workspace_repo != ''
         working-directory: target
         timeout-minutes: 10
         continue-on-error: true
@@ -347,7 +398,7 @@ jobs:
       # "Run agent" (which then fails cleanly on missing credentials) instead of
       # aborting silently and skipping the failure-notification flow below.
       - name: Restore Codex auth.json from secret
-        if: needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.backend == 'codex'
+        if: needs.detect-image.outputs.workspace_repo != '' && needs.detect-image.outputs.backend == 'codex'
         run: |
           exec >> "$LOG_FILE" 2>&1
           node scripts/rotate-codex-auth.js restore || echo "::warning::Codex auth.json restore failed; codex exec will fail without valid credentials"
@@ -358,27 +409,31 @@ jobs:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
 
       - name: Run agent (fresh session per trigger, as non-root user)
-        if: needs.detect-image.outputs.target_repo != ''
+        if: needs.detect-image.outputs.workspace_repo != ''
         working-directory: target
         env:
+          AGENT: ${{ needs.detect-image.outputs.agent }}
           BACKEND: ${{ needs.detect-image.outputs.backend }}
           MODEL: ${{ needs.detect-image.outputs.model }}
+          # Resolved from agentic.yaml; not yet wired into the CLI invocations
+          # below (reasoning effort stays at the backends' fixed defaults).
+          EFFORT: ${{ needs.detect-image.outputs.effort }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ needs.detect-image.outputs.backend != 'codex' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
           # Let the background token refresher below (issue #145) re-mint with
-          # the same scoping the initial "Mint installation token" step above
-          # used, once the token it minted expires past its fixed 1hr cap.
+          # the same ACCESS scoping the initial "Mint installation token" step
+          # above used, once the token it minted expires past its fixed 1hr cap.
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           INSTALLATION_ID: ${{ needs.detect-image.outputs.installation_id }}
-          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
-          # Keeps the background refresher's re-mint scoped like the initial mint.
-          EXTRA_REPOS: TheDeepestSpace/specage-data
+          TARGET_REPO: ${{ needs.detect-image.outputs.workspace_repo }}
+          ACCESS: ${{ needs.detect-image.outputs.access }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
-          RETRY_KEY: specage:${{ needs.detect-image.outputs.target_repo }}
+          RETRY_KEY: commit:${{ needs.detect-image.outputs.agent }}:${{ needs.detect-image.outputs.workspace_repo }}
           RETRY_SOURCE: specage
+          AGENT_ACTIONS_FILE: /tmp/agent-actions.jsonl
           DISPATCH_REF: ${{ github.ref_name }}
           MAX_RETRIES: 3
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -388,29 +443,20 @@ jobs:
           DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
         run: |
           exec >> "$LOG_FILE" 2>&1
-          export COMMENT_BODY="$(cat ../clean_prompt.txt 2>/dev/null || true)"
-          export STYLE_GUIDE="$(cat ../instructions/shared-style.md 2>/dev/null || true)"
           export TARGET_DIR="$(pwd)"
 
-          node -e '
-            const fs = require("fs");
-            const repo = process.env.TARGET_REPO || "";
-            const comment = process.env.COMMENT_BODY || "";
-            const style = process.env.STYLE_GUIDE || "";
-
-            let prompt = `You are @the-intern-bot working on repository ${repo}. No issue or PR is attached to this run; create an issue yourself if you decide one is needed.\nYou have access to the GitHub CLI (\x27gh\x27) and full git tools. Use \x27gh\x27 to post comments, inspect code, run tests, or open PRs as needed.\nThe data repo TheDeepestSpace/specage-data is also accessible with your token; the project spec lives on its specages/<project>/spec branch.\n\nThis is a headless, single-shot session: your final message is never shown to anyone — only a \x27gh\x27 comment, commit, or other repo action reaches a human. Post a comment when there\x27s something worth telling a human (an answer, a landed change, a blocker); if the request is a question or otherwise doesn\x27t land a PR/issue that already carries the answer, don\x27t let it go unanswered. But don\x27t post just to confirm receipt, and if a threaded reply already covers the response, don\x27t also post a separate top-level comment restating it.\n\n`;
-            if (style) {
-              prompt += `${style}\n\n`;
-            }
-            prompt += `New request:\n${comment}`;
-            fs.writeFileSync("/tmp/prompt.txt", prompt);
-            // Raw MODEL value, written here (trusted root context, before
-            // run_as_dev.sh is generated) so the generated script can read it
-            // into a shell variable rather than the value ever being
-            // interpolated directly into a command string — same reasoning as
-            // /tmp/prompt.txt above.
-            fs.writeFileSync("/tmp/model.txt", process.env.MODEL || "");
-          '
+          # Prompt = the fetched prompt_file (+ snippets) or the inline prompt
+          # from agentic.yaml, then the runtime-assembled parts (access list,
+          # declared actions, shared-style.md) and "New request:" + the facts
+          # of the push (repo, branch, commit, message). See assemble-prompt.js.
+          rm -f "$AGENT_ACTIONS_FILE"
+          AGENT_FILE=../agent.json \
+          CLEAN_PROMPT_FILE=../clean_prompt.txt \
+          PROMPT_FILE_TEXT=../prompt_file.txt \
+          STYLE_FILE=../instructions/shared-style.md \
+          SCRIPTS_DIR="$GITHUB_WORKSPACE/scripts" \
+          OUT_FILE=/tmp/prompt.txt MODEL_OUT_FILE=/tmp/model.txt \
+            node "$GITHUB_WORKSPACE/scripts/assemble-prompt.js"
 
           # Extraction logic written to its own file (not inlined via jq, which isn't guaranteed to
           # be present in every target image) so result.json parsing has no external dependency.
@@ -472,7 +518,7 @@ jobs:
             const backend = process.env.BACKEND === "codex" ? "codex" : "claude";
             const agentInfraDir = path.dirname(process.env.TARGET_DIR || "");
 
-            // model= is free text from the dispatch text (parse-specage-trigger.js).
+            // model= comes from agentic.yaml (resolve-agent.js); still allowlist-checked.
             // buildModelFlag/buildCodexModelFlag allowlist-check it and hand back a flag
             // that references a shell variable rather than the raw value, so nothing gets
             // interpolated straight into the command string below even after the
@@ -534,6 +580,7 @@ jobs:
               "#!/bin/bash",
               "set -e",
               "export HOME=\"/home/dev\"",
+              "export AGENT_ACTIONS_FILE=\"" + (process.env.AGENT_ACTIONS_FILE || "/tmp/agent-actions.jsonl") + "\"",
               "cd \"$TARGET_DIR\"",
               "git config --global --add safe.directory \"$TARGET_DIR\"",
               "git config user.name \"the-intern-bot[bot]\"",
@@ -602,6 +649,22 @@ jobs:
           # run succeeded.
           RESULT_FILE=/tmp/result.json node "$GITHUB_WORKSPACE/scripts/handle-agent-outcome.js"
 
+      # Actions the agent queued with emit-action.js — e.g. the planner's
+      # "dispatch agent to implement issue" -> specage_implementer via a
+      # workflow_dispatch of dispatcher.yml. See dispatcher.yml's matching step.
+      - name: Execute agent actions
+        if: needs.detect-image.outputs.workspace_repo != '' && needs.detect-image.outputs.actions_count != '0'
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          node scripts/execute-actions.js
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          AGENT_FILE: agent.json
+          AGENT_ACTIONS_FILE: /tmp/agent-actions.jsonl
+          DISPATCH_REF: ${{ github.ref_name }}
+          WORKFLOW_FILE: dispatcher.yml
+
       # Runs even if the step above failed: OpenAI's CI/CD guidance for this flow is
       # to write back whatever codex left on disk regardless of run outcome, since a
       # refresh can happen before a mid-run failure and a rotated refresh token is
@@ -615,7 +678,7 @@ jobs:
       # via libsodium (GitHub's documented approach for the secrets API) so the
       # refreshed token is sealed before it ever leaves the runner.
       - name: Persist refreshed Codex auth.json to secret
-        if: always() && needs.detect-image.outputs.target_repo != '' && needs.detect-image.outputs.backend == 'codex'
+        if: always() && needs.detect-image.outputs.workspace_repo != '' && needs.detect-image.outputs.backend == 'codex'
         run: |
           exec >> "$LOG_FILE" 2>&1
           node scripts/rotate-codex-auth.js persist
@@ -638,7 +701,7 @@ jobs:
           exec >> "$LOG_FILE" 2>&1
           node "$GITHUB_WORKSPACE/scripts/manage-run-log.js"
         env:
-          RUN_LOG_PREFIX: specage/${{ needs.detect-image.outputs.target_repo }}
+          RUN_LOG_PREFIX: commit/${{ needs.detect-image.outputs.agent }}/${{ needs.detect-image.outputs.workspace_repo }}
           # Lets manage-run-log.js authenticate to the-intern-data (issue
           # #124), same pattern as manage-summaries.js/manage-workspace-backup.js.
           DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
@@ -659,9 +722,9 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
           REPO: ${{ github.repository }}
-          WORKFLOW_NAME: specage dispatch
+          WORKFLOW_NAME: agent run (commit trigger)
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TARGET_REPO: ${{ needs.detect-image.outputs.target_repo }}
+          TARGET_REPO: ${{ needs.detect-image.outputs.workspace_repo }}
           FAILED_JOBS: >-
             ${{ needs.detect-image.result == 'failure' && 'detect-image' || '' }}
             ${{ needs.ensure-agent-overlay.result == 'failure' && 'ensure-agent-overlay' || '' }}

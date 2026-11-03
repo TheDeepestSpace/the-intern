@@ -1,18 +1,32 @@
 const fs = require('fs');
 
-function parseTrigger() {
-  const eventName = process.env.GITHUB_EVENT_NAME;
-  const rawPayloadPath = process.env.GITHUB_EVENT_PATH;
-  
+// Extracts the *shape* of a dispatcher.yml trigger — which repo/issue it is
+// about, who wrote it, the raw text — from the triggering GitHub Actions event
+// (a repository_dispatch forwarded by the worker, or a workflow_dispatch).
+// Which agent runs, and the `key=value` control-token grammar, are decided by
+// agentic.yaml via scripts/resolve-agent.js, which is the only caller.
+//
+// For the system-synthesized dispatches (ci_failure, coderabbit_review,
+// merge_conflict) the request text is built here: the worker never forwards
+// third-party review bodies (tier-2 injection-safe), so the instruction is
+// synthesized from structural fields only and `synthesized` is set.
+function parseTrigger(env = process.env) {
+  const eventName = env.GITHUB_EVENT_NAME;
+  const rawPayloadPath = env.GITHUB_EVENT_PATH;
+
   let targetRepo = '';
   let issueNumber = '';
   let commentBody = '';
   let installationId = '';
   let eventType = '';
   let commentId = '';
+  let author = '';
+  let threadAuthor = '';
+  let on = '';
+  let synthesized = false;
+  let payload = {};
 
   if (eventName === 'repository_dispatch') {
-    let payload = {};
     if (rawPayloadPath && fs.existsSync(rawPayloadPath)) {
       const raw = JSON.parse(fs.readFileSync(rawPayloadPath, 'utf8'));
       payload = raw.client_payload?.raw || raw.client_payload || raw;
@@ -26,27 +40,37 @@ function parseTrigger() {
       targetRepo = payload.repository?.full_name || '';
       issueNumber = String(payload.issue.number || '');
       commentBody = payload.comment.body || '';
+      author = payload.comment.user?.login || '';
+      threadAuthor = payload.issue.user?.login || '';
+      on = payload.issue.pull_request ? 'pr' : 'issue';
     } else if (payload.pull_request && payload.review) {
       // pull_request_review
       targetRepo = payload.repository?.full_name || '';
       issueNumber = String(payload.pull_request.number || '');
       commentBody = payload.review.body || '';
+      author = payload.review.user?.login || '';
+      threadAuthor = payload.pull_request.user?.login || '';
+      on = 'pr';
     } else if (payload.pull_request && payload.comment) {
       // pull_request_review_comment
       targetRepo = payload.repository?.full_name || '';
       issueNumber = String(payload.pull_request.number || '');
       commentBody = payload.comment.body || '';
       commentId = String(payload.comment?.id || '');
+      author = payload.comment.user?.login || '';
+      threadAuthor = payload.pull_request.user?.login || '';
+      on = 'review_thread';
     } else if (payload.pull_request && payload.check_suite) {
       // ci_failure: synthesized instruction, no @the-intern-bot mention needed
-      // since this bypasses the mention gate entirely (the stripping regex
-      // below is a no-op on text that doesn't contain the mention).
+      // since this bypasses the mention gate entirely.
       targetRepo = payload.repository?.full_name || '';
       issueNumber = String(payload.pull_request.number || '');
       const headSha = payload.check_suite.head_sha || '';
       commentBody = headSha
         ? `CI is failing on this PR (conclusion: ${payload.check_suite.conclusion}). Check suite: ${payload.check_suite.html_url}. This check suite ran against commit \`${headSha}\`. Before investigating, compare that commit to the PR's current head (e.g. \`gh pr view ${issueNumber} --json headRefOid\`). If the PR's head has already moved past \`${headSha}\`, this failure is stale - a newer commit supersedes it, so stop immediately without commenting or pushing anything. Otherwise, investigate the failing checks and push a fix.`
         : `CI is failing on this PR (conclusion: ${payload.check_suite.conclusion}). Check suite: ${payload.check_suite.html_url}. This check suite's failing commit could not be determined, so staleness can't be safely verified - stop immediately without investigating, commenting, or pushing anything.`;
+      on = 'pr';
+      synthesized = true;
     } else if (payload.pull_request && payload.coderabbit_review) {
       // coderabbit_review: synthesized instruction, same shape as ci_failure
       // above. The worker never reads/forwards the review body itself (tier-2
@@ -55,6 +79,8 @@ function parseTrigger() {
       targetRepo = payload.repository?.full_name || '';
       issueNumber = String(payload.pull_request.number || '');
       commentBody = `CodeRabbit posted a review on PR #${payload.pull_request.number} (${payload.coderabbit_review.html_url}). Read it and address any actionable feedback.`;
+      on = 'pr';
+      synthesized = true;
     } else if (payload.pull_request && payload.merge_conflict) {
       // merge_conflict: synthesized instruction, same shape as ci_failure/
       // coderabbit_review above. Fires when a push to the default branch left
@@ -62,117 +88,36 @@ function parseTrigger() {
       targetRepo = payload.repository?.full_name || '';
       issueNumber = String(payload.pull_request.number || '');
       commentBody = `A push to ${payload.merge_conflict.base_ref || 'the default branch'} left this PR unmergeable (mergeable_state: ${payload.merge_conflict.mergeable_state}). Merge or rebase the latest default branch into this PR's branch, resolve the conflicts, and push the fix.`;
+      on = 'pr';
+      synthesized = true;
     } else {
       // Fallback extraction
-      targetRepo = payload.repository?.full_name || process.env.INPUT_TARGET_REPO || '';
-      issueNumber = String(payload.issue?.number || payload.pull_request?.number || process.env.INPUT_PR_NUMBER || '');
-      commentBody = payload.comment?.body || payload.review?.body || process.env.INPUT_COMMENT_BODY || '';
+      targetRepo = payload.repository?.full_name || env.INPUT_TARGET_REPO || '';
+      issueNumber = String(payload.issue?.number || payload.pull_request?.number || env.INPUT_PR_NUMBER || '');
+      commentBody = payload.comment?.body || payload.review?.body || env.INPUT_COMMENT_BODY || '';
+      author = payload.comment?.user?.login || payload.review?.user?.login || payload.sender?.login || '';
+      on = payload.pull_request ? 'pr' : 'issue';
     }
   } else if (eventName === 'workflow_dispatch') {
-    targetRepo = process.env.INPUT_TARGET_REPO || '';
-    issueNumber = String(process.env.INPUT_PR_NUMBER || '');
-    commentBody = process.env.INPUT_COMMENT_BODY || '';
-    installationId = process.env.INPUT_INSTALLATION_ID || '';
+    targetRepo = env.INPUT_TARGET_REPO || '';
+    issueNumber = String(env.INPUT_PR_NUMBER || '');
+    commentBody = env.INPUT_COMMENT_BODY || '';
+    installationId = env.INPUT_INSTALLATION_ID || '';
+    on = 'issue';
   }
 
-  // Parse backend/model/effort parameters from commentBody if present
-  let backend = 'claude';
-  let backendExplicit = false;
-  let model = 'default';
-  let effort = 'default';
-  // specage=true (issue #263) opts the dispatch into specage-data access: the
-  // handle job widens the agent token to SPECAGE_DATA_REPOS and tells the agent
-  // where the spec lives. Anything other than a literal `true` stays false.
-  let specage = false;
-
-  // Remove @the-intern-bot and optional backend keywords (claude/codex/agy) from cleanComment
-  let cleanComment = commentBody
-    .replace(/@the-intern-bot\s*(claude|codex|agy)?\s*/gi, '')
-    .trim();
-
-  // Extract key=value options like model=claude-3-7-sonnet effort=high backend=claude.
-  // These only count as control tokens when they form a leading run right after the
-  // mention - matching anywhere in the string would also strip incidental key=value
-  // text later in the prompt (e.g. a quoted shell flag like `-c model="sol"`).
-  const leadingTokens = cleanComment.match(/^(?:(?:model|effort|backend|specage)=\S+\s*)+/i);
-
-  if (leadingTokens) {
-    const tokenRun = leadingTokens[0];
-
-    const matchModel = tokenRun.match(/\bmodel=(\S+)/i);
-    if (matchModel) model = matchModel[1];
-
-    const matchEffort = tokenRun.match(/\beffort=(\S+)/i);
-    if (matchEffort) effort = matchEffort[1];
-
-    const matchBackend = tokenRun.match(/\bbackend=(\S+)/i);
-    if (matchBackend) {
-      backend = matchBackend[1];
-      backendExplicit = true;
-    }
-
-    const matchSpecage = tokenRun.match(/\bspecage=(\S+)/i);
-    if (matchSpecage) specage = matchSpecage[1].toLowerCase() === 'true';
-
-    cleanComment = cleanComment.slice(tokenRun.length).trim();
-  }
-
-  cleanComment = cleanComment.replace(/\s+/g, ' ').trim();
-
-  if (!cleanComment) {
-    cleanComment = 'Please inspect the context and assist with this issue or pull request.';
-  }
-
-  const result = {
+  return {
     target_repo: targetRepo,
     issue_number: issueNumber,
     comment_body: commentBody,
-    clean_prompt: cleanComment,
     installation_id: installationId,
-    backend,
-    backend_explicit: backendExplicit,
-    model,
-    effort,
-    specage,
     event_type: eventType,
     comment_id: commentId,
+    author,
+    thread_author: threadAuthor,
+    on,
+    synthesized,
   };
-
-  // comment_body/clean_prompt are raw issue/PR comment content and must never
-  // be logged here: this step's stdout streams straight to the public Actions
-  // log (unlike the `handle`/`respond` jobs, which redirect into $LOG_FILE),
-  // so an unredacted dump would leak that content to anyone with read access
-  // to the run (issue #226 follow-up). ::add-mask:: isn't a substitute here —
-  // GitHub Actions can't mask a value containing newlines, and arbitrary
-  // comment text routinely does.
-  const { comment_body, clean_prompt, ...loggableResult } = result;
-  console.log('Parsed trigger:', JSON.stringify(loggableResult, null, 2));
-
-  // Written to a file rather than a step `env:` key (issue #226) — a step-level
-  // `env:` mapping referencing this content gets auto-echoed by the Actions
-  // runner as plaintext before the step's script ever runs, regardless of any
-  // stdout/stderr redirect the script itself does.
-  if (process.env.CLEAN_PROMPT_FILE) {
-    fs.writeFileSync(process.env.CLEAN_PROMPT_FILE, result.clean_prompt, 'utf8');
-  }
-
-  if (process.env.GITHUB_OUTPUT) {
-    for (const [k, v] of Object.entries(result)) {
-      // Escape newlines for GITHUB_OUTPUT multi-line values if needed
-      if (typeof v === 'string' && v.includes('\n')) {
-        const delimiter = `EOF_${Math.random().toString(36).substring(2, 10)}`;
-        fs.appendFileSync(process.env.GITHUB_OUTPUT, `${k}<<${delimiter}\n${v}\n${delimiter}\n`);
-      } else {
-        fs.appendFileSync(process.env.GITHUB_OUTPUT, `${k}=${v}\n`);
-      }
-    }
-  }
-
-  return result;
-}
-
-if (require.main === module) {
-  parseTrigger();
 }
 
 module.exports = { parseTrigger };
