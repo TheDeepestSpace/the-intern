@@ -3,4 +3,5 @@ node_modules/
 scratch/
 .summaries/
 worker/node_modules/
+worker/src/agentic.generated.js
 .wrangler/

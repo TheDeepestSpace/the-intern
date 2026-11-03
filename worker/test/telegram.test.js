@@ -120,6 +120,7 @@ describe('handleTelegram client_payload construction', () => {
 
     const payload = await dispatchedClientPayload(fetchSpy);
     expect(payload).toEqual({
+      agent: 'telegram',
       text: 'hello there',
       chat_id: 777,
       sender_id: 555,

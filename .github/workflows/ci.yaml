@@ -6,12 +6,14 @@ on:
     paths:
       - 'worker/**'
       - 'scripts/**'
+      - 'agentic.yaml'
       - 'package.json'
       - 'package-lock.json'
   pull_request:
     paths:
       - 'worker/**'
       - 'scripts/**'
+      - 'agentic.yaml'
       - 'package.json'
       - 'package-lock.json'
   schedule:
@@ -36,6 +38,12 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+
+      # Root deps (yaml) are needed to validate and bundle agentic.yaml into
+      # the worker (worker/package.json pretest -> scripts/bundle-agentic.js).
+      - name: Install root dependencies
+        working-directory: .
+        run: npm install
 
       - name: Install dependencies
         run: npm install
@@ -80,6 +88,9 @@ jobs:
 
       - name: Install dependencies
         run: npm install
+
+      - name: Validate agentic.yaml
+        run: node scripts/validate-agentic.js
 
       - name: Run tests
         run: npm test

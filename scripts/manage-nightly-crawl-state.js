@@ -63,6 +63,30 @@ async function readState() {
   return parseState(raw);
 }
 
+// An orphan checkout inherits the detached HEAD's index (the whole
+// the-intern tree, including .github/workflows, which the data-repo PAT may
+// not push). Start from an empty index and wipe the working files so the
+// state branch can only ever contain what we stage explicitly. Errors here
+// must propagate: a swallowed failure would leak the source tree.
+function resetToEmptyTree(dir) {
+  runGit(['read-tree', '--empty'], { cwd: dir });
+  for (const entry of fs.readdirSync(dir)) {
+    if (entry === '.git') continue;
+    fs.rmSync(path.join(dir, entry), { recursive: true, force: true });
+  }
+}
+
+function assertOnlyStateFileStaged(dir) {
+  // Full index, not the cached diff: files inherited from an existing branch
+  // tip are unchanged and would be invisible to a diff.
+  const tracked = runGit(['ls-files'], { cwd: dir })
+    .split('\n')
+    .filter(Boolean);
+  if (tracked.length !== 1 || tracked[0] !== FILE_NAME) {
+    throw new Error(`refusing to commit to ${BRANCH_NAME}: expected only ${FILE_NAME} in the tree, got [${tracked.join(', ')}]`);
+  }
+}
+
 // Fetches the branch tip, applies `mutate(state) -> { state, ...rest }`, and
 // pushes; retries on non-fast-forward since the plan and act jobs of one run
 // (and the next night's run, if a run overran) can race on this branch.
@@ -84,25 +108,27 @@ async function updateState(mutate) {
 
     let result;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      if (attempt > 1) {
-        runGit(['checkout', '--detach'], { ...gitOpts, allowFailure: true });
-        runGit(['branch', '-D', BRANCH_NAME], { ...gitOpts, allowFailure: true });
-      }
+      // Always drop any local ref first so a stale branch is never reused
+      // when the remote branch is absent.
+      runGit(['checkout', '--detach'], { ...gitOpts, allowFailure: true });
+      runGit(['branch', '-D', BRANCH_NAME], { ...gitOpts, allowFailure: true });
       try {
         await runWithRetryOnNotFound(remoteUrl, (url) => {
           remoteUrl = url;
           return runGit(['fetch', url, `${BRANCH_NAME}:${BRANCH_NAME}`], { ...gitOpts, stdio: ['pipe', 'pipe', 'pipe'] });
         });
-      } catch {
+      } catch (err) {
         // Branch may not exist yet (first-ever write); the orphan checkout
-        // below creates it.
+        // below creates it. Any other fetch failure must not fall through
+        // to a fresh orphan branch.
+        if (!/couldn't find remote ref/i.test(err.message)) throw err;
       }
 
       try {
         runGit(['checkout', BRANCH_NAME], { ...gitOpts, stdio: ['pipe', 'pipe', 'pipe'] });
       } catch {
         runGit(['checkout', '--orphan', BRANCH_NAME], gitOpts);
-        runGit(['rm', '-rf', '--ignore-unmatch', '.'], { ...gitOpts, allowFailure: true });
+        resetToEmptyTree(worktreeDir);
       }
 
       const raw = fs.existsSync(worktreeFile) ? fs.readFileSync(worktreeFile, 'utf8') : '';
@@ -115,6 +141,7 @@ async function updateState(mutate) {
 
       fs.writeFileSync(worktreeFile, `${JSON.stringify(nextState, null, 2)}\n`, 'utf8');
       runGit(['add', FILE_NAME], gitOpts);
+      assertOnlyStateFileStaged(worktreeDir);
       runGit(['commit', '-m', `nightly-crawl: update ${new Date().toISOString()}`], gitOpts);
 
       try {

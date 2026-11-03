@@ -1,6 +1,88 @@
 # the-intern
 Agentic infra
 
+## `agentic.yaml` — who triggers what, with which access
+
+`agentic.yaml` (repo root) is the single source of truth for every agent:
+its trigger, the repositories its token may touch, the prompt it runs,
+backend/model/effort, timeout, rate limit and the side-effect actions it may
+request. It is the security boundary: `.github/CODEOWNERS` requires an owner
+review for every change, CI validates it (`node scripts/validate-agentic.js`),
+and everything that dispatches an agent reads it — nothing is hardcoded
+elsewhere. Invalid or missing file = nothing runs (fail closed).
+
+```
+node scripts/validate-agentic.js                      # validate
+node scripts/validate-agentic.js --explain event.json # dry-run: which agent, access, prompt, params
+```
+
+### Triggers
+
+| Kind | Fires on | Runner |
+| --- | --- | --- |
+| `comment` | `@the-intern-bot …` on an issue, PR or inline review thread (`verb: '*'` = any mention). A reply on a thread the bot opened, a system-synthesized request (CI failure, CodeRabbit review, merge conflict) and a manual `workflow_dispatch` count as implicit mentions. | `dispatcher.yml` |
+| `commit` | A push to `repo` on a `branch` pattern (`@name` captures one segment) by a trusted `author` (also the loop guard). | `specage.yml` (`agent_commit` dispatch) |
+| `manual` | `workflow_dispatch` of `dispatcher.yml` with `agent` + `parameters` (JSON, typed) — what a `dispatch_agent` action fires. | `dispatcher.yml` |
+| `telegram` | A message in the admin chat. | `telegram-session.yml` |
+
+Params (`key=value`) are only recognised when declared: a leading run after
+the mention for comments (`@the-intern-bot codex model=x effort=high …`), or
+anywhere in the text for Telegram. Everything else stays request text.
+
+### Access and tokens
+
+`access.repos` lists aliases from `repos:`, `$trigger.…` fields that are
+trusted (the comment's repo, a branch capture, a typed manual parameter —
+never free text) or `'*'` (every repo the installation covers). Each run
+mints its installation token from exactly that list
+(`scripts/mint-installation-token.js` with `ACCESS`, re-minted on the same
+list by `scripts/refresh-gh-token.js`):
+
+- `scope: read/write` → the installation's permissions on those repos;
+- `scope: read` on every entry → `contents: read` (no pushes), with issues
+  and pull requests still writable so the agent can report back. GitHub
+  permissions are per token, so a list mixing scopes gets read/write on all
+  of it.
+- `when: $trigger.comment.param.<boolean>` grants an entry only when that
+  declared boolean param is true (how `specage=true` adds read access to
+  the specage data repo).
+- A branch capture used as a repo must be a declared alias (onboarding a
+  project = adding it to `repos:`); owners outside `repos:`/`allowed_owners`
+  are refused. Any unresolvable entry fails the run — never a partial scope.
+
+### Prompts
+
+`prompt:` (inline, `$repo`/`$issue_number`/`$trigger.…` interpolated) or
+`prompt_file: {repo, path, ref?}` (fetched at run time with a read-only token
+for that repo; `ref` pins it, otherwise the default branch is used; the
+resolved sha is logged). `prompt_append` adds shared `snippets`. The runtime
+parts (`scripts/assemble-prompt.js`) are appended after it: the token's
+access list, the workspace-restore note, the inline-review-thread reply rule,
+the specage block, the declared actions, `instructions/shared-style.md`, the
+prior-run summary, then `New request:` + the request text.
+
+### Actions
+
+An agent may only request what its `actions` declare. The agent runs
+`node scripts/emit-action.js "<name>" key=value …`, which queues a line;
+after the session, `scripts/execute-actions.js` validates each line against
+the declaration (name, parameter types, the target agent's manual
+parameters, repos inside the agent's access) and executes it with system
+credentials. Today `dispatch_agent` is executable (→ `workflow_dispatch` of
+`dispatcher.yml` with `agent` + `parameters`); a rejected action fails the
+step and notifies.
+
+### Deploying a change
+
+1. Edit `agentic.yaml`, get the CODEOWNERS review, merge.
+2. The worker is rebuilt by `deploy-worker.yml`: `scripts/bundle-agentic.js`
+   validates the file and bundles it (plus the dependency-free
+   `scripts/lib/agentic.js`) into `worker/src/agentic.generated.js`, which the
+   worker routes every webhook through. An invalid file stops the deploy (and
+   pings Telegram); the worker keeps serving the last valid bundle.
+3. Workflows read the file from the checkout on every run; nothing else to
+   deploy.
+
 ## Nightly crawl (`.github/workflows/nightly-crawl.yml`)
 
 Runs at 04:30 UTC (and on `workflow_dispatch`, with optional `repos` and

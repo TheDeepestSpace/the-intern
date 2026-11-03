@@ -6,11 +6,9 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 AGENT_INFRA_OWNER = "TheDeepestSpace"
 AGENT_INFRA_REPO = "the-intern"
-# Comma-separated owner/repo list of specage-data repos whose specages/<project>/spec
-# pushes trigger a dispatch. Empty/unset = specage dispatch disabled.
-# SPECAGE_DATA_REPOS = "owner/specage-data"
-# Only pushes by this sender trigger a specage dispatch (default specage-app[bot]).
-# SPECAGE_BOT_LOGIN = "specage-app[bot]"
+# Which pushes/comments/messages run which agent is decided by agentic.yaml at
+# the repo root, bundled into src/agentic.generated.js at deploy and test time
+# (scripts/bundle-agentic.js) — no per-agent vars here.
 
 [[kv_namespaces]]
 binding = "CI_FAILURE_DEDUP"

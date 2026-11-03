@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { MockAgent, setGlobalDispatcher, getGlobalDispatcher } from 'undici';
-import { getInstallationToken, mintAppJwt, getPrivateKey, parsePermissions } from '../mint-installation-token.js';
+import { getInstallationToken, mintAppJwt, getPrivateKey, parsePermissions, parseAccess, scopeFromAccess, READ_SCOPE_PERMISSIONS } from '../mint-installation-token.js';
 
 // A throwaway RSA key generated fresh per test run; only used to exercise the
 // signing code path, never a real credential.
@@ -305,6 +305,81 @@ describe('mint-installation-token', () => {
       expect(token).toBe('ghs_scopedtoken');
     });
 
+    it('scopes the request to exactly the ACCESS repos (deduped) with the installation permissions when any is read/write', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({
+          method: 'POST',
+          path: '/app/installations/999/access_tokens',
+          body: (body) => {
+            const parsed = JSON.parse(body);
+            return JSON.stringify(parsed.repositories) === JSON.stringify(['widgets', 'specage-data']) && parsed.permissions === undefined;
+          },
+        })
+        .reply(201, { token: 'ghs_access' });
+
+      const token = await getInstallationToken({
+        appId: '123',
+        privateKey: TEST_PRIVATE_KEY_PEM,
+        installationId: '999',
+        access: [
+          { repo: 'acme/widgets', scope: 'read/write' },
+          { repo: 'acme/specage-data', scope: 'read' },
+          { repo: 'acme/widgets', scope: 'read' },
+        ],
+      });
+
+      expect(token).toBe('ghs_access');
+    });
+
+    it('drops contents:write for an all-read ACCESS list', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({
+          method: 'POST',
+          path: '/app/installations/999/access_tokens',
+          body: (body) => {
+            const parsed = JSON.parse(body);
+            return JSON.stringify(parsed.repositories) === JSON.stringify(['app', 'specage-data']) && parsed.permissions.contents === 'read' && parsed.permissions.pull_requests === 'write';
+          },
+        })
+        .reply(201, { token: 'ghs_ro' });
+
+      const token = await getInstallationToken({
+        appId: '123',
+        privateKey: TEST_PRIVATE_KEY_PEM,
+        installationId: '999',
+        access: [{ repo: 'acme/app', scope: 'read' }, { repo: 'acme/specage-data', scope: 'read' }],
+      });
+      expect(token).toBe('ghs_ro');
+    });
+
+    it("resolves the installation from the first ACCESS repo when none is given, and mints unscoped for '*'", async () => {
+      const client = agent.get('https://api.github.com');
+      client.intercept({ method: 'GET', path: '/repos/acme/widgets/installation' }).reply(200, { id: 555 });
+      client
+        .intercept({ method: 'POST', path: '/app/installations/555/access_tokens', body: (body) => body === undefined || body === null })
+        .reply(201, { token: 'ghs_lookup' });
+      const token = await getInstallationToken({
+        appId: '123',
+        privateKey: TEST_PRIVATE_KEY_PEM,
+        access: [{ repo: 'acme/widgets', scope: 'read/write' }, { repo: '*', scope: 'read/write' }],
+      });
+      expect(token).toBe('ghs_lookup');
+    });
+
+    it('refuses to mint for an empty ACCESS list (default-deny) without calling GitHub', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      try {
+        await expect(
+          getInstallationToken({ appId: '123', privateKey: TEST_PRIVATE_KEY_PEM, installationId: '999', access: [] })
+        ).rejects.toThrow(/default-deny/);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('does not scope access-token request body to repositories when scopeToRepo is false, even if targetRepo is provided for lookup', async () => {
       const client = agent.get('https://api.github.com');
       client
@@ -349,5 +424,29 @@ describe('mint-installation-token', () => {
         expect(() => parsePermissions(raw)).toThrow(/Invalid PERMISSIONS/);
       }
     );
+  });
+});
+
+describe('scopeFromAccess / parseAccess', () => {
+  it('maps scopes to repositories + permissions', () => {
+    expect(scopeFromAccess([{ repo: 'acme/a', scope: 'read/write' }])).toEqual({ repositories: ['a'], permissions: undefined, owner: 'acme' });
+    expect(scopeFromAccess([{ repo: 'acme/a', scope: 'read' }])).toEqual({ repositories: ['a'], permissions: READ_SCOPE_PERMISSIONS, owner: 'acme' });
+    expect(scopeFromAccess([{ repo: 'acme/a', scope: 'read' }], { contents: 'read' }).permissions).toEqual({ contents: 'read' });
+    expect(scopeFromAccess([{ repo: '*', scope: 'read/write' }])).toEqual({ repositories: undefined, permissions: undefined, owner: null });
+  });
+
+  it('rejects empty, malformed and multi-owner lists', () => {
+    expect(() => scopeFromAccess([])).toThrow(/default-deny/);
+    expect(() => scopeFromAccess([{ repo: 'acme/a', scope: 'admin' }])).toThrow(/malformed/);
+    expect(() => scopeFromAccess([{ repo: 'acme/a', scope: 'read' }, { repo: 'other/b', scope: 'read' }])).toThrow(/several owners/);
+    expect(() => scopeFromAccess([{ repo: 'justaname', scope: 'read' }])).toThrow(/owner\/repo/);
+  });
+
+  it('parses the ACCESS env var', () => {
+    expect(parseAccess(undefined)).toBeUndefined();
+    expect(parseAccess('')).toBeUndefined();
+    expect(parseAccess('[{"repo":"a/b","scope":"read"}]')).toEqual([{ repo: 'a/b', scope: 'read' }]);
+    expect(() => parseAccess('{}')).toThrow(/array/);
+    expect(() => parseAccess('nope')).toThrow(/JSON/);
   });
 });
