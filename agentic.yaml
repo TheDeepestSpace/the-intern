@@ -57,15 +57,17 @@ agents:
   #   5. Heavy coding is delegated by @-mentioning the bot on an issue/PR, which
   #      fires the `default` agent above. Before finishing, convo.md is
   #      appended to and pushed back (runs are serialized: one shared branch).
-  # Unlike issue agents it is not scoped to one repo: it works across every
-  # repo the app is installed in (access name '*'; the runtime token is unscoped).
+  # Unlike issue agents it is not scoped to one repo: it works across all
+  # onboarded repos (the runtime token is unscoped).
   telegram:
     trigger:
       telegram:
         params: { backend: string }
     access:
       repos:
-        - { name: '*', scope: read/write }  # every repo the app is installed in
+        - { name: the_intern, scope: read/write }
+        - { name: specage, scope: read/write }
+        - { name: specage_data, scope: read }
     prompt_file: { repo: the_intern, path: instructions/telegram.md }
     prompt_append: [safety]
     backend: $trigger.telegram.param.backend | claude

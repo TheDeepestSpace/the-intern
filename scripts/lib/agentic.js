@@ -7,8 +7,6 @@ const YAML = require('yaml');
 
 const TRIGGER_KINDS = ['comment', 'commit', 'pull_request', 'issue', 'schedule', 'manual', 'telegram'];
 const SCOPES = ['read', 'read/write'];
-// Access name meaning every repo the GitHub App is installed in.
-const ALL_REPOS = '*';
 const ACTION_KINDS = ['dispatch_agent', 'dispatch_workflow', 'comment', 'label', 'open_issue'];
 const PARAM_TYPES = ['string', 'integer', 'boolean'];
 const COMMENT_ON = ['issue', 'pr', 'review_thread'];
@@ -143,7 +141,6 @@ function checkRepoRef(ref, spec, ctx, where, errors) {
     errors.push(`${where}: repo must be a non-empty string`);
     return;
   }
-  if (ref === ALL_REPOS) return;
   if (isVar(ref)) {
     const name = ref.slice(1);
     if (!trustedForAccess(name)) errors.push(`${where}: '${ref}' is not a trusted source for a repo`);
@@ -571,7 +568,6 @@ function resolveAgent(spec, name, match) {
     ...Object.values(spec.repos).map(r => lc(r.split('/')[0])),
   ]);
   const resolveRepo = (ref) => {
-    if (ref === ALL_REPOS) return ref;
     let full = ref;
     if (isVar(ref)) {
       const r = lookup(ctx, ref.slice(1));
@@ -621,7 +617,7 @@ function resolveAgent(spec, name, match) {
 // Is `repo` (and optionally branch/path) reachable under a resolved access list?
 function accessAllows(resolved, repo, need = 'read', { branch, path } = {}) {
   return resolved.access.some(a => {
-    if (a.repo !== ALL_REPOS && lc(a.repo) !== lc(repo)) return false;
+    if (lc(a.repo) !== lc(repo)) return false;
     if (need === 'write' && a.scope !== 'read/write') return false;
     if (branch && a.branches && !a.branches.some(g => globToRegExp(g).test(branch))) return false;
     if (path && a.paths && !a.paths.some(g => globToRegExp(g).test(path))) return false;
