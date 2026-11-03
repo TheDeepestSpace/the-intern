@@ -177,7 +177,7 @@ function validateTrigger(name, trigger, spec, errors) {
       unknownKeys(def, ['verb', 'allowed_authors', 'on', 'params', 'repo'], w, errors);
       strList('allowed_authors');
       repoRef('repo');
-      if (def.verb !== undefined && def.verb !== '*' && !/^[a-z][\w-]*$/i.test(def.verb)) errors.push(`${w}.verb: invalid`);
+      if (def.verb !== undefined && !/^[a-z][\w-]*$/i.test(def.verb)) errors.push(`${w}.verb: invalid`);
       if (def.on !== undefined && !(Array.isArray(def.on) && def.on.every(o => COMMENT_ON.includes(o)))) {
         errors.push(`${w}.on: must be a list of ${COMMENT_ON.join('|')}`);
       }
@@ -466,20 +466,11 @@ function matchAgent(spec, name, event) {
   if (kind === 'comment') {
     if (def.on && !def.on.includes(event.on)) return null;
     const verb = def.verb || name;
-    const esc = x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const bot = `@${esc(spec.bot)}(?:\\[bot\\])?`;
-    // verb '*' = catch-all: any mention (anywhere in the body), optionally
-    // followed by a backend keyword, like the pre-yaml mention gate.
-    const m = verb === '*'
-      ? new RegExp(`(?:^|\\s)${bot}(?![\\w-])(?:\\s+(?:(claude|codex|agy)\\b)?)?\\s*(.*)$`, 'is').exec(event.body || '')
-      : new RegExp(`^\\s*${bot}\\s+(${esc(verb)})\\b(.*)$`, 'is').exec(event.body || '');
+    const m = new RegExp(`^\\s*@${spec.bot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\[bot\\])?\\s+(${verb.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})\\b(.*)$`, 'is').exec(event.body || '');
     if (!m) return null;
     const declared = def.params || {};
     const params = {};
-    if (verb === '*' && m[1] && 'backend' in declared) params.backend = m[1].toLowerCase();
-    // Only a leading run of key=value tokens counts; later ones stay prompt text.
-    const lead = /^\s*(?:[a-z_]\w*=\S+\s*)*/i.exec(m[2])[0];
-    for (const [, k, v] of lead.matchAll(/(?:^|\s)([a-z_]\w*)=(\S+)/gi)) {
+    for (const [, k, v] of m[2].matchAll(/(?:^|\s)([a-z_]\w*)=(\S+)/gi)) {
       if (!(k in declared)) continue; // undeclared key=value stays prompt text
       if (declared[k] === 'integer' && !/^\d+$/.test(v)) continue;
       if (declared[k] === 'boolean' && !/^(true|false)$/.test(v)) continue;

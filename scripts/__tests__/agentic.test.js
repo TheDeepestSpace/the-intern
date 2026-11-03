@@ -163,19 +163,17 @@ describe('trigger matching and resolution', () => {
 
   it('parses comment verb and declared params; default otherwise', () => {
     const ev = body => ({ kind: 'comment', repo: 'TheDeepestSpace/the-intern', author: 'u', on: 'issue', issue_number: 7, body });
-    const r = explain(spec, ev('@the-intern-bot backend=codex model=gpt-x fix it'));
-    expect(r).toMatchObject({ matched: true, agent: 'default', backend: 'codex', model: 'gpt-x', effort: 'default', timeout_seconds: 3600 });
+    const r = explain(spec, ev('@the-intern-bot implement backend=codex model=gpt-x fix it'));
+    expect(r).toMatchObject({ matched: true, agent: 'implementer', backend: 'codex', model: 'gpt-x', effort: 'default', timeout_seconds: 3600 });
     expect(r.access).toEqual([{ repo: 'TheDeepestSpace/the-intern', scope: 'read/write' }]);
-    expect(r.prompt).toMatch(/^You are @the-intern-bot working on repository TheDeepestSpace\/the-intern, issue\/PR #7\.\nYou have access to the GitHub CLI/);
-    expect(explain(spec, ev('@the-intern-bot')).backend).toBe('claude');
-    expect(explain(spec, ev('please @the-intern-bot codex fix it')).backend).toBe('codex');
-    expect(explain(spec, ev('@the-intern-bot fix it model=x')).params).toEqual({});
-    expect(explain(spec, ev('hey, no mention')).matched).toBe(false);
-    expect(explain(spec, ev('@the-intern-botx hi')).matched).toBe(false);
+    expect(r.prompt).toBe('Carry out the request in the triggering comment on TheDeepestSpace/the-intern#7.');
+    expect(explain(spec, ev('@the-intern-bot implement')).backend).toBe('default');
+    expect(explain(spec, ev('@the-intern-bot review')).matched).toBe(false);
+    expect(explain(spec, ev('hey implement')).matched).toBe(false);
   });
 
   it('denies owners outside the allowlist', () => {
-    const r = explain(spec, { kind: 'comment', repo: 'evil/repo', author: 'u', on: 'issue', issue_number: 1, body: '@the-intern-bot fix' });
+    const r = explain(spec, { kind: 'comment', repo: 'evil/repo', author: 'u', on: 'issue', issue_number: 1, body: '@the-intern-bot implement' });
     expect(r.matched).toBe(false);
     expect(r.reason).toMatch(/not allowlisted/);
   });
