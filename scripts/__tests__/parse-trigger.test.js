@@ -223,6 +223,49 @@ describe('parse-trigger', () => {
     });
   });
 
+  describe('repository_dispatch: custom_prompt shape', () => {
+    it('reads target repo, PR number, text, and installation id from the client_payload', () => {
+      process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
+      process.env.GITHUB_EVENT_PATH = writeEventPayload({
+        action: 'custom_prompt',
+        client_payload: {
+          target_repo: 'acme/widgets',
+          pr_number: '12',
+          installation_id: '4242',
+          text: 'specage=true backend=codex Review PR #12 in acme/widgets per the Review section of .specage/PROTOCOL.md.',
+        },
+      });
+
+      const result = parseTrigger();
+
+      expect(result.target_repo).toBe('acme/widgets');
+      expect(result.issue_number).toBe('12');
+      expect(result.installation_id).toBe('4242');
+      expect(result.event_type).toBe('custom_prompt');
+      expect(result.specage).toBe(true);
+      expect(result.backend).toBe('codex');
+      expect(result.clean_prompt).toBe(
+        'Review PR #12 in acme/widgets per the Review section of .specage/PROTOCOL.md.'
+      );
+    });
+
+    it('leaves installation id empty when the payload has none (resolved later from the target repo)', () => {
+      process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
+      process.env.GITHUB_EVENT_PATH = writeEventPayload({
+        action: 'custom_prompt',
+        client_payload: { target_repo: 'acme/widgets', pr_number: '12', text: 'Review PR #12.' },
+      });
+
+      const result = parseTrigger();
+
+      expect(result.target_repo).toBe('acme/widgets');
+      expect(result.issue_number).toBe('12');
+      expect(result.installation_id).toBe('');
+      expect(result.specage).toBe(false);
+      expect(result.clean_prompt).toBe('Review PR #12.');
+    });
+  });
+
   describe('repository_dispatch: fallback extraction', () => {
     it('falls back to INPUT_* env vars when payload has no recognizable shape', () => {
       process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
