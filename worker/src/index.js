@@ -96,7 +96,15 @@ async function handleGitHub(request, env) {
     .map(s => s.trim())
     .filter(Boolean);
 
-  if (allowed.length > 0) {
+  const botLoginLc = (env.BOT_LOGIN || 'the-intern-bot[bot]').toLowerCase();
+  const botHandback =
+    (author || '').toLowerCase() === botLoginLc &&
+    eventType === 'issue_comment' &&
+    payload.issue?.pull_request &&
+    (payload.issue?.user?.login || '').toLowerCase() === botLoginLc &&
+    (payload.comment?.body || '').toLowerCase().includes('@the-intern-bot') &&
+    !ROLE_TOKEN.test(payload.comment?.body || '');
+  if (allowed.length > 0 && !botHandback) {
     if (!author || !allowed.includes(author)) {
       return new Response('ignored: author not in allowlist', { status: 200 });
     }
@@ -149,6 +157,16 @@ async function handleGitHub(request, env) {
   }
 
   try {
+    let implKey = '';
+    let implRounds = 0;
+    if (botHandback) {
+      // Reviewer -> implementer hand-back: best-effort cap, same as reviews.
+      implKey = `impl_rounds:${payload.repository?.full_name}#${payload.issue?.number}`;
+      implRounds = Number(await env.CI_FAILURE_DEDUP.get(implKey)) || 0;
+      if (implRounds >= (Number(env.MAX_REVIEW_ROUNDS) || 3)) {
+        return new Response('ignored: implement round cap reached', { status: 200 });
+      }
+    }
     const token = await getInstallationToken(env, installationId);
 
     const dispatchRes = await dispatchRepoEvent(env, token, eventType, payload);
@@ -157,6 +175,9 @@ async function handleGitHub(request, env) {
       const errorText = await dispatchRes.text();
       return new Response(`dispatch failed: ${errorText}`, { status: 502 });
     }
+    if (implKey) {
+      await env.CI_FAILURE_DEDUP.put(implKey, String(implRounds + 1), { expirationTtl: 60 * 60 * 24 * 30 });
+    }
 
     return new Response('ok', { status: 200 });
   } catch (err) {
@@ -164,27 +185,33 @@ async function handleGitHub(request, env) {
   }
 }
 
-const REVIEW_COMMENT = /^\s*@the-intern-bot\s+review\s*[.!]?\s*$/i;
+// `@the-intern-bot review` or, with the role token, `@the-intern-bot role=review`.
+// Anchored so extra instructions fall through to the generic flow (where
+// parse-trigger still honours role=review).
+const REVIEW_COMMENT = /^\s*@the-intern-bot\s+(?:role=)?review\s*[.!]?\s*$/i;
+// A bot comment that hands work back (mentions the bot with no role= token) is
+// the signal for the default (implement) role. Capped per PR like reviews.
+const ROLE_TOKEN = /@the-intern-bot\s+(?:\S+\s+)*?role=/i;
 
 // Queues a review_request dispatch (dispatcher.yml) so the bot reviews a PR,
 // typically a specage implement PR that requested review from the bot. Two
-// triggers: `review_requested` naming the bot (sender must be the bot itself,
-// which is how implement agents request it, or an ALLOWED_USERS member) and an
-// `@the-intern-bot review` comment from an allowlisted user.
+// triggers: `review_requested` naming the bot, and an `@the-intern-bot
+// role=review` (or bare `review`) comment. Sender must be the bot itself (how
+// implement agents ask for review: GitHub does not deliver self-requested
+// reviews, so the role=review comment is the reliable path) or in
+// ALLOWED_USERS.
 //
-// Loop guards for the automatic (review_requested) path: one dispatch per
+// Loop guards for bot-originated requests: one dispatch per
 // (PR, head sha) and at most MAX_REVIEW_ROUNDS (default 3) per PR, both in KV.
 // An explicit human comment bypasses both. The bot's own review/comment
-// events never come back here: they are not review_requested and the generic
-// flow ignores the bot's own comments. Only structural fields are forwarded.
+// events never come back here: they are not review_requested/role=review, and a
+// reviewer hand-back (no role) goes to the generic flow, capped separately. Only structural fields are forwarded.
 async function handleReviewRequest(payload, env, trigger) {
   const botLogin = (env.BOT_LOGIN || 'the-intern-bot[bot]').toLowerCase();
   const sender = (payload.sender?.login || payload.comment?.user?.login || '').toLowerCase();
   const allowed = (env.ALLOWED_USERS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-  const senderOk = sender === botLogin && trigger === 'review_requested'
-    ? true
-    : allowed.length === 0 || allowed.includes(sender);
-  if (!senderOk || (trigger === 'comment' && sender === botLogin)) {
+  const senderOk = sender === botLogin || allowed.length === 0 || allowed.includes(sender);
+  if (!senderOk) {
     return new Response('ignored: author not in allowlist', { status: 200 });
   }
 
@@ -208,15 +235,33 @@ async function handleReviewRequest(payload, env, trigger) {
     return new Response('ignored: missing repository or pull request', { status: 200 });
   }
 
-  const sha = pr?.head?.sha || '';
-  const dedupKey = `review:${fullName}#${number}@${sha}`;
+  // Bot-originated requests (review_requested, or its own `role=review`
+  // comment) are automatic and get the sha dedup + round cap; allowlisted
+  // humans bypass both.
+  const automatic = sender === botLogin;
   const roundsKey = `review_rounds:${fullName}#${number}`;
   const maxRounds = Number(env.MAX_REVIEW_ROUNDS) || 3;
   // Dedup and the round cap are best-effort: KV has no atomic increment and is
   // eventually consistent, so concurrent deliveries can slightly exceed the cap.
   let rounds = 0;
   try {
-    if (trigger === 'review_requested') {
+    const token = await getInstallationToken(env, installationId);
+    let sha = pr?.head?.sha || '';
+    if (!sha && automatic) {
+      // issue_comment payloads carry no head sha; look it up for dedup/binding.
+      const prRes = await fetch(`https://api.github.com/repos/${fullName}/pulls/${number}`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'the-intern-worker' },
+      });
+      if (prRes.ok) {
+        const prData = await prRes.json();
+        if (prData.state === 'closed' || prData.draft) {
+          return new Response('ignored: pull request closed or draft', { status: 200 });
+        }
+        sha = prData.head?.sha || '';
+      }
+    }
+    const dedupKey = `review:${fullName}#${number}@${sha}`;
+    if (automatic) {
       if (await env.CI_FAILURE_DEDUP.get(dedupKey)) {
         return new Response('ignored: review already dispatched for this commit', { status: 200 });
       }
@@ -226,7 +271,6 @@ async function handleReviewRequest(payload, env, trigger) {
       }
     }
 
-    const token = await getInstallationToken(env, installationId);
     const dispatchRes = await dispatchRepoEvent(env, token, 'review_request', {
       repository: { full_name: fullName },
       pull_request: { number },
@@ -236,7 +280,7 @@ async function handleReviewRequest(payload, env, trigger) {
     if (!dispatchRes.ok) {
       return new Response(`dispatch failed: ${await dispatchRes.text()}`, { status: 502 });
     }
-    if (trigger === 'review_requested') {
+    if (automatic) {
       const ttl = { expirationTtl: 60 * 60 * 24 * 30 };
       await env.CI_FAILURE_DEDUP.put(dedupKey, '1', ttl);
       await env.CI_FAILURE_DEDUP.put(roundsKey, String(rounds + 1), ttl);

@@ -108,6 +108,7 @@ function githubApiFetchHandler({
   dispatchOk = true,
   pullRequestAuthor,
   pullRequestBaseSha,
+  pullRequestHeadSha,
   checkRunsByRef,
   checkRunsThrowRefs = [],
 } = {}) {
@@ -133,7 +134,7 @@ function githubApiFetchHandler({
     }
 
     if (
-      pullRequestAuthor !== undefined &&
+      (pullRequestAuthor !== undefined || pullRequestHeadSha !== undefined) &&
       request.method === 'GET' &&
       url.pathname.match(/^\/repos\/.+\/.+\/pulls\/\d+$/)
     ) {
@@ -143,6 +144,7 @@ function githubApiFetchHandler({
           number,
           user: { login: pullRequestAuthor },
           base: pullRequestBaseSha !== undefined ? { sha: pullRequestBaseSha } : undefined,
+          head: pullRequestHeadSha !== undefined ? { sha: pullRequestHeadSha } : undefined,
         }),
         { status: 200 }
       );
@@ -181,8 +183,10 @@ function githubApiFetchHandler({
 // Mocks the two outbound GitHub API calls made once gating passes:
 // installation-token mint, then repository_dispatch. Returns a spy so tests
 // can assert on the dispatch call's body/headers.
-export function mockGithubDispatchFlow({ dispatchOk = true } = {}) {
-  return vi.spyOn(globalThis, 'fetch').mockImplementation(githubApiFetchHandler({ dispatchOk }));
+export function mockGithubDispatchFlow({ dispatchOk = true, pullRequestHeadSha } = {}) {
+  return vi
+    .spyOn(globalThis, 'fetch')
+    .mockImplementation(githubApiFetchHandler({ dispatchOk, pullRequestHeadSha }));
 }
 
 // Like mockGithubDispatchFlow, but also serves the installation-id lookup

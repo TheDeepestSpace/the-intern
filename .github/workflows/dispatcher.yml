@@ -42,6 +42,7 @@ jobs:
       comment_id: ${{ steps.parse.outputs.comment_id }}
       model: ${{ steps.parse.outputs.model }}
       specage: ${{ steps.parse.outputs.specage }}
+      role: ${{ steps.parse.outputs.role }}
     steps:
       - name: Checkout agent-infra
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -469,6 +470,7 @@ jobs:
           SPECAGE: ${{ needs.detect-image.outputs.specage }}
           ISSUE_NUMBER: ${{ needs.detect-image.outputs.issue_number }}
           EVENT_TYPE: ${{ needs.detect-image.outputs.event_type }}
+          ROLE: ${{ needs.detect-image.outputs.role }}
           COMMENT_ID: ${{ needs.detect-image.outputs.comment_id }}
           WORKSPACE_RESTORED: ${{ steps.workspace_restore.outputs.restored }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
@@ -499,6 +501,7 @@ jobs:
             const style = process.env.STYLE_GUIDE || "";
             const workspaceRestored = process.env.WORKSPACE_RESTORED === "true";
             const eventType = process.env.EVENT_TYPE || "";
+            const role = process.env.ROLE || "implement";
             const commentId = process.env.COMMENT_ID || "";
             const specage = process.env.SPECAGE === "true";
             const configuredSpecageDataRepos = (process.env.SPECAGE_DATA_REPOS || "").split(",").map((r) => r.trim()).filter(Boolean);
@@ -517,12 +520,12 @@ jobs:
               prompt += `This request came from an inline PR review comment that is part of a review thread (comment id ${commentId}). You must reply within that same thread using:\ngh api -X POST repos/${repo}/pulls/${issue}/comments/${commentId}/replies -f body="..."\nrather than \x27gh pr comment\x27 / \x27gh issue comment\x27, which posts a new general PR comment and breaks thread continuity.\n\n`;
             }
             if (specage && specageDataRepos.length) {
-              prompt += `This request was filed by specage (specage=true). Your token also has access to the specage data repo${specageDataRepos.length > 1 ? "s" : ""} ${specageDataRepos.join(", ")}. The project spec lives there on the branch specages/<project>/spec, where <project> is the specage project for ${repo} (if the issue does not name it, list the branches matching specages/*/spec and pick the one whose .specage/config.yaml has repo: ${repo}). Read the spec file, .specage/PROTOCOL.md (follow its ${eventType === "review_request" ? "Review" : "Implement"} section) and GRAMMAR.md directly from that branch, e.g. gh api repos/<data_repo>/contents/<path>?ref=specages/<project>/spec -H \x27Accept: application/vnd.github.raw+json\x27, or git clone --branch specages/<project>/spec. Never push to the spec or trail branches.\n\n`;
+              prompt += `This request was filed by specage (specage=true). Your token also has access to the specage data repo${specageDataRepos.length > 1 ? "s" : ""} ${specageDataRepos.join(", ")}. The project spec lives there on the branch specages/<project>/spec, where <project> is the specage project for ${repo} (if the issue does not name it, list the branches matching specages/*/spec and pick the one whose .specage/config.yaml has repo: ${repo}). Read the spec file, .specage/PROTOCOL.md (follow its ${role === "review" ? "Review" : "Implement"} section) and GRAMMAR.md directly from that branch, e.g. gh api repos/<data_repo>/contents/<path>?ref=specages/<project>/spec -H \x27Accept: application/vnd.github.raw+json\x27, or git clone --branch specages/<project>/spec. Never push to the spec or trail branches.\n\n`;
             } else if (specage && configuredSpecageDataRepos.length) {
               prompt += `This request was filed by specage (specage=true), but your token has no access to a configured specage data repository for ${repo}. Report that access limitation instead of claiming to have read the spec.\n\n`;
             }
-            if (eventType === "review_request") {
-              prompt += `This is a review dispatch. Review the PR against the linked spec statements and Spec: trailers, the tests, and trail consistency, then submit a review as the-intern-bot with gh (gh pr review --approve / --request-changes / --comment, with a short body listing findings). GitHub rejects approving or requesting changes on your own PR; if that happens, submit a --comment review whose first line is APPROVE or CHANGES REQUESTED. Do not push commits to the PR branch and do not merge: the human owner stays the final merger. Ignore your own earlier reviews as evidence. On approval, request human review only if the repo config or PROTOCOL says to.\n\n`;
+            if (role === "review") {
+              prompt += `This is a review dispatch. Review the PR against the linked spec statements and Spec: trailers, the tests, and trail consistency, then submit a review as the-intern-bot with gh (gh pr review --approve / --request-changes / --comment, with a short body listing findings). GitHub rejects approving or requesting changes on your own PR; if that happens, submit a --comment review whose first line is APPROVE or CHANGES REQUESTED. Do not push commits to the PR branch and do not merge: the human owner stays the final merger. Ignore your own earlier reviews as evidence. On approval, request human review only if the repo config or PROTOCOL says to. When you request changes, also post a PR comment that starts with @the-intern-bot (no role= token) followed by the findings to fix; that hands the PR back to the default implement role. Do not mention @the-intern-bot in a comment otherwise.\n\n`;
             }
             if (style) {
               prompt += `${style}\n\n`;

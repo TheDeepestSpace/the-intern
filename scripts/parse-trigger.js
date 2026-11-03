@@ -11,6 +11,7 @@ function parseTrigger() {
   let eventType = '';
   let commentId = '';
   let forceSpecage = false;
+  let forceRole = '';
 
   if (eventName === 'repository_dispatch') {
     let payload = {};
@@ -74,6 +75,7 @@ function parseTrigger() {
       const round = rr.round && rr.max_rounds ? ` This is review round ${rr.round} of at most ${rr.max_rounds}.` : '';
       commentBody = `Review PR #${issueNumber}${sha}.${round} Follow the Review section of .specage/PROTOCOL.md if the repo has a specage spec; otherwise do a general code review.${rr.head_sha ? ` Before reviewing and again before submitting, confirm the PR head is still \`${rr.head_sha}\`; if it changed, do not submit a verdict (a newer review will be dispatched) and say so in a comment.` : ''}`;
       forceSpecage = true;
+      forceRole = 'review';
     } else {
       // Fallback extraction
       targetRepo = payload.repository?.full_name || process.env.INPUT_TARGET_REPO || '';
@@ -96,6 +98,8 @@ function parseTrigger() {
   // handle job widens the agent token to SPECAGE_DATA_REPOS and tells the agent
   // where the spec lives. Anything other than a literal `true` stays false.
   let specage = false;
+  // role=review selects the review prompt; no role is the default (implement).
+  let role = 'implement';
 
   // Remove @the-intern-bot and optional backend keywords (claude/codex/agy) from cleanComment
   let cleanComment = commentBody
@@ -106,7 +110,7 @@ function parseTrigger() {
   // These only count as control tokens when they form a leading run right after the
   // mention - matching anywhere in the string would also strip incidental key=value
   // text later in the prompt (e.g. a quoted shell flag like `-c model="sol"`).
-  const leadingTokens = cleanComment.match(/^(?:(?:model|effort|backend|specage)=\S+\s*)+/i);
+  const leadingTokens = cleanComment.match(/^(?:(?:model|effort|backend|specage|role)=\S+\s*)+/i);
 
   if (leadingTokens) {
     const tokenRun = leadingTokens[0];
@@ -126,8 +130,13 @@ function parseTrigger() {
     const matchSpecage = tokenRun.match(/\bspecage=(\S+)/i);
     if (matchSpecage) specage = matchSpecage[1].toLowerCase() === 'true';
 
+    const matchRole = tokenRun.match(/\brole=(\S+)/i);
+    if (matchRole && matchRole[1].toLowerCase() === 'review') role = 'review';
+
     cleanComment = cleanComment.slice(tokenRun.length).trim();
   }
+
+  if (forceRole) role = forceRole;
 
   if (forceSpecage) specage = true;
 
@@ -148,6 +157,7 @@ function parseTrigger() {
     model,
     effort,
     specage,
+    role,
     event_type: eventType,
     comment_id: commentId,
   };

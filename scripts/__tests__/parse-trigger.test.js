@@ -218,6 +218,7 @@ describe('parse-trigger', () => {
       expect(result.specage).toBe(true);
       expect(result.clean_prompt).toContain('Review PR #9 at commit `abc123`');
       expect(result.clean_prompt).toContain('round 2 of at most 3');
+      expect(result.role).toBe('review');
     });
   });
 
@@ -499,6 +500,31 @@ describe('parse-trigger', () => {
       expect(logged).not.toContain('super secret comment body');
       expect(logged).not.toContain('with a second line');
       expect(logged).toContain('acme/widgets');
+    });
+  });
+
+  describe('role parameter', () => {
+    it('defaults to implement', () => {
+      process.env.GITHUB_EVENT_NAME = 'workflow_dispatch';
+      process.env.INPUT_COMMENT_BODY = '@the-intern-bot fix this';
+      expect(parseTrigger().role).toBe('implement');
+    });
+
+    it('parses a leading role=review and strips it from the prompt', () => {
+      process.env.GITHUB_EVENT_NAME = 'workflow_dispatch';
+      process.env.INPUT_COMMENT_BODY = '@the-intern-bot role=review model=x focus on tests';
+      const result = parseTrigger();
+      expect(result.role).toBe('review');
+      expect(result.model).toBe('x');
+      expect(result.clean_prompt).toBe('focus on tests');
+    });
+
+    it('ignores unknown roles and non-leading role= text', () => {
+      process.env.GITHUB_EVENT_NAME = 'workflow_dispatch';
+      process.env.INPUT_COMMENT_BODY = '@the-intern-bot role=bogus fix this';
+      expect(parseTrigger().role).toBe('implement');
+      process.env.INPUT_COMMENT_BODY = '@the-intern-bot fix this role=review';
+      expect(parseTrigger().role).toBe('implement');
     });
   });
 });

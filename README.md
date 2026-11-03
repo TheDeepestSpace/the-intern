@@ -69,13 +69,21 @@ API answers 403, the App is missing `pull_requests: write` or
 `contents: write`; if 405, branch protection declined — both show up in the
 report's error section rather than being bypassed.
 
+## Roles
+
+A leading `role=` token (alongside `backend=`, `model=`, `effort=`, `specage=`) picks the prompt for a run. `role=review` selects the review prompt; no role is the default (implement) role.
+
 ## Review dispatch (specage implement PRs)
 
-The worker files a `review_request` dispatch (handled by `dispatcher.yml`) when:
+The worker files a `review_request` dispatch (handled by `dispatcher.yml`, always `role=review`) when:
 
-- `review_requested` names `the-intern-bot[bot]` on a PR (sender must be the bot itself, as implement agents do, or in `ALLOWED_USERS`), or
-- an allowlisted user comments `@the-intern-bot review` on a PR.
+- the bot (or an `ALLOWED_USERS` member) comments `@the-intern-bot role=review` (or bare `review`) on a PR. This is how a bot-authored PR gets reviewed: GitHub does not deliver a `review_requested` event when the bot requests review from itself, so the implement agent should post this comment instead.
+- `review_requested` names `the-intern-bot[bot]` on a PR (sender the bot itself or in `ALLOWED_USERS`), for when another actor does the requesting.
+
+`@the-intern-bot role=review <extra instructions>` from an allowlisted user goes through the generic flow with the review prompt.
 
 The dispatch always runs with `specage=true`, so the reviewer can read the spec, trail and `.specage/PROTOCOL.md` (Review section) from specage-data. It checks the PR against the linked spec statements / `Spec:` trailers, tests and trail consistency, and submits a review as the bot (a `--comment` review headed `APPROVE` / `CHANGES REQUESTED` when GitHub refuses a self-review of a bot-authored PR). It never pushes or merges; the human owner stays the final merger.
 
-Loop guards (automatic `review_requested` path only; explicit comments bypass them): one dispatch per PR head sha, and at most `MAX_REVIEW_ROUNDS` (worker var, default 3) per PR, tracked in the `CI_FAILURE_DEDUP` KV. The bot's own reviews and comments never re-trigger a dispatch.
+When the reviewer requests changes it posts a comment starting `@the-intern-bot` with no `role=`. A bot comment like that on a bot-authored PR passes the allowlist and runs the default implement role.
+
+Loop guards (bot-originated requests only; allowlisted humans bypass the review ones): one review dispatch per PR head sha, at most `MAX_REVIEW_ROUNDS` (worker var, default 3) review dispatches and as many implement hand-backs per PR, tracked in the `CI_FAILURE_DEDUP` KV (best-effort).

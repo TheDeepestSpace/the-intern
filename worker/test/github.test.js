@@ -963,4 +963,55 @@ describe('handleGitHub review dispatch', () => {
     expect(body.event_type).toBe('review_request');
     expect(body.client_payload.raw.review_request.trigger).toBe('comment');
   });
+
+  const botCommentPayload = body => ({
+    action: 'created',
+    installation: { id: 42 },
+    repository: { full_name: 'acme/widgets' },
+    sender: { login: 'the-intern-bot[bot]' },
+    comment: { user: { login: 'the-intern-bot[bot]' }, body },
+    issue: { number: 9, pull_request: {}, user: { login: 'the-intern-bot[bot]' } },
+  });
+
+  it('accepts the bot\'s own "@the-intern-bot role=review" comment, bound to the PR head sha, deduped per sha', async () => {
+    const fetchSpy = mockGithubDispatchFlow({ pullRequestHeadSha: 'sha1' });
+    const env = baseGithubEnv({ ALLOWED_USERS: 'alice' });
+    const send = () =>
+      worker.fetch(
+        githubRequest({ eventType: 'issue_comment', body: botCommentPayload('@the-intern-bot role=review') }),
+        env
+      );
+    expect(await (await send()).text()).toBe('ok');
+    expect(dispatchBody(fetchSpy).client_payload.raw.review_request).toMatchObject({ head_sha: 'sha1', round: 1 });
+    expect(await (await send()).text()).toBe('ignored: review already dispatched for this commit');
+  });
+
+  it('routes a bot comment mentioning the bot without role= to the generic (implement) flow, capped', async () => {
+    const fetchSpy = mockGithubDispatchFlow();
+    const env = baseGithubEnv({ ALLOWED_USERS: 'alice', MAX_REVIEW_ROUNDS: '1' });
+    const send = () =>
+      worker.fetch(
+        githubRequest({
+          eventType: 'issue_comment',
+          body: botCommentPayload('@the-intern-bot CHANGES REQUESTED: fix the test'),
+        }),
+        env
+      );
+    expect(await (await send()).text()).toBe('ok');
+    expect(dispatchBody(fetchSpy).event_type).toBe('issue_comment');
+    expect(await (await send()).text()).toBe('ignored: implement round cap reached');
+  });
+
+  it('does not hand a bot comment that carries a role= token to the implement flow', async () => {
+    const fetchSpy = mockGithubDispatchFlow();
+    const res = await worker.fetch(
+      githubRequest({
+        eventType: 'issue_comment',
+        body: botCommentPayload('@the-intern-bot role=other do things'),
+      }),
+      baseGithubEnv({ ALLOWED_USERS: 'alice' })
+    );
+    expect(await res.text()).toBe('ignored: author not in allowlist');
+    expect(dispatchBody(fetchSpy)).toBeNull();
+  });
 });
