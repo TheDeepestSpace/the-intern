@@ -1,5 +1,6 @@
 {
   "scripts": {
+    "pretest": "node scripts/bundle-agentic.js",
     "test": "vitest run"
   },
   "dependencies": {
