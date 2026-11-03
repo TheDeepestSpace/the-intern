@@ -27,34 +27,18 @@ describe('mintToken', () => {
   });
 
   it('throws when APP_ID/APP_PRIVATE_KEY are missing', async () => {
-    await expect(mintToken({ TARGET_REPO: 'acme/widgets' })).rejects.toThrow(
+    await expect(mintToken({ ACCESS: '[{"repo":"acme/widgets","scope":"read/write"}]' })).rejects.toThrow(
       'APP_ID and APP_PRIVATE_KEY are required'
     );
   });
 
-  it('mints a repo-scoped token by default', async () => {
-    const client = agent.get('https://api.github.com');
-    client
-      .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
-      .reply(200, { id: 555 });
-    client
-      .intercept({
-        method: 'POST',
-        path: '/app/installations/555/access_tokens',
-        body: (body) => JSON.parse(body).repositories?.[0] === 'widgets',
-      })
-      .reply(201, { token: 'ghs_scoped' });
-
-    const token = await mintToken({
-      APP_ID: '123',
-      APP_PRIVATE_KEY: TEST_PRIVATE_KEY_PEM,
-      TARGET_REPO: 'acme/widgets',
-    });
-
-    expect(token).toBe('ghs_scoped');
+  it('refuses to refresh without the resolved ACCESS list (never a wider token than the initial mint)', async () => {
+    await expect(
+      mintToken({ APP_ID: '123', APP_PRIVATE_KEY: TEST_PRIVATE_KEY_PEM, TARGET_REPO: 'acme/widgets' })
+    ).rejects.toThrow(/ACCESS/);
   });
 
-  it('includes EXTRA_REPOS in the re-minted token scope', async () => {
+  it('re-mints with exactly the ACCESS repos', async () => {
     const client = agent.get('https://api.github.com');
     client
       .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
@@ -72,78 +56,23 @@ describe('mintToken', () => {
       APP_ID: '123',
       APP_PRIVATE_KEY: TEST_PRIVATE_KEY_PEM,
       TARGET_REPO: 'acme/widgets',
-      EXTRA_REPOS: 'acme/data, ',
+      ACCESS: '[{"repo":"acme/widgets","scope":"read/write"},{"repo":"acme/data","scope":"read"}]',
     });
 
     expect(token).toBe('ghs_multi');
   });
 
-  it('adds SPECAGE_DATA_REPOS to the re-minted token scope when SPECAGE=true', async () => {
+  it("mints an installation-wide token for an ACCESS list containing '*'", async () => {
     const client = agent.get('https://api.github.com');
     client
-      .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
-      .reply(200, { id: 555 });
-    client
-      .intercept({
-        method: 'POST',
-        path: '/app/installations/555/access_tokens',
-        body: (body) =>
-          JSON.stringify(JSON.parse(body).repositories) === JSON.stringify(['widgets', 'specage-data']),
-      })
-      .reply(201, { token: 'ghs_specage' });
-
-    const token = await mintToken({
-      APP_ID: '123',
-      APP_PRIVATE_KEY: TEST_PRIVATE_KEY_PEM,
-      TARGET_REPO: 'acme/widgets',
-      SPECAGE: 'true',
-      SPECAGE_DATA_REPOS: 'acme/specage-data',
-    });
-
-    expect(token).toBe('ghs_specage');
-  });
-
-  it('leaves the token scoped to TARGET_REPO alone when SPECAGE is not true', async () => {
-    const client = agent.get('https://api.github.com');
-    client
-      .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
-      .reply(200, { id: 555 });
-    client
-      .intercept({
-        method: 'POST',
-        path: '/app/installations/555/access_tokens',
-        body: (body) => JSON.stringify(JSON.parse(body).repositories) === JSON.stringify(['widgets']),
-      })
-      .reply(201, { token: 'ghs_plain' });
-
-    const token = await mintToken({
-      APP_ID: '123',
-      APP_PRIVATE_KEY: TEST_PRIVATE_KEY_PEM,
-      TARGET_REPO: 'acme/widgets',
-      SPECAGE: 'false',
-      SPECAGE_DATA_REPOS: 'acme/specage-data',
-    });
-
-    expect(token).toBe('ghs_plain');
-  });
-
-  it('mints an installation-wide token when SCOPE_TO_REPO is false', async () => {
-    const client = agent.get('https://api.github.com');
-    client
-      .intercept({ method: 'GET', path: '/repos/acme/widgets/installation' })
-      .reply(200, { id: 555 });
-    client
-      .intercept({
-        method: 'POST',
-        path: '/app/installations/555/access_tokens',
-      })
+      .intercept({ method: 'POST', path: '/app/installations/9/access_tokens', body: (body) => body === undefined || body === null })
       .reply(201, { token: 'ghs_unscoped' });
 
     const token = await mintToken({
       APP_ID: '123',
       APP_PRIVATE_KEY: TEST_PRIVATE_KEY_PEM,
-      TARGET_REPO: 'acme/widgets',
-      SCOPE_TO_REPO: 'false',
+      INSTALLATION_ID: '9',
+      ACCESS: '[{"repo":"*","scope":"read/write"}]',
     });
 
     expect(token).toBe('ghs_unscoped');
@@ -211,7 +140,7 @@ describe('runLoop', () => {
     await runLoop({
       intervalMs: 0,
       maxIterations: 2,
-      env: { APP_ID: '123', APP_PRIVATE_KEY: TEST_PRIVATE_KEY_PEM, TARGET_REPO: 'acme/widgets' },
+      env: { APP_ID: '123', APP_PRIVATE_KEY: TEST_PRIVATE_KEY_PEM, TARGET_REPO: 'acme/widgets', ACCESS: '[{"repo":"acme/widgets","scope":"read/write"}]' },
       exec,
     });
 

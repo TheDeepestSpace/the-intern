@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { loadSpec, explain, accessAllows, route, branchPattern } from '../lib/agentic.js';
+import { loadSpec, explain, accessAllows, route, branchPattern, resolveAction, eventFromWebhook, eventFromTelegram } from '../lib/agentic-yaml.js';
 import { main } from '../validate-agentic.js';
 
 const ROOT_FILE = path.join(import.meta.dirname, '..', '..', 'agentic.yaml');
@@ -210,5 +210,88 @@ describe('trigger matching and resolution', () => {
     const ev = labels => ({ kind: 'pull_request', repo: 'Acme/x', author: 'u', action: 'opened', number: 4, labels });
     expect(explain(s, ev([])).matched).toBe(false);
     expect(explain(s, ev(['review']))).toMatchObject({ matched: true, timeout_seconds: 300, prompt: 'look at Acme/x#4' });
+  });
+});
+
+describe('cutover behaviours (issue #273)', () => {
+  const spec = loadSpec(rootText).spec;
+  const comment = (body, over = {}) => ({ kind: 'comment', repo: 'TheDeepestSpace/the-intern', author: 'u', on: 'issue', issue_number: 7, body, ...over });
+
+  it('strips every mention and the leading declared tokens into `text`, like parse-trigger.js did', () => {
+    expect(explain(spec, comment('hey @the-intern-bot please help')).text).toBe('hey please help');
+    const r = explain(spec, comment('@the-intern-bot codex model=gpt-x effort=high specage=true fix the -c model="sol" flag'));
+    expect(r.params).toEqual({ backend: 'codex', model: 'gpt-x', effort: 'high', specage: true });
+    expect(r.text).toBe('fix the -c model="sol" flag');
+    // An undeclared key=value ends the control-token run and stays prompt text.
+    expect(explain(spec, comment('@the-intern-bot foo=1 model=x do it')).text).toBe('foo=1 model=x do it');
+    expect(explain(spec, comment('@the-intern-bot')).text).toBe('');
+  });
+
+  it('matches inline review-thread comments and implicit mentions (bot-authored thread, system events)', () => {
+    expect(explain(spec, comment('@the-intern-bot x', { on: 'review_thread' })).matched).toBe(true);
+    expect(explain(spec, comment('sounds good, go ahead')).matched).toBe(false);
+    const r = explain(spec, comment('sounds good, go ahead backend=codex', { implicit: true }));
+    expect(r.matched).toBe(true);
+    expect(r.text).toBe('sounds good, go ahead backend=codex');
+    expect(r.backend).toBe('claude');
+    expect(explain(spec, comment('backend=codex go', { implicit: true })).backend).toBe('codex');
+  });
+
+  it('grants the specage data repo only when specage=true (access `when`)', () => {
+    expect(explain(spec, comment('@the-intern-bot fix')).access).toEqual([{ repo: 'TheDeepestSpace/the-intern', scope: 'read/write' }]);
+    expect(explain(spec, comment('@the-intern-bot specage=true implement')).access).toEqual([
+      { repo: 'TheDeepestSpace/the-intern', scope: 'read/write' },
+      { repo: 'TheDeepestSpace/specage-data', scope: 'read' },
+    ]);
+    expect(explain(spec, comment('@the-intern-bot specage=yes implement')).access).toHaveLength(1);
+    expect(errs(`  a:\n    trigger: {comment: {params: {x: string}}}\n    access: {repos: [{name: data, scope: read, when: $trigger.comment.param.x}]}\n    prompt: hi\n`).join()).toMatch(/boolean param/);
+    expect(errs(`  a:\n    trigger: {comment: {params: {x: boolean}}}\n    access: {repos: [{name: data, scope: read, when: $trigger.comment.param.x}]}\n    prompt: hi\n`)).toEqual([]);
+  });
+
+  it('takes backend/model/effort from anywhere in a telegram message and strips them', () => {
+    const r = explain(spec, { kind: 'telegram', chat_id: 1, message_id: 2, body: 'please model=opus do it effort=high' });
+    expect(r).toMatchObject({ backend: 'claude', model: 'opus', effort: 'high', timeout_seconds: 2700, text: 'please do it' });
+  });
+
+  it('resolves prompt files and validates prompt_file.ref vars', () => {
+    const r = explain(spec, { kind: 'commit', repo: 'TheDeepestSpace/specage-data', branch: 'specages/specage/spec', author: 'specage-app[bot]', sha: 'abc' });
+    expect(r.prompt_file).toEqual({ repo: 'TheDeepestSpace/specage', ref: null, path: 'protocol/PROTOCOL.md' });
+    expect(r.actions).toEqual([{ name: 'dispatch agent to implement issue', parameters: { issue_number: 'integer' }, kind: 'dispatch_agent' }]);
+    const pinned = loadSpec(`${BASE}  a:\n    trigger: {commit: {repo: data, branch: x/@p, author: b}}\n    access: {repos: [{name: data, scope: read}]}\n    prompt_file: {repo: data, ref: $trigger.commit.sha, path: P.md}\n`).spec;
+    const e = explain(pinned, { kind: 'commit', repo: 'Acme/data', branch: 'x/y', author: 'b', sha: 'deadbeef' });
+    expect(e.prompt_file.ref).toBe('deadbeef');
+    expect(e.prompt_pinned).toBe(true);
+    expect(errs(`  a:\n    trigger: {commit: {repo: data, branch: x, author: b}}\n    access: {repos: [{name: data, scope: read}]}\n    prompt_file: {repo: data, ref: $trigger.commit.author, path: P.md}\n`).join()).toMatch(/not a trusted source for a ref/);
+  });
+
+  it('executes dispatch_agent actions with typed, access-checked parameters', () => {
+    const match = route(spec, { kind: 'commit', repo: 'TheDeepestSpace/specage-data', branch: 'specages/specage/spec', author: 'specage-app[bot]', sha: 'abc' }).match;
+    expect(resolveAction(spec, 'specage_planner', match, 'dispatch agent to implement issue', { issue_number: 12 })).toEqual({
+      kind: 'dispatch_agent', agent: 'specage_implementer', parameters: { repo: 'TheDeepestSpace/specage', issue_number: 12 },
+    });
+    expect(() => resolveAction(spec, 'specage_planner', match, 'dispatch agent to implement issue', { issue_number: '12' })).toThrow(/integer/);
+    expect(() => resolveAction(spec, 'specage_planner', match, 'dispatch agent to implement issue', { issue_number: 1, x: 2 })).toThrow(/unknown parameter/);
+    expect(() => resolveAction(spec, 'specage_planner', match, 'nope', {})).toThrow(/no action 'nope'/);
+    expect(() => resolveAction(spec, 'specage_reviewer', match, 'dispatch agent to implement issue', {})).toThrow(/no action/);
+  });
+
+  it('normalizes GitHub webhook payloads consistently for the worker and the workflows', () => {
+    const bot = 'the-intern-bot[bot]';
+    const ic = eventFromWebhook(spec, 'issue_comment', {
+      repository: { full_name: 'A/b' }, comment: { user: { login: 'alice' }, body: 'hi' }, issue: { number: 4, user: { login: bot }, pull_request: {} },
+    });
+    expect(ic).toMatchObject({ kind: 'comment', repo: 'A/b', author: 'alice', on: 'pr', issue_number: 4, body: 'hi', implicit: true });
+    expect(eventFromWebhook(spec, 'issue_comment', { comment: { user: { login: bot }, body: 'x' }, issue: { number: 4, user: { login: bot } } }).implicit).toBe(false);
+    expect(eventFromWebhook(spec, 'pull_request_review_comment', {
+      repository: { full_name: 'A/b' }, comment: { id: 9, user: { login: 'a' }, body: 'x' }, pull_request: { number: 2, user: { login: 'z' } },
+    })).toMatchObject({ on: 'review_thread', comment_id: 9, issue_number: 2, implicit: false });
+    expect(eventFromWebhook(spec, 'push', {
+      ref: 'refs/heads/specages/p/spec', after: 'abc', sender: { login: 's' }, repository: { full_name: 'A/d' },
+      head_commit: { message: 'm' }, commits: [{ added: ['x'], modified: ['y'] }, { removed: ['x'] }],
+    })).toEqual({ kind: 'commit', repo: 'A/d', author: 's', branch: 'specages/p/spec', sha: 'abc', deleted: false, message: 'm', paths: ['x', 'y'] });
+    expect(eventFromWebhook(spec, 'push', { ref: 'refs/tags/v1' })).toBeNull();
+    expect(eventFromWebhook(spec, 'push', { ref: 'refs/heads/b', after: '0'.repeat(40), deleted: true }).deleted).toBe(true);
+    expect(eventFromWebhook(spec, 'star', {})).toBeNull();
+    expect(eventFromTelegram({ chat: { id: 1 }, message_id: 2, caption: 'c' })).toEqual({ kind: 'telegram', chat_id: 1, message_id: 2, body: 'c' });
   });
 });

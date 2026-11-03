@@ -1,18 +1,18 @@
-// Background loop for dispatcher.yml's `handle` job and telegram-session.yml's
-// `respond` job (issue #145). GitHub installation tokens are hard-capped at
-// 1hr and can't be refreshed by re-exporting GH_TOKEN mid-step — env vars are
-// inherited once when the long-running agent CLI (claude -p / codex exec)
-// spawns, not re-read afterward. Instead, this rewrites the dev user's
-// on-disk `gh` credential store every ~45min: `gh` and git (via
-// `gh auth setup-git`'s credential helper, already configured before this
-// loop starts) both re-read it fresh on every invocation.
+// Background loop for the agent-running jobs in dispatcher.yml, specage.yml
+// and telegram-session.yml (issue #145). GitHub installation tokens are
+// hard-capped at 1hr and can't be refreshed by re-exporting GH_TOKEN
+// mid-step — env vars are inherited once when the long-running agent CLI
+// (claude -p / codex exec) spawns, not re-read afterward. Instead, this
+// rewrites the dev user's on-disk `gh` credential store every ~45min: `gh`
+// and git (via `gh auth setup-git`'s credential helper, already configured
+// before this loop starts) both re-read it fresh on every invocation.
 //
 // Runs as the job's own (root) user — never as dev, the same untrusted
 // context the agent CLI runs in — so APP_ID/APP_PRIVATE_KEY never reach it;
 // only the minted token crosses that boundary, and only via an env var
 // (never argv, which `ps` would expose to the dev user).
 const { execFileSync } = require('child_process');
-const { getInstallationToken, getPrivateKey, resolveExtraRepos } = require('./mint-installation-token.js');
+const { getInstallationToken, getPrivateKey, parseAccess } = require('./mint-installation-token.js');
 
 const DEFAULT_INTERVAL_MS = 45 * 60 * 1000;
 
@@ -20,11 +20,18 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Re-mints with exactly the same ACCESS list (resolved from agentic.yaml) the
+// initial "Mint installation token" step used, so the refreshed token keeps
+// the same scope — never wider, never narrower.
 async function mintToken(env = process.env) {
   const appId = env.APP_ID;
   const privateKey = getPrivateKey(env);
   if (!appId || !privateKey) {
     throw new Error('APP_ID and APP_PRIVATE_KEY are required to refresh the installation token');
+  }
+  const access = parseAccess(env.ACCESS);
+  if (access === undefined) {
+    throw new Error('ACCESS (the resolved agentic.yaml access list) is required to refresh the installation token');
   }
 
   return getInstallationToken({
@@ -32,10 +39,7 @@ async function mintToken(env = process.env) {
     privateKey,
     installationId: env.INSTALLATION_ID,
     targetRepo: env.TARGET_REPO,
-    scopeToRepo: env.SCOPE_TO_REPO !== 'false',
-    // Same EXTRA_REPOS / SPECAGE / SPECAGE_DATA_REPOS resolution as the initial
-    // mint, so the re-minted token keeps the same scope.
-    extraRepos: resolveExtraRepos(env),
+    access,
   });
 }
 

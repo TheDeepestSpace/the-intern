@@ -101,33 +101,117 @@ async function getInstallationIdForRepo(appJwt, targetRepo, { retries, retryDela
   }
 }
 
+// Access name (agentic.yaml) meaning every repo the installation covers.
+const ALL_REPOS = '*';
+
+// Permissions a read-scoped token keeps. `scope: read` means the agent may
+// not push (contents: read) but can still report back through issues and PR
+// reviews/comments; everything else the installation has is dropped.
+const READ_SCOPE_PERMISSIONS = { contents: 'read', metadata: 'read', issues: 'write', pull_requests: 'write' };
+
+// Turns a resolved agentic.yaml access list ([{repo: 'owner/name', scope}])
+// into the `repositories` / `permissions` body of the access-token request.
+// Default-deny and never a partial scope: an empty list, a mix of owners (one
+// installation can only cover one owner) or a malformed entry throws.
+// GitHub permissions are per token, not per repo, so a list that mixes
+// scopes gets the widest one (read/write) for every repo in it; `read` is only
+// enforced when every entry is read-only.
+function scopeFromAccess(access, explicitPermissions) {
+  if (!Array.isArray(access) || access.length === 0) {
+    throw new Error('ACCESS is empty: the agent has no repositories (default-deny), refusing to mint a token');
+  }
+  for (const a of access) {
+    if (!a || typeof a.repo !== 'string' || !a.repo || !['read', 'read/write'].includes(a.scope)) {
+      throw new Error(`ACCESS entry is malformed: ${JSON.stringify(a)}`);
+    }
+  }
+  const allRepos = access.some((a) => a.repo === ALL_REPOS);
+  const readOnly = access.every((a) => a.scope === 'read');
+  // Explicit permissions (PERMISSIONS) replace the derived set: a caller that
+  // names them wants exactly those (e.g. a contents-only prompt-file token).
+  const permissions = explicitPermissions || (readOnly ? READ_SCOPE_PERMISSIONS : undefined);
+  if (allRepos) return { repositories: undefined, permissions, owner: null };
+
+  const owners = new Set();
+  const repositories = [];
+  for (const a of access) {
+    if (!/^[\w.-]+\/[\w.-]+$/.test(a.repo)) throw new Error(`ACCESS repo '${a.repo}' is not owner/repo`);
+    const [owner, name] = a.repo.split('/');
+    owners.add(owner.toLowerCase());
+    if (!repositories.includes(name)) repositories.push(name);
+  }
+  if (owners.size > 1) {
+    throw new Error(`ACCESS spans several owners (${[...owners].join(', ')}); one installation token covers one owner`);
+  }
+  return { repositories, permissions, owner: access[0].repo.split('/')[0] };
+}
+
+function parseAccess(raw) {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`Invalid ACCESS: not valid JSON (${error.message})`);
+  }
+  if (!Array.isArray(parsed)) throw new Error('Invalid ACCESS: must be a JSON array of {repo, scope}');
+  return parsed;
+}
+
+// Mints an installation token. Two ways to scope it:
+//  - `access`: the resolved agentic.yaml access list; repositories and
+//    permissions are derived from it (see scopeFromAccess). This is what
+//    every agent run uses.
+//  - `targetRepo` (+ optional `permissions`, `scopeToRepo`): single-repo
+//    scoping for the non-agent callers (nightly crawl, data-repo token,
+//    codex auth rotation, data-branch cleanup).
 async function getInstallationToken({
   appId,
   privateKey,
   installationId,
   targetRepo,
+  access,
   retries,
   retryDelayMs,
   permissions,
   scopeToRepo = true,
-  extraRepos = [],
 }) {
   if (!appId) throw new Error('Missing APP_ID secret');
   if (!privateKey) throw new Error('Missing APP_PRIVATE_KEY secret');
 
   const appJwt = mintAppJwt(appId, privateKey);
 
+  let body;
+  let lookupRepo = targetRepo;
+  if (access !== undefined) {
+    const scoped = scopeFromAccess(access, permissions);
+    body = {
+      ...(scoped.repositories ? { repositories: scoped.repositories } : {}),
+      ...(scoped.permissions ? { permissions: scoped.permissions } : {}),
+    };
+    if (!lookupRepo) lookupRepo = access.find((a) => a.repo !== ALL_REPOS)?.repo;
+  } else {
+    const shouldScopeRepo = scopeToRepo && Boolean(targetRepo);
+    body = {
+      // Without `repositories`, GitHub grants the token access to every repo
+      // the installation can see. Scope it down to just targetRepo when known
+      // and scopeToRepo is true.
+      ...(shouldScopeRepo ? { repositories: [targetRepo.split('/')[1]] } : {}),
+      // Without `permissions`, GitHub grants every permission the installation
+      // has — pass it through when the caller specifies a minimal set.
+      ...(permissions ? { permissions } : {}),
+    };
+  }
+
   let targetInstallationId = installationId;
-  if (!targetInstallationId && targetRepo) {
-    console.log(`No installationId provided, fetching installation for repo ${targetRepo}...`);
-    targetInstallationId = await getInstallationIdForRepo(appJwt, targetRepo, { retries, retryDelayMs });
+  if (!targetInstallationId && lookupRepo) {
+    console.log(`No installationId provided, fetching installation for repo ${lookupRepo}...`);
+    targetInstallationId = await getInstallationIdForRepo(appJwt, lookupRepo, { retries, retryDelayMs });
   }
 
   if (!targetInstallationId) {
-    throw new Error(`Could not determine installationId for repo: ${targetRepo || 'unknown'}`);
+    throw new Error(`Could not determine installationId for repo: ${lookupRepo || 'unknown'}`);
   }
-
-  const shouldScopeRepo = scopeToRepo && Boolean(targetRepo);
 
   const data = await withRetries(async () => {
     const res = await fetch(
@@ -140,21 +224,7 @@ async function getInstallationToken({
           'User-Agent': 'the-intern-bot',
           'Content-Type': 'application/json',
         },
-        // Without `repositories`, GitHub grants the token access to every repo
-        // the installation can see. Scope it down to just targetRepo when known
-        // and scopeToRepo is true. Without `permissions`, GitHub grants every
-        // permission the installation has, even ones the caller only needs
-        // read-only (or no) access to — pass it through when the caller
-        // specifies a minimal set.
-        body:
-          shouldScopeRepo || permissions
-            ? JSON.stringify({
-                ...(shouldScopeRepo
-                  ? { repositories: [...new Set([targetRepo.split('/')[1], ...extraRepos.map(repoName)])] }
-                  : {}),
-                ...(permissions ? { permissions } : {}),
-              })
-            : undefined,
+        body: Object.keys(body).length ? JSON.stringify(body) : undefined,
       }
     );
 
@@ -173,38 +243,6 @@ async function getInstallationToken({
   return data.token;
 }
 
-// Accepts `owner/name` or a bare `name` (same owner/installation as targetRepo).
-function repoName(repo) {
-  return repo.includes('/') ? repo.split('/')[1] : repo;
-}
-
-function parseExtraRepos(raw) {
-  if (!raw) return [];
-  return raw.split(',').map((r) => r.trim()).filter(Boolean);
-}
-
-// Resolves the full extra-repo list from the environment: EXTRA_REPOS always,
-// plus SPECAGE_DATA_REPOS when the dispatch opted in with SPECAGE=true (the
-// `specage=true` comment param, issue #263). A data repo under a different
-// owner than TARGET_REPO is skipped with a warning rather than forwarded: the
-// token is minted against TARGET_REPO's installation, and naming a repo that
-// installation can't see fails the whole mint (422) instead of just that repo.
-function resolveExtraRepos(env) {
-  const extra = parseExtraRepos(env.EXTRA_REPOS);
-  if (String(env.SPECAGE || '').toLowerCase() !== 'true') return extra;
-
-  const targetOwner = (env.TARGET_REPO || '').split('/')[0].toLowerCase();
-  for (const repo of parseExtraRepos(env.SPECAGE_DATA_REPOS)) {
-    const owner = repo.includes('/') ? repo.split('/')[0].toLowerCase() : targetOwner;
-    if (targetOwner && owner !== targetOwner) {
-      console.warn(`::warning::Skipping specage data repo ${repo}: not under the same owner as ${env.TARGET_REPO}`);
-      continue;
-    }
-    extra.push(repo);
-  }
-  return extra;
-}
-
 function parsePermissions(raw) {
   if (!raw) return undefined;
   let parsed;
@@ -219,7 +257,10 @@ function parsePermissions(raw) {
   return parsed;
 }
 
-module.exports = { getInstallationToken, mintAppJwt, getPrivateKey, parsePermissions, parseExtraRepos, resolveExtraRepos };
+module.exports = {
+  getInstallationToken, mintAppJwt, getPrivateKey, parsePermissions, parseAccess, scopeFromAccess,
+  READ_SCOPE_PERMISSIONS,
+};
 
 if (require.main === module) {
   (async () => {
@@ -229,8 +270,7 @@ if (require.main === module) {
       const installationId = process.env.INSTALLATION_ID;
       const targetRepo = process.env.TARGET_REPO;
       const permissions = parsePermissions(process.env.PERMISSIONS);
-      const scopeToRepo = process.env.SCOPE_TO_REPO !== 'false';
-      const extraRepos = resolveExtraRepos(process.env);
+      const access = parseAccess(process.env.ACCESS);
 
       if (!appId || !privateKey) {
         console.error('APP_ID and APP_PRIVATE_KEY secrets are required');
@@ -242,9 +282,8 @@ if (require.main === module) {
         privateKey,
         installationId,
         targetRepo,
+        access,
         permissions,
-        scopeToRepo,
-        extraRepos,
       });
 
       // Tell GitHub Actions runner to mask this token across all step logs

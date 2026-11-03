@@ -1,6 +1,5 @@
 const fs = require('fs');
-const path = require('path');
-const { loadSpec, explain } = require('./lib/agentic');
+const { loadSpec, explain, DEFAULT_FILE } = require('./lib/agentic-yaml');
 
 // Usage: node scripts/validate-agentic.js [agentic.yaml] [--explain event.json]
 // Exits non-zero (printing every problem) when the file is invalid. With
@@ -10,9 +9,16 @@ function main(argv) {
   const args = argv.slice();
   const ei = args.indexOf('--explain');
   const eventPath = ei >= 0 ? args.splice(ei, 2)[1] : null;
-  const file = args[0] || path.join(__dirname, '..', 'agentic.yaml');
+  const file = args[0] || DEFAULT_FILE;
 
-  const { spec, errors } = loadSpec(fs.readFileSync(file, 'utf8'));
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    console.error(`${file}: ${e.message}`);
+    return 1;
+  }
+  const { spec, errors } = loadSpec(text);
   if (errors.length) {
     for (const e of errors) console.error(`${file}: ${e}`);
     return 1;

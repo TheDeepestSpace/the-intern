@@ -1,4 +1,79 @@
 import crypto from 'node:crypto';
+// Generated at deploy/test time by scripts/bundle-agentic.js from the validated
+// agentic.yaml + scripts/lib/agentic.js (see worker/package.json pretest and
+// .github/workflows/deploy-worker.yml). Missing or invalid file = no build.
+import {
+  SPEC,
+  loadSpecObject,
+  route,
+  resolveAgent,
+  eventFromWebhook,
+  eventFromTelegram,
+} from './agentic.generated.js';
+
+// agentic.yaml, re-validated once per isolate (fail closed: an invalid spec
+// means every routed request answers 500 and nothing is dispatched).
+// AGENTIC_SPEC is a test hook (a JSON string); production never sets it and
+// always uses the bundled SPEC.
+let cachedSpec = null;
+function getSpec(env) {
+  if (env.AGENTIC_SPEC !== undefined) {
+    const raw = typeof env.AGENTIC_SPEC === 'string' ? JSON.parse(env.AGENTIC_SPEC) : env.AGENTIC_SPEC;
+    const { spec, errors } = loadSpecObject(raw);
+    if (errors.length) throw new Error(`agentic.yaml is invalid: ${errors.join('; ')}`);
+    return spec;
+  }
+  if (!cachedSpec) {
+    const { spec, errors } = loadSpecObject(SPEC);
+    if (errors.length) throw new Error(`agentic.yaml is invalid: ${errors.join('; ')}`);
+    cachedSpec = spec;
+  }
+  return cachedSpec;
+}
+
+// Routes a normalized event through agentic.yaml. Returns { hit, resolved } or
+// { response } (an "ignored" 200 for a policy miss, 500 for a broken spec or
+// an ambiguous match, which is a config bug rather than a policy decision).
+function routeEvent(env, event, what) {
+  let spec;
+  try {
+    spec = getSpec(env);
+  } catch (err) {
+    return { response: new Response(`agentic spec unavailable: ${err.message}`, { status: 500 }) };
+  }
+  let hit;
+  try {
+    hit = route(spec, event);
+  } catch (err) {
+    return { response: new Response(`agentic routing error: ${err.message}`, { status: 500 }) };
+  }
+  if (!hit) return { response: new Response(`ignored: no agent trigger matches this ${what}`, { status: 200 }) };
+  let resolved;
+  try {
+    resolved = resolveAgent(spec, hit.name, hit.match);
+  } catch (err) {
+    // e.g. owner outside the allowlist, or a branch capture that is not a
+    // declared repo alias: default-deny, never a partial scope.
+    return { response: new Response(`ignored: ${err.message}`, { status: 200 }) };
+  }
+  return { spec, hit, resolved };
+}
+
+// agentic.yaml `limits.max_runs_per_hour`, counted per agent per UTC hour in
+// KV. A cost/loop guard, not an access control: skipped when no KV binding
+// is configured (tests), counted only after a successful dispatch.
+async function rateLimitKey(env, resolved) {
+  const limit = resolved.limits?.max_runs_per_hour;
+  if (!limit || !env.CI_FAILURE_DEDUP) return { key: null, exceeded: false };
+  const key = `runs:${resolved.agent}:${Math.floor(Date.now() / 3600000)}`;
+  const count = Number(await env.CI_FAILURE_DEDUP.get(key)) || 0;
+  return { key, exceeded: count >= limit, count };
+}
+
+async function countRun(env, limitState) {
+  if (!limitState.key) return;
+  await env.CI_FAILURE_DEDUP.put(limitState.key, String((limitState.count || 0) + 1), { expirationTtl: 2 * 3600 });
+}
 
 export default {
   async fetch(request, env) {
@@ -16,8 +91,12 @@ export default {
 
 // Shared dispatch POST used by the generic flow, handleCheckSuite, and
 // handleCodeRabbitReview: resolves the configured owner/repo, sets the
-// common headers, and sends eventType + rawPayload.
-async function dispatchRepoEvent(env, token, eventType, rawPayload) {
+// common headers, and sends eventType + { raw: rawPayload, ...extra }.
+async function dispatchRepoEvent(env, token, eventType, rawPayload, extra = {}) {
+  return postRepositoryDispatch(env, token, eventType, { raw: rawPayload, ...extra });
+}
+
+async function postRepositoryDispatch(env, token, eventType, clientPayload) {
   const owner = env.AGENT_INFRA_OWNER || 'TheDeepestSpace';
   const repo = env.AGENT_INFRA_REPO || 'the-intern';
 
@@ -31,7 +110,7 @@ async function dispatchRepoEvent(env, token, eventType, rawPayload) {
         'User-Agent': 'the-intern-bot-relay',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ event_type: eventType, client_payload: { raw: rawPayload } }),
+      body: JSON.stringify({ event_type: eventType, client_payload: clientPayload }),
     }
   );
 }
@@ -113,21 +192,15 @@ async function handleGitHub(request, env) {
     return new Response('ignored: comment not tied to a review', { status: 200 });
   }
 
-  // Guard: only trigger if @the-intern-bot is mentioned, OR the comment is on a
-  // thread (issue/PR) authored by the bot itself — but never for comments the
-  // bot itself posts, or every status update would re-trigger a dispatch.
-  const commentBody = payload.comment?.body || payload.review?.body || '';
-  const botLogin = (env.BOT_LOGIN || 'the-intern-bot[bot]').toLowerCase();
-  const threadAuthor = (
-    payload.issue?.user?.login || payload.pull_request?.user?.login || ''
-  ).toLowerCase();
-  const mentionsBot = commentBody.toLowerCase().includes('@the-intern-bot');
-  const isBotAuthoredThread = threadAuthor === botLogin;
-  const commenterIsBot = (author || '').toLowerCase() === botLogin;
-
-  if (!mentionsBot && !(isBotAuthoredThread && !commenterIsBot)) {
-    return new Response('ignored: bot not mentioned and not a comment on a bot-authored thread', { status: 200 });
-  }
+  // Which agent (if any) this comment fires is decided by agentic.yaml: the
+  // catch-all `default` agent matches any @mention, and a reply on a thread
+  // the bot itself opened counts as an implicit mention — unless the bot
+  // wrote it, or every status update would re-trigger a dispatch (see
+  // eventFromWebhook). The agent is re-resolved by dispatcher.yml from the
+  // same payload and file, so only the name is forwarded here.
+  const routed = routeEvent(env, eventFromWebhook(getSpecOrNull(env), eventType, payload), 'comment');
+  if (routed.response) return routed.response;
+  const { hit, resolved } = routed;
 
   const installationId = payload.installation?.id;
   if (!installationId) {
@@ -135,18 +208,34 @@ async function handleGitHub(request, env) {
   }
 
   try {
+    const limit = await rateLimitKey(env, resolved);
+    if (limit.exceeded) {
+      return new Response(`ignored: rate limit for agent ${hit.name} reached`, { status: 200 });
+    }
+
     const token = await getInstallationToken(env, installationId);
 
-    const dispatchRes = await dispatchRepoEvent(env, token, eventType, payload);
+    const dispatchRes = await dispatchRepoEvent(env, token, eventType, payload, { agent: hit.name });
 
     if (!dispatchRes.ok) {
       const errorText = await dispatchRes.text();
       return new Response(`dispatch failed: ${errorText}`, { status: 502 });
     }
 
+    await countRun(env, limit);
     return new Response('ok', { status: 200 });
   } catch (err) {
     return new Response(`internal error: ${err.message}`, { status: 500 });
+  }
+}
+
+// eventFromWebhook needs the bot login from the spec; a broken spec is
+// reported by routeEvent right after, so a null here is harmless.
+function getSpecOrNull(env) {
+  try {
+    return getSpec(env);
+  } catch {
+    return { bot: 'the-intern-bot' };
   }
 }
 
@@ -304,16 +393,22 @@ async function handleCheckSuite(payload, env) {
 // and a PR that's still dirty on the next push just re-dispatches, which is
 // the intended retry-until-fixed behavior.
 async function handlePush(payload, env) {
-  if (SPECAGE_SPEC_REF.test(payload.ref || '')) {
-    return handleSpecagePush(payload, env);
-  }
-  if (SPECAGE_REVIEW_REF.test(payload.ref || '')) {
-    return handleSpecageReviewPush(payload, env);
-  }
+  // agentic.yaml commit triggers (e.g. the specage spec/review branches) come
+  // first; a push that matches one never reaches the default-branch logic.
   const defaultBranch = payload.repository?.default_branch;
   const pushedBranch = (payload.ref || '').replace(/^refs\/heads\//, '');
+  const onDefaultBranch = !payload.deleted && Boolean(defaultBranch) && pushedBranch === defaultBranch;
 
-  if (payload.deleted || !defaultBranch || pushedBranch !== defaultBranch) {
+  const commitEvent = eventFromWebhook(getSpecOrNull(env), 'push', payload);
+  if (commitEvent) {
+    const routed = routeEvent(env, commitEvent, 'push');
+    if (routed.hit) return handleCommitTrigger(commitEvent, routed, payload, env);
+    // A broken spec (500) always wins; a policy miss only matters off the
+    // default branch, where nothing else could handle the push.
+    if (!onDefaultBranch || routed.response.status !== 200) return routed.response;
+  }
+
+  if (!onDefaultBranch) {
     return new Response('ignored: push not on default branch', { status: 200 });
   }
 
@@ -390,176 +485,57 @@ async function handlePush(payload, env) {
   }
 }
 
-const SPECAGE_SPEC_REF = /^refs\/heads\/specages\/([^/]+)\/spec$/;
-const SPECAGE_REVIEW_REF = /^refs\/heads\/specages\/([^/]+)\/review$/;
-const SPECAGE_REVIEW_MESSAGE = /^review ([\w.-]+\/[\w.-]+)#(\d+)$/;
-
-function ghHeaders(token, accept = 'application/vnd.github+json') {
-  return { Authorization: `Bearer ${token}`, Accept: accept, 'User-Agent': 'the-intern-bot-relay' };
-}
-
-// Commit-driven specage dispatch: a push to specages/<project>/spec in an
-// allowlisted data repo (SPECAGE_DATA_REPOS, comma-separated owner/repo) pushed
-// by specage-app[bot] (SPECAGE_BOT_LOGIN) files
-// a specage_push repository_dispatch (specage.yml) against the project repo (named in .specage/config.yaml
-// on the pushed commit) with no issue/PR attached: like a Telegram message,
-// this is what decides whether any issue gets created. Deduped per
-// (data repo, head sha) in KV, marked only after a successful dispatch.
-async function handleSpecagePush(payload, env) {
-  const project = payload.ref.match(SPECAGE_SPEC_REF)[1];
-  const dataRepo = payload.repository?.full_name || '';
-  const allowed = (env.SPECAGE_DATA_REPOS || '')
-    .split(',')
-    .map(s => s.trim().toLowerCase())
-    .filter(Boolean);
-  if (!allowed.includes(dataRepo.toLowerCase())) {
-    return new Response('ignored: data repo not allowlisted', { status: 200 });
-  }
-
-  // Only the specage app's own pushes may trigger a dispatch.
-  const specageLogin = (env.SPECAGE_BOT_LOGIN || 'specage-app[bot]').toLowerCase();
-  const sender = (payload.sender?.login || '').toLowerCase();
-  if (sender !== specageLogin) {
-    return new Response('ignored: sender not authorized', { status: 200 });
-  }
-  const sha = payload.after;
-  if (payload.deleted || !sha || /^0+$/.test(sha)) {
-    return new Response('ignored: spec branch deleted', { status: 200 });
+// Commit-driven dispatch: a push matched an agent's `commit` trigger in
+// agentic.yaml (repo, branch pattern with captures, trusted author — the
+// author check doubles as loop avoidance). Files an `agent_commit`
+// repository_dispatch (specage.yml) naming the agent and the structural
+// facts of the push; the workflow re-routes the same event through the same
+// file and refuses to run if it disagrees. Deduped per (agent, repo, sha) in
+// KV and capped by the agent's max_runs_per_hour, both marked only after a
+// successful dispatch.
+async function handleCommitTrigger(event, { hit, resolved }, payload, env) {
+  if (event.deleted) {
+    return new Response('ignored: branch deleted', { status: 200 });
   }
   const installationId = payload.installation?.id;
   if (!installationId) {
     return new Response('missing installation id', { status: 400 });
   }
 
-  const dedupKey = `specage_push:${dataRepo}@${sha}`;
+  const dedupKey = `agent_commit:${hit.name}:${event.repo.toLowerCase()}@${event.sha}`;
   try {
     if (await env.CI_FAILURE_DEDUP.get(dedupKey)) {
-      return new Response('ignored: specage push already dispatched', { status: 200 });
+      return new Response('ignored: commit already dispatched', { status: 200 });
     }
-
-    const dataToken = await getInstallationToken(env, installationId);
-    const cfgRes = await fetch(
-      `https://api.github.com/repos/${dataRepo}/contents/.specage/config.yaml?ref=${sha}`,
-      { headers: ghHeaders(dataToken, 'application/vnd.github.raw+json') }
-    );
-    if (cfgRes.status === 404) {
-      return new Response('ignored: no .specage/config.yaml on spec branch', { status: 200 });
+    const limit = await rateLimitKey(env, resolved);
+    if (limit.exceeded) {
+      return new Response(`ignored: rate limit for agent ${hit.name} reached`, { status: 200 });
     }
-    if (!cfgRes.ok) {
-      return new Response(`config fetch failed (${cfgRes.status})`, { status: 502 });
-    }
-    const cfg = await cfgRes.text();
-    const projectRepo = cfg.match(/^repo:\s*["']?([\w.-]+\/[\w.-]+)["']?/m)?.[1];
-    if (!projectRepo) {
-      return new Response('ignored: config has no project repo', { status: 200 });
-    }
-    const backend = cfg.match(/^[ \t]+backend:\s*["']?([\w.-]+)/m)?.[1] || 'claude';
 
     const owner = env.AGENT_INFRA_OWNER || 'TheDeepestSpace';
     const repo = env.AGENT_INFRA_REPO || 'the-intern';
     const appJwt = mintAppJwt(env.APP_ID, normalizeKey(getPrivateKey(env)));
-    const projectInstall = await getInstallationIdForRepo(appJwt, projectRepo);
     const internInstall = env.AGENT_INFRA_INSTALLATION_ID || (await getInstallationIdForRepo(appJwt, `${owner}/${repo}`));
-    if (!projectInstall || !internInstall) {
-      return new Response('app not installed on project or agent-infra repo', { status: 502 });
+    if (!internInstall) {
+      return new Response('app not installed on agent-infra repo', { status: 502 });
     }
     const internToken = await getInstallationToken(env, internInstall);
 
-    const dispatchRes = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/dispatches`,
-      {
-        method: 'POST',
-        headers: { ...ghHeaders(internToken), 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          event_type: 'specage_push',
-          client_payload: {
-            target_repo: projectRepo,
-            installation_id: String(projectInstall),
-            text: `backend=${backend} Run the specage dispatch for commit ${sha}. Spec and trail live in ${dataRepo} on branches specages/${project}/{spec,trail}. Follow .specage/PROTOCOL.md on the spec branch exactly.`,
-          },
-        }),
-      }
-    );
+    const dispatchRes = await postRepositoryDispatch(env, internToken, 'agent_commit', {
+      agent: hit.name,
+      repo: event.repo,
+      branch: event.branch,
+      sha: event.sha,
+      author: event.author,
+      message: event.message,
+      paths: event.paths,
+      installation_id: String(installationId),
+    });
     if (!dispatchRes.ok) {
       return new Response(`dispatch failed: ${await dispatchRes.text()}`, { status: 502 });
     }
     await env.CI_FAILURE_DEDUP.put(dedupKey, '1', { expirationTtl: 60 * 60 * 24 * 14 });
-    return new Response('ok', { status: 200 });
-  } catch (err) {
-    return new Response(`internal error: ${err.message}`, { status: 500 });
-  }
-}
-
-// Push-driven specage review: the implement agent (the-intern bot, not the
-// specage app) pushes an empty commit to specages/<project>/review in an
-// allowlisted data repo, with the exact message `review <owner/repo>#<number>`.
-// The sender must be BOT_LOGIN; a push whose head commit message doesn't match
-// is ignored. Runs dispatcher.yml (workflow_dispatch) against that PR, capped
-// to one run per PR per SPECAGE_REVIEW_COOLDOWN_SECONDS (default 300) via KV,
-// marked only after a successful dispatch.
-async function handleSpecageReviewPush(payload, env) {
-  const project = payload.ref.match(SPECAGE_REVIEW_REF)[1];
-  const dataRepo = payload.repository?.full_name || '';
-  const allowed = (env.SPECAGE_DATA_REPOS || '')
-    .split(',')
-    .map(s => s.trim().toLowerCase())
-    .filter(Boolean);
-  if (!allowed.includes(dataRepo.toLowerCase())) {
-    return new Response('ignored: data repo not allowlisted', { status: 200 });
-  }
-
-  const internLogin = (env.BOT_LOGIN || 'the-intern-bot[bot]').toLowerCase();
-  const sender = (payload.sender?.login || '').toLowerCase();
-  if (sender !== internLogin) {
-    return new Response('ignored: sender not authorized', { status: 200 });
-  }
-  const sha = payload.after;
-  if (payload.deleted || !sha || /^0+$/.test(sha)) {
-    return new Response('ignored: review branch deleted', { status: 200 });
-  }
-  const match = (payload.head_commit?.message || '').trim().match(SPECAGE_REVIEW_MESSAGE);
-  if (!match) {
-    return new Response('ignored: head commit message is not a review request', { status: 200 });
-  }
-  const [, prRepo, prNumber] = match;
-
-  const dedupKey = `specage_review:${prRepo.toLowerCase()}#${prNumber}`;
-  const cooldown = Math.max(60, Number(env.SPECAGE_REVIEW_COOLDOWN_SECONDS) || 300);
-  try {
-    if (await env.CI_FAILURE_DEDUP.get(dedupKey)) {
-      return new Response('ignored: review for this PR ran recently', { status: 200 });
-    }
-
-    const owner = env.AGENT_INFRA_OWNER || 'TheDeepestSpace';
-    const repo = env.AGENT_INFRA_REPO || 'the-intern';
-    const appJwt = mintAppJwt(env.APP_ID, normalizeKey(getPrivateKey(env)));
-    const projectInstall = await getInstallationIdForRepo(appJwt, prRepo);
-    const internInstall = env.AGENT_INFRA_INSTALLATION_ID || (await getInstallationIdForRepo(appJwt, `${owner}/${repo}`));
-    if (!projectInstall || !internInstall) {
-      return new Response('app not installed on project or agent-infra repo', { status: 502 });
-    }
-    const internToken = await getInstallationToken(env, internInstall);
-
-    const dispatchRes = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/actions/workflows/dispatcher.yml/dispatches`,
-      {
-        method: 'POST',
-        headers: { ...ghHeaders(internToken), 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ref: env.AGENT_INFRA_REF || 'main',
-          inputs: {
-            target_repo: prRepo,
-            pr_number: prNumber,
-            installation_id: String(projectInstall),
-            comment_body: `specage=true Review specage PR ${prRepo}#${prNumber}. The spec lives in ${dataRepo} on specages/${project}/spec; follow the ## Review section (not Implement) of protocol/PROTOCOL.md there. Never push to the specages/${project}/review, spec or trail branches.`,
-          },
-        }),
-      }
-    );
-    if (!dispatchRes.ok) {
-      return new Response(`dispatch failed: ${await dispatchRes.text()}`, { status: 502 });
-    }
-    await env.CI_FAILURE_DEDUP.put(dedupKey, sha, { expirationTtl: cooldown });
+    await countRun(env, limit);
     return new Response('ok', { status: 200 });
   } catch (err) {
     return new Response(`internal error: ${err.message}`, { status: 500 });
@@ -695,10 +671,22 @@ async function handleTelegram(request, env) {
     return new Response('ignored: unauthorized chat_id', { status: 200 });
   }
 
+  // agentic.yaml decides whether a Telegram message runs an agent (the
+  // `telegram` trigger); telegram-session.yml re-resolves it from the same
+  // forwarded text, so only the agent name travels with the payload.
+  const routed = routeEvent(env, eventFromTelegram(message), 'telegram message');
+  if (routed.response) return routed.response;
+  const { hit, resolved } = routed;
+
   const owner = env.AGENT_INFRA_OWNER || 'TheDeepestSpace';
   const repo = env.AGENT_INFRA_REPO || 'the-intern';
 
   try {
+    const limit = await rateLimitKey(env, resolved);
+    if (limit.exceeded) {
+      return new Response(`ignored: rate limit for agent ${hit.name} reached`, { status: 200 });
+    }
+
     let installationId = env.AGENT_INFRA_INSTALLATION_ID;
     if (!installationId) {
       const appId = env.APP_ID;
@@ -720,6 +708,7 @@ async function handleTelegram(request, env) {
     const token = await getInstallationToken(env, installationId);
 
     const clientPayload = {
+      agent: hit.name,
       text: message.text || message.caption || '',
       chat_id: message.chat.id,
       sender_id: message.from.id,
@@ -774,6 +763,7 @@ async function handleTelegram(request, env) {
       return new Response(`dispatch failed: ${errorText}`, { status: 502 });
     }
 
+    await countRun(env, limit);
     return new Response('ok', { status: 200 });
   } catch (err) {
     return new Response(`telegram handling error: ${err.message}`, { status: 500 });

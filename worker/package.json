@@ -5,7 +5,10 @@
   "type": "module",
   "main": "src/index.js",
   "scripts": {
+    "bundle": "node ../scripts/bundle-agentic.js",
+    "predeploy": "npm run bundle",
     "deploy": "wrangler deploy",
+    "pretest": "npm run bundle",
     "test": "vitest run"
   },
   "devDependencies": {

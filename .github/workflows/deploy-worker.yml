@@ -5,6 +5,9 @@ on:
     branches: [main]
     paths:
       - 'worker/**'
+      - 'agentic.yaml'
+      - 'scripts/lib/agentic.js'
+      - 'scripts/bundle-agentic.js'
 
 permissions:
   contents: read
@@ -24,11 +27,43 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install root dependencies
+        working-directory: .
+        run: npm install
+
       - name: Install dependencies
         run: npm install
+
+      # Fail closed: an invalid agentic.yaml stops the deploy here, and the
+      # worker keeps serving the last bundled (valid) spec.
+      - name: Validate and bundle agentic.yaml into the worker
+        working-directory: .
+        run: |
+          node scripts/validate-agentic.js
+          node scripts/bundle-agentic.js
 
       - name: Deploy to Cloudflare Workers
         run: npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+  notify-failure:
+    needs: deploy
+    if: always() && needs.deploy.result == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Notify maintainer via Telegram
+        run: node scripts/notify-failure.js
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
+          REPO: ${{ github.repository }}
+          WORKFLOW_NAME: deploy worker (agentic.yaml bundle)
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          FAILED_JOBS: deploy

@@ -16,8 +16,9 @@ function issueCommentPayload(overrides = {}) {
   return {
     action: 'created',
     installation: { id: 42 },
+    repository: { full_name: 'TheDeepestSpace/the-intern' },
     comment: { user: { login: 'alice' }, body: 'hey @the-intern-bot please help' },
-    issue: { user: { login: 'someone-else' } },
+    issue: { number: 3, user: { login: 'someone-else' } },
     ...overrides,
   };
 }
@@ -92,11 +93,9 @@ describe('handleGitHub allowlist gating', () => {
       baseGithubEnv({ ALLOWED_USERS: 'alice, carol' })
     );
 
-    // Passes the allowlist, but is still rejected by the mention gate below.
+    // Passes the allowlist, but is still rejected by agentic.yaml routing below.
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe(
-      'ignored: bot not mentioned and not a comment on a bot-authored thread'
-    );
+    expect(await res.text()).toBe('ignored: no agent trigger matches this comment');
   });
 
   it('skips the allowlist check entirely when ALLOWED_USERS is unset', async () => {
@@ -154,11 +153,9 @@ describe('handleGitHub event-type filtering', () => {
         }),
         baseGithubEnv()
       );
-      // Relevant event type but no mention -> rejected by the next gate, not this one.
+      // Relevant event type but no mention -> rejected by agentic.yaml routing, not this one.
       expect(res.status).toBe(200);
-      expect(await res.text()).toBe(
-        'ignored: bot not mentioned and not a comment on a bot-authored thread'
-      );
+      expect(await res.text()).toBe('ignored: no agent trigger matches this comment');
     }
   );
 });
@@ -201,7 +198,7 @@ describe('handleGitHub @the-intern-bot mention gating', () => {
         eventType: 'issue_comment',
         body: issueCommentPayload({
           comment: { user: { login: 'alice' }, body: 'sounds good, go ahead' },
-          issue: { user: { login: 'the-intern-bot[bot]' } },
+          issue: { number: 3, user: { login: 'the-intern-bot[bot]' } },
         }),
       }),
       baseGithubEnv()
@@ -217,15 +214,13 @@ describe('handleGitHub @the-intern-bot mention gating', () => {
         eventType: 'issue_comment',
         body: issueCommentPayload({
           comment: { user: { login: 'the-intern-bot[bot]' }, body: 'working on it...' },
-          issue: { user: { login: 'the-intern-bot[bot]' } },
+          issue: { number: 3, user: { login: 'the-intern-bot[bot]' } },
         }),
       }),
       baseGithubEnv()
     );
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe(
-      'ignored: bot not mentioned and not a comment on a bot-authored thread'
-    );
+    expect(await res.text()).toBe('ignored: no agent trigger matches this comment');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -235,15 +230,13 @@ describe('handleGitHub @the-intern-bot mention gating', () => {
         eventType: 'issue_comment',
         body: issueCommentPayload({
           comment: { user: { login: 'alice' }, body: 'just a regular comment' },
-          issue: { user: { login: 'someone-else' } },
+          issue: { number: 3, user: { login: 'someone-else' } },
         }),
       }),
       baseGithubEnv()
     );
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe(
-      'ignored: bot not mentioned and not a comment on a bot-authored thread'
-    );
+    expect(await res.text()).toBe('ignored: no agent trigger matches this comment');
   });
 });
 
@@ -284,6 +277,7 @@ describe('handleGitHub dispatch', () => {
     const body = JSON.parse(dispatchInit.body);
     expect(body.event_type).toBe('issue_comment');
     expect(body.client_payload.raw).toEqual(payload);
+    expect(body.client_payload.agent).toBe('default');
   });
 
   it('returns 502 when the dispatch call fails', async () => {
@@ -832,7 +826,7 @@ describe('handleGitHub push handling', () => {
       baseGithubEnv()
     );
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe('ignored: push not on default branch');
+    expect(await res.text()).toBe('ignored: no agent trigger matches this push');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -843,7 +837,7 @@ describe('handleGitHub push handling', () => {
       baseGithubEnv()
     );
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe('ignored: push not on default branch');
+    expect(await res.text()).toBe('ignored: no agent trigger matches this push');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
