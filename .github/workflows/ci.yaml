@@ -6,14 +6,12 @@ on:
     paths:
       - 'worker/**'
       - 'scripts/**'
-      - 'agentic.yaml'
       - 'package.json'
       - 'package-lock.json'
   pull_request:
     paths:
       - 'worker/**'
       - 'scripts/**'
-      - 'agentic.yaml'
       - 'package.json'
       - 'package-lock.json'
   schedule:
@@ -82,9 +80,6 @@ jobs:
 
       - name: Install dependencies
         run: npm install
-
-      - name: Validate agentic.yaml
-        run: node scripts/validate-agentic.js
 
       - name: Run tests
         run: npm test
