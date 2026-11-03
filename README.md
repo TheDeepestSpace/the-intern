@@ -40,7 +40,7 @@ installation set the worker serves webhooks for. Three phases, all driven by
    dispatched. Nothing is sent on a no-op night.
 
 State (verdicts keyed by diff hash, confirmation timestamps, conflict
-dedupe) persists on the `nightly-crawl` branch of the-intern-data via
+dedupe) persists on the `state/nightly-crawl` branch of the-intern-data via
 `scripts/manage-nightly-crawl-state.js`, so the 2-day clock survives
 between runs. Verdicts and the plan are also kept as run artifacts.
 
@@ -49,7 +49,7 @@ between runs. Verdicts and the plan are also kept as run artifacts.
 | Name | Kind | Purpose |
 | --- | --- | --- |
 | `APP_ID`, `APP_PRIVATE_KEY` | secret (existing) | Enumerate installations and mint per-repo tokens |
-| `DATA_REPO_TOKEN` | secret (existing) | Read/write the `nightly-crawl` state branch on the-intern-data |
+| `DATA_REPO_TOKEN` | secret (existing) | Read/write the `state/nightly-crawl` state branch on the-intern-data |
 | `CLAUDE_CODE_OAUTH_TOKEN` | secret (existing) | Review agent |
 | `TG_BOT_TOKEN`, `TG_ADMIN_CHAT_ID` | secret (existing) | Telegram copy of the report + failure alerts |
 | `REPORT_MENTION` | variable | GitHub login @-mentioned in the report comment (default `TheDeepestSpace`) |
