@@ -5,7 +5,7 @@ const YAML = require('yaml');
 // and what it runs. Pure functions only (no I/O, no network) so the worker,
 // CI and tests can all share it.
 
-const TRIGGER_KINDS = ['comment', 'commit', 'pull_request', 'issue', 'schedule', 'manual', 'telegram'];
+const TRIGGER_KINDS = ['comment', 'commit', 'pull_request', 'issue', 'schedule', 'manual'];
 const SCOPES = ['read', 'read/write'];
 const ACTION_KINDS = ['dispatch_agent', 'dispatch_workflow', 'comment', 'label', 'open_issue'];
 const PARAM_TYPES = ['string', 'integer', 'boolean'];
@@ -85,12 +85,6 @@ function triggerContext(kind, def, values) {
     case 'issue':
       t = { ...base, number: ph('number') };
       break;
-    case 'telegram': {
-      const param = {};
-      for (const p of Object.keys(def.params || {})) param[p] = v ? (v.params || {})[p] : true;
-      t = { chat_id: ph('chat_id'), message_id: ph('message_id'), param };
-      break;
-    }
     case 'manual': {
       const parameters = {};
       for (const p of Object.keys(def.parameters || {})) parameters[p] = v ? (v.parameters || {})[p] : true;
@@ -215,10 +209,6 @@ function validateTrigger(name, trigger, spec, errors) {
       if (typeof def.cron !== 'string' || def.cron.trim().split(/\s+/).length !== 5) {
         errors.push(`${w}.cron: 5-field cron expression required`);
       }
-      break;
-    case 'telegram':
-      unknownKeys(def, ['params'], w, errors);
-      if (def.params !== undefined) validateParams(def.params, `${w}.params`, errors);
       break;
     case 'manual':
       unknownKeys(def, ['parameters'], w, errors);
@@ -397,7 +387,6 @@ function checkAmbiguity(spec, errors) {
     if (kind === 'comment') key = `comment:${(def.verb || name).toLowerCase()}:${(def.on || COMMENT_ON).slice().sort()}`;
     else if (kind === 'commit') key = `commit:${spec.repos[def.repo] || def.repo}:${def.branch}`.toLowerCase();
     else if (kind === 'schedule') key = `schedule:${def.cron}`;
-    else if (kind === 'telegram') key = 'telegram';
     if (key === null) continue;
     if (seen.has(key)) errors.push(`agents.${name}: ambiguous trigger, same as agent '${seen.get(key)}'`);
     else seen.set(key, name);
@@ -463,7 +452,7 @@ const authorList = a => (a === undefined ? null : [].concat(a).map(lc));
 // are the trigger fields ($trigger.<kind>.*) taken from the event.
 // event: { kind, repo, author, ... } — normalized by the caller (the worker);
 // comment: body, on, issue_number | commit: branch, sha, paths |
-// telegram: body, chat_id, message_id | pull_request/issue: action, labels, number | manual: agent, parameters | schedule: agent
+// pull_request/issue: action, labels, number | manual: agent, parameters | schedule: agent
 function matchAgent(spec, name, event) {
   const agent = spec.agents[name];
   const kind = Object.keys(agent.trigger)[0];
@@ -511,14 +500,6 @@ function matchAgent(spec, name, event) {
     if (!def.events.includes(event.action)) return null;
     if (def.labels && !def.labels.some(l => (event.labels || []).includes(l))) return null;
     return { kind, values: { repo: event.repo, author: event.author, number: event.number } };
-  }
-  if (kind === 'telegram') {
-    // Same convention as parse-telegram-trigger.js: backend=x anywhere in the text.
-    const declared = def.params || {};
-    const params = {};
-    const m = /\bbackend=(\S+)/i.exec(event.body || '');
-    if (m && 'backend' in declared) params.backend = m[1].toLowerCase();
-    return { kind, values: { chat_id: event.chat_id, message_id: event.message_id, params } };
   }
   if (kind === 'schedule') return event.agent === name ? { kind, values: {} } : null;
   if (kind === 'manual') {
