@@ -62,21 +62,6 @@ function parseTrigger() {
       targetRepo = payload.repository?.full_name || '';
       issueNumber = String(payload.pull_request.number || '');
       commentBody = `A push to ${payload.merge_conflict.base_ref || 'the default branch'} left this PR unmergeable (mergeable_state: ${payload.merge_conflict.mergeable_state}). Merge or rebase the latest default branch into this PR's branch, resolve the conflicts, and push the fix.`;
-    } else if (payload.target_repo && payload.text) {
-      // custom_prompt: an explicit instruction filed via repository_dispatch by
-      // an external caller, e.g. the specage server's /agent/initiate-review
-      // endpoint (issue #265) - same client_payload shape as the worker's
-      // specage_push ({target_repo, text, optional pr_number/installation_id}).
-      // Filing a repository_dispatch on this repo needs contents:write here, so
-      // the text is trusted like workflow_dispatch inputs and there is no
-      // @the-intern-bot mention gate. Leading key=value control tokens in the
-      // text (specage=, backend=, ...) are parsed below like any comment. With
-      // no installation_id, mint-installation-token.js resolves it from the
-      // target repo.
-      targetRepo = payload.target_repo;
-      issueNumber = String(payload.pr_number || payload.issue_number || '');
-      commentBody = payload.text;
-      installationId = String(payload.installation_id || '');
     } else {
       // Fallback extraction
       targetRepo = payload.repository?.full_name || process.env.INPUT_TARGET_REPO || '';
