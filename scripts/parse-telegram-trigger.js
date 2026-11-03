@@ -15,13 +15,23 @@ function parseTelegramTrigger() {
   const matchBackend = text.match(/\bbackend=([^\s]+)/i);
   if (matchBackend) backend = matchBackend[1];
 
+  let model = 'default';
+  const matchModel = text.match(/\bmodel=([^\s]+)/i);
+  if (matchModel) model = matchModel[1];
+
+  let effort = 'default';
+  const matchEffort = text.match(/\beffort=([^\s]+)/i);
+  if (matchEffort) effort = matchEffort[1];
+
   const cleanText = text
-    .replace(/\bbackend=([^\s]+)/gi, '')
+    .replace(/\b(?:backend|model|effort)=([^\s]+)/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
 
   const result = {
     backend,
+    model,
+    effort,
     clean_text: cleanText,
   };
 
