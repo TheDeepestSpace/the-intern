@@ -46,9 +46,10 @@ function branchPattern(pattern) {
 function globToRegExp(glob) {
   const src = glob
     .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*\*\/?/g, '\u0000')
+    .replace(/\*\*\/?/g, m => (m.endsWith('/') ? '\u0000' : '\u0001'))
     .replace(/\*/g, '[^/]*')
-    .replace(/\u0000/g, '(?:.*/)?');
+    .replace(/\u0000/g, '(?:.*/)?')
+    .replace(/\u0001/g, '.*');
   return new RegExp(`^${src}$`);
 }
 
@@ -220,7 +221,9 @@ function validateAgent(name, agent, spec, errors) {
   const where = `agents.${name}`;
   if (!isObj(agent)) return errors.push(`${where}: must be a map`);
   unknownKeys(agent, AGENT_KEYS, where, errors);
+  const before = errors.length;
   validateTrigger(name, agent.trigger, spec, errors);
+  if (errors.length > before) return;
   const kind = isObj(agent.trigger) ? Object.keys(agent.trigger)[0] : null;
   if (!TRIGGER_KINDS.includes(kind)) return;
   const tdef = agent.trigger[kind] || {};
@@ -437,7 +440,7 @@ function loadSpec(text) {
     return { spec: null, errors };
   }
   for (const [name, agent] of Object.entries(spec.agents)) validateAgent(name, agent, spec, errors);
-  checkAmbiguity(spec, errors);
+  if (!errors.length) checkAmbiguity(spec, errors);
   return { spec: errors.length ? null : spec, errors };
 }
 
