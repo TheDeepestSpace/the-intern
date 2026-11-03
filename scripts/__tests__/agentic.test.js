@@ -197,6 +197,7 @@ describe('trigger matching and resolution', () => {
     expect(r.agent).toBe('telegram');
     expect(r.backend).toBe('codex');
     expect(explain(spec, ev('hello')).backend).toBe('claude');
+    expect(r.access).toEqual([{ repo: '*', scope: 'read/write' }]);
   });
 
   it('reports ambiguity at runtime instead of guessing', () => {
