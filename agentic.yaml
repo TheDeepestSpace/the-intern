@@ -48,7 +48,7 @@ agents:
   # Telegram chat: a message from the admin chat (the worker authenticates the
   # chat id; telegram-session.yml is the runner). Flow:
   #   1. Worker forwards the message as a `telegram_message` repository_dispatch.
-  #   2. parse-telegram-trigger.js pulls optional `backend=x`/`model=x`/`effort=x` out of the text;
+  #   2. parse-telegram-trigger.js pulls an optional `backend=x` out of the text;
   #      the rest becomes the prompt.
   #   3. The session starts in the-intern-data's `telegram` branch with
   #      convo.md (rolling summary) as context, per instructions/telegram.md.
@@ -62,15 +62,13 @@ agents:
   telegram:
     trigger:
       telegram:
-        params: { backend: string, model: string, effort: string }
+        params: { backend: string }
     access:
       repos:
         - { name: '*', scope: read/write }  # every repo the app is installed in
     prompt_file: { repo: the_intern, path: instructions/telegram.md }
     prompt_append: [safety]
     backend: $trigger.telegram.param.backend | claude
-    model: $trigger.telegram.param.model | default
-    effort: $trigger.telegram.param.effort | default
     timeout: 45m
 
   specage_planner:
