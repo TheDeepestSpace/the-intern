@@ -25,7 +25,6 @@ describe('dispatch_agent allowlist', () => {
     expect(r.access).toEqual([
       { repo: PROJECT, scope: 'read/write' },
       { repo: 'TheDeepestSpace/specage-data', scope: 'read/write' },
-      { repo: 'TheDeepestSpace/specage', scope: 'read' }, // prompt source read grant
     ]);
     expect(r.params).toEqual({ backend: 'claude' });
     expect(r.dispatch).toMatchObject({

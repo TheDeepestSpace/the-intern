@@ -1026,13 +1026,12 @@ function resolveAgent(spec, name, match) {
   const dispatch = match.kind === 'dispatch' ? match.values.dispatch : null;
   if (dispatch) {
     // The allowlist already vetted these in normalizeDispatch; here they only
-    // become the token scope: the target (read/write), the extra grants and
-    // read access to the prompt source repo. A repo listed twice keeps the
-    // wider scope.
+    // become the token scope: the target (read/write) and the extra grants.
+    // The prompt source is fetched with its own read-only token, so it is not
+    // listed here. A repo listed twice keeps the wider scope.
     const wanted = [
       { repo: dispatch.repo, scope: 'read/write' },
       ...dispatch.access,
-      ...(dispatch.prompt_source ? [{ repo: dispatch.prompt_source.repo, scope: 'read' }] : []),
     ];
     for (const w of wanted) {
       const have = access.find(a => lc(a.repo) === lc(w.repo));
