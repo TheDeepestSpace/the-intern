@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  loadSpecFile, route, resolveAgent, eventFromWebhook, eventFromTelegram, eventFromSystem, botLogin,
+  loadSpecFile, route, resolveAgent, eventFromWebhook, eventFromTelegram, eventFromSystem, eventFromDispatch, botLogin,
 } = require('./lib/agentic-yaml');
 const { parseTrigger } = require('./parse-trigger');
 
@@ -40,6 +40,14 @@ function buildEvent(spec, env) {
 
   if (eventName === 'workflow_dispatch') {
     const inputs = raw.inputs || {};
+    // Generic dispatch_agent entrypoint: one JSON input, validated against the
+    // `dispatch` allowlist in agentic.yaml. The caller is the (unspoofable)
+    // GitHub actor that fired the workflow.
+    const dispatchInput = env.INPUT_DISPATCH ?? inputs.dispatch ?? '';
+    if (dispatchInput) {
+      const actor = env.GITHUB_TRIGGERING_ACTOR || env.GITHUB_ACTOR || raw.sender?.login || '';
+      return { event: eventFromDispatch(actor, dispatchInput), expectedAgent: null, shape: null };
+    }
     const agent = env.INPUT_AGENT || inputs.agent || '';
     if (agent) {
       // Manual trigger (dispatch_agent action, or a human running the workflow).
@@ -100,6 +108,9 @@ function buildEvent(spec, env) {
 function requestText(resolved, event) {
   if (event.kind === 'comment') return resolved.text || DEFAULT_REQUEST;
   if (event.kind === 'telegram') return resolved.text || '';
+  // dispatch: the caller's inline prompt; a repo-sourced prompt is fetched
+  // later (fetch-prompt-file.js) and joined by assemble-prompt.js.
+  if (event.kind === 'dispatch') return resolved.text || '';
   // ci_failure / merge_conflict / review: the agent's declared `request`.
   if (resolved.request) return resolved.request;
   if (event.kind === 'commit') {
@@ -168,6 +179,7 @@ function main(env = process.env) {
   if (env.CLEAN_PROMPT_FILE) fs.writeFileSync(env.CLEAN_PROMPT_FILE, text, 'utf8');
   if (env.AGENT_FILE) fs.writeFileSync(env.AGENT_FILE, JSON.stringify(agentJson, null, 2), 'utf8');
 
+  const promptSource = resolved.prompt_file || resolved.dispatch?.prompt_source || null;
   const outputs = {
     agent: resolved.agent,
     target_repo: agentJson.target_repo,
@@ -181,11 +193,11 @@ function main(env = process.env) {
     timeout_minutes: Math.max(1, Math.ceil(resolved.timeout_seconds / 60)),
     event_type: agentJson.event_type,
     comment_id: agentJson.comment_id,
-    specage: resolved.params.specage === true ? 'true' : 'false',
+    callback_repo: resolved.dispatch?.callback?.repo || '',
     access: JSON.stringify(resolved.access),
-    prompt_repo: resolved.prompt_file ? resolved.prompt_file.repo : '',
-    prompt_ref: resolved.prompt_file ? resolved.prompt_file.ref || '' : '',
-    prompt_path: resolved.prompt_file ? resolved.prompt_file.path : '',
+    prompt_repo: promptSource ? promptSource.repo : '',
+    prompt_ref: promptSource ? promptSource.ref || '' : '',
+    prompt_path: promptSource ? promptSource.path : '',
     actions_count: resolved.actions.length,
   };
   for (const [k, v] of Object.entries(outputs)) writeOutput(env, k, v);

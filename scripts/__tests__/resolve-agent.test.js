@@ -61,7 +61,7 @@ describe('comment trigger (issue_comment)', () => {
     expect(outputs).toMatchObject({
       agent: 'default', target_repo: INTERN, issue_number: '7', installation_id: '4242', backend: 'codex',
       backend_explicit: 'true', model: 'gpt-x', effort: 'default', timeout_minutes: 60, event_type: 'issue_comment',
-      comment_id: '', specage: 'false', prompt_repo: '', actions_count: 0,
+      comment_id: '', prompt_repo: '', actions_count: 0,
     });
     expect(JSON.parse(outputs.access)).toEqual([{ repo: INTERN, scope: 'read/write' }]);
     expect(text).toBe('please help');
@@ -70,12 +70,11 @@ describe('comment trigger (issue_comment)', () => {
     expect(githubOutput).not.toContain('please help');
   });
 
-  it('widens access to the data repo for specage=true and falls back to the default request', () => {
+  it('falls back to the default request for a bare mention', () => {
     const { outputs, text } = run('repository_dispatch', dispatch('issue_comment', {
-      raw: { repository: { full_name: INTERN }, issue: { number: 1, user: { login: 'b' } }, comment: { user: { login: 'a' }, body: '@the-intern-bot specage=true' } },
+      raw: { repository: { full_name: INTERN }, issue: { number: 1, user: { login: 'b' } }, comment: { user: { login: 'a' }, body: '@the-intern-bot' } },
     }));
-    expect(outputs.specage).toBe('true');
-    expect(JSON.parse(outputs.access)).toEqual([{ repo: INTERN, scope: 'read/write' }, { repo: DATA, scope: 'read' }]);
+    expect(JSON.parse(outputs.access)).toEqual([{ repo: INTERN, scope: 'read/write' }]);
     expect(text).toBe('Please inspect the context and assist with this issue or pull request.');
   });
 
@@ -175,9 +174,9 @@ describe('comment trigger (review comment, system events, workflow_dispatch)', (
 
   it('routes legacy workflow_dispatch inputs (incl. queued retries) to the default agent', () => {
     const { outputs, text } = run('workflow_dispatch', { inputs: {} }, {
-      INPUT_TARGET_REPO: INTERN, INPUT_PR_NUMBER: '55', INPUT_COMMENT_BODY: 'specage=true Review specage PR x#55', INPUT_INSTALLATION_ID: '777',
+      INPUT_TARGET_REPO: INTERN, INPUT_PR_NUMBER: '55', INPUT_COMMENT_BODY: 'Review specage PR x#55', INPUT_INSTALLATION_ID: '777',
     });
-    expect(outputs).toMatchObject({ agent: 'default', target_repo: INTERN, issue_number: '55', installation_id: '777', specage: 'true', event_type: 'workflow_dispatch' });
+    expect(outputs).toMatchObject({ agent: 'default', target_repo: INTERN, issue_number: '55', installation_id: '777', event_type: 'workflow_dispatch' });
     expect(text).toBe('Review specage PR x#55');
   });
 });

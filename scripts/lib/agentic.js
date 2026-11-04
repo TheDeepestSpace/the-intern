@@ -6,7 +6,7 @@
 // in ./agentic-yaml.js so this file stays dependency-free.
 
 const TRIGGER_KINDS = ['comment', 'commit', 'pull_request', 'issue', 'schedule', 'manual', 'telegram',
-  'ci_failure', 'merge_conflict', 'review'];
+  'ci_failure', 'merge_conflict', 'review', 'dispatch'];
 // System-synthesized triggers: the worker (or the nightly crawl) turns a
 // GitHub event into one of these; the agent's `request` template is the text
 // the agent receives. Fields are the structural facts of the event only —
@@ -31,7 +31,7 @@ const AGENT_KEYS = ['trigger', 'access', 'prompt', 'prompt_file', 'prompt_append
   'effort', 'timeout', 'limits', 'actions', 'permissions', 'secrets', 'network', 'tools',
   'request', 'job', 'concurrency', 'settings'];
 const DEFAULT_KEYS = ['backend', 'model', 'effort', 'timeout', 'limits'];
-const TOP_KEYS = ['version', 'bot', 'defaults', 'repos', 'allowed_owners', 'prompt_repos', 'snippets', 'agents'];
+const TOP_KEYS = ['version', 'bot', 'defaults', 'repos', 'allowed_owners', 'prompt_repos', 'snippets', 'dispatch', 'agents'];
 const REPO_RE = /^[\w.-]+\/[\w.-]+$/;
 const VAR_RE = /\$([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*)/gi;
 const ONLY_VAR_RE = /^\$([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*)$/i;
@@ -126,6 +126,11 @@ function triggerContext(kind, def, values) {
       t = { chat_id: ph('chat_id'), message_id: ph('message_id'), param };
       break;
     }
+    case 'dispatch':
+      // Generic dispatch_agent entrypoint: no declared params; the request is
+      // validated against the top-level `dispatch` allowlist (matchAgent).
+      t = { ...base, issue_number: ph('issue_number') };
+      break;
     case 'manual': {
       const parameters = {};
       for (const p of Object.keys(def.parameters || {})) parameters[p] = v ? (v.parameters || {})[p] : true;
@@ -296,6 +301,9 @@ function validateTrigger(name, trigger, spec, errors) {
       unknownKeys(def, ['params'], w, errors);
       if (def.params !== undefined) validateParams(def.params, `${w}.params`, errors);
       break;
+    case 'dispatch':
+      unknownKeys(def, [], w, errors);
+      break;
     case 'manual':
       unknownKeys(def, ['parameters'], w, errors);
       if (def.parameters !== undefined) validateParams(def.parameters, `${w}.parameters`, errors);
@@ -314,6 +322,14 @@ function validateAgent(name, agent, spec, errors) {
   if (!TRIGGER_KINDS.includes(kind)) return;
   const tdef = agent.trigger[kind] || {};
   const ctx = triggerContext(kind, tdef, null);
+
+  if (kind === 'dispatch') {
+    // Everything a dispatched run may touch comes from the caller's allowlist
+    // (spec.dispatch.callers), never from the agent entry itself.
+    for (const k of ['access', 'prompt_file', 'actions', 'job']) {
+      if (agent[k] !== undefined) errors.push(`${where}.${k}: not allowed on a dispatch agent`);
+    }
+  }
 
   // access: default-deny, so an agent with no access list gets no repos at all.
   const aliasesInAccess = new Set();
@@ -518,6 +534,202 @@ function validateAction(where, a, spec, ctx, accessAliases, errors) {
   }
 }
 
+// --- dispatch_agent: generic caller dispatch ------------------------------
+// `dispatch.callers` is the allowlist for the generic entrypoint: keyed by the
+// GitHub login that fires the workflow_dispatch (github.actor, which the
+// caller cannot choose), it names the repos the caller may target, the extra
+// repos it may grant the agent, the callbacks it may request and the prompt
+// sources (repo + path/ref globs) it may use. Anything not listed is rejected.
+const DISPATCH_KEYS = ['max_attempts', 'callers'];
+const CALLER_KEYS = ['repos', 'access', 'callbacks', 'prompts', 'inline_prompt'];
+const DISPATCH_REQUEST_KEYS = ['prompt', 'backend', 'model', 'effort', 'repo', 'issue', 'pr', 'access', 'callback',
+  'context', 'attempt', 'max_attempts'];
+const REPO_PATTERN_RE = /^[\w.-]+\/(?:[\w.-]+|\*)$/;
+const WORKFLOW_RE = /^[\w.-]+\.ya?ml$/;
+const PROMPT_SOURCE_RE = /^([\w.-]+\/[\w.-]+):([^@\s]+)@(\S+)$/;
+const MAX_DISPATCH_ACCESS = 10;
+const MAX_DISPATCH_PROMPT = 60000;
+const MAX_DISPATCH_CONTEXT = 8000;
+const DEFAULT_MAX_ATTEMPTS_CAP = 5;
+
+function validateDispatch(spec, errors) {
+  const d = spec.dispatch;
+  if (!isObj(d)) return errors.push('dispatch: must be a map');
+  unknownKeys(d, DISPATCH_KEYS, 'dispatch', errors);
+  if (d.max_attempts !== undefined && !(Number.isInteger(d.max_attempts) && d.max_attempts >= 1)) {
+    errors.push('dispatch.max_attempts: must be a positive integer');
+  }
+  if (d.callers === undefined) return;
+  if (!isObj(d.callers)) return errors.push('dispatch.callers: must be a map of login -> allowlist');
+  const repoPattern = (v, w) => {
+    if (typeof v !== 'string' || !(v in spec.repos || REPO_PATTERN_RE.test(v))) errors.push(`${w}: undefined repo alias or pattern '${v}'`);
+  };
+  const globs = (v, w) => {
+    if (!(Array.isArray(v) && v.length && v.every(g => typeof g === 'string' && g))) errors.push(`${w}: non-empty list of globs required`);
+  };
+  for (const [login, c] of Object.entries(d.callers)) {
+    const where = `dispatch.callers.${login}`;
+    if (!isObj(c)) { errors.push(`${where}: must be a map`); continue; }
+    unknownKeys(c, CALLER_KEYS, where, errors);
+    if (!Array.isArray(c.repos) || !c.repos.length) errors.push(`${where}.repos: non-empty list required (default-deny)`);
+    else c.repos.forEach((r, i) => repoPattern(r, `${where}.repos[${i}]`));
+    for (const [i, a] of (c.access === undefined ? [] : Array.isArray(c.access) ? c.access : [null]).entries()) {
+      const w = `${where}.access[${i}]`;
+      if (!isObj(a)) { errors.push(`${w}: must be a map`); continue; }
+      unknownKeys(a, ['repo', 'scope'], w, errors);
+      repoPattern(a.repo, `${w}.repo`);
+      if (!SCOPES.includes(a.scope)) errors.push(`${w}.scope: must be one of ${SCOPES.join('|')}`);
+    }
+    for (const [i, cb] of (c.callbacks === undefined ? [] : Array.isArray(c.callbacks) ? c.callbacks : [null]).entries()) {
+      const w = `${where}.callbacks[${i}]`;
+      if (!isObj(cb)) { errors.push(`${w}: must be a map`); continue; }
+      unknownKeys(cb, ['repo', 'workflow'], w, errors);
+      if (typeof cb.repo !== 'string' || !(cb.repo in spec.repos || REPO_RE.test(cb.repo))) errors.push(`${w}.repo: undefined repo alias '${cb.repo}'`);
+      if (typeof cb.workflow !== 'string' || !WORKFLOW_RE.test(cb.workflow)) errors.push(`${w}.workflow: workflow file name like callback.yml required`);
+    }
+    for (const [i, pr] of (c.prompts === undefined ? [] : Array.isArray(c.prompts) ? c.prompts : [null]).entries()) {
+      const w = `${where}.prompts[${i}]`;
+      if (!isObj(pr)) { errors.push(`${w}: must be a map`); continue; }
+      unknownKeys(pr, ['repo', 'paths', 'refs'], w, errors);
+      if (typeof pr.repo !== 'string' || !(pr.repo in spec.repos || REPO_RE.test(pr.repo))) errors.push(`${w}.repo: undefined repo alias '${pr.repo}'`);
+      globs(pr.paths, `${w}.paths`);
+      globs(pr.refs, `${w}.refs`); // a ref is always required: prompts are pinned
+    }
+    if (c.inline_prompt !== undefined && typeof c.inline_prompt !== 'boolean') errors.push(`${where}.inline_prompt: must be a boolean`);
+  }
+}
+
+// alias | owner/repo | owner/* against a concrete owner/repo.
+function repoPatternMatches(spec, pattern, repo) {
+  const full = spec.repos[pattern] || pattern;
+  if (full.endsWith('/*')) return lc(repo).startsWith(`${lc(full.slice(0, -1))}`);
+  return lc(full) === lc(repo);
+}
+
+// Parses the dispatch_agent workflow_dispatch input (JSON text) into a request
+// object; throws on anything that is not a JSON object.
+function eventFromDispatch(actor, rawInput) {
+  let request;
+  try {
+    request = typeof rawInput === 'string' ? JSON.parse(rawInput) : rawInput;
+  } catch (e) {
+    throw new Error(`dispatch input is not valid JSON: ${e.message}`);
+  }
+  if (!isObj(request)) throw new Error('dispatch input must be a JSON object');
+  return { kind: 'dispatch', caller: actor || '', repo: typeof request.repo === 'string' ? request.repo : '', author: actor || '', request };
+}
+
+// Checks a dispatch request against the caller's allowlist. Returns
+// { error } or { values } (the trigger values for resolveAgent). Every
+// rejection names the rule it hit; nothing is silently narrowed.
+function normalizeDispatch(spec, event) {
+  const fail = (message) => ({ error: `dispatch_agent: ${message}` });
+  const d = spec.dispatch || {};
+  const caller = event.caller;
+  // Loop avoidance: the bot's own dispatches (and its callbacks) never start a run.
+  if (!caller || lc(caller) === lc(botLogin(spec))) return fail(`dispatches from '${caller || '(unknown)'}' are refused (loop avoidance)`);
+  const entry = Object.entries(d.callers || {}).find(([login]) => lc(login) === lc(caller));
+  if (!entry) return fail(`caller '${caller}' is not in dispatch.callers`);
+  const c = entry[1];
+  const req = event.request;
+  for (const k of Object.keys(req)) if (!DISPATCH_REQUEST_KEYS.includes(k)) return fail(`unknown field '${k}'`);
+
+  const repo = req.repo;
+  if (typeof repo !== 'string' || !REPO_RE.test(repo)) return fail('repo must be owner/repo');
+  if (!allowedOwners(spec).has(lc(repo.split('/')[0]))) return fail(`owner of '${repo}' is not allowlisted`);
+  if (!c.repos.some(p => repoPatternMatches(spec, p, repo))) return fail(`caller '${caller}' may not target '${repo}'`);
+
+  const int = (v, what) => {
+    const n = typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : v;
+    return Number.isInteger(n) && n > 0 ? n : `${what} must be a positive integer`;
+  };
+  let issue = null;
+  let pr = null;
+  for (const [key, v] of [['issue', req.issue], ['pr', req.pr]]) {
+    if (v === undefined || v === null || v === '') continue;
+    const n = int(v, key);
+    if (typeof n === 'string') return fail(n);
+    if (key === 'issue') issue = n; else pr = n;
+  }
+  if (issue === null && pr === null) return fail('issue or pr is required');
+
+  const cap = d.max_attempts ?? DEFAULT_MAX_ATTEMPTS_CAP;
+  const attempt = req.attempt === undefined ? 1 : int(req.attempt, 'attempt');
+  const maxAttempts = req.max_attempts === undefined ? 1 : int(req.max_attempts, 'max_attempts');
+  if (typeof attempt === 'string') return fail(attempt);
+  if (typeof maxAttempts === 'string') return fail(maxAttempts);
+  if (maxAttempts > cap) return fail(`max_attempts ${maxAttempts} exceeds the cap of ${cap}`);
+  if (attempt > maxAttempts) return fail(`attempt ${attempt} exceeds max_attempts ${maxAttempts}`);
+
+  for (const [k, re] of [['backend', null], ['model', /^[\w.:[\]-]{1,64}$/], ['effort', /^[\w-]{1,20}$/]]) {
+    const v = req[k];
+    if (v === undefined || v === '') continue;
+    if (typeof v !== 'string') return fail(`${k} must be a string`);
+    if (k === 'backend' ? !BACKEND_KEYWORDS.includes(v.toLowerCase()) : !re.test(v)) return fail(`invalid ${k} '${v}'`);
+  }
+
+  // Extra repos: each must be covered by an allowlisted entry of at least that scope.
+  const extra = [];
+  if (req.access !== undefined) {
+    if (!Array.isArray(req.access) || req.access.length > MAX_DISPATCH_ACCESS) return fail(`access must be a list of at most ${MAX_DISPATCH_ACCESS} {repo, scope}`);
+    for (const a of req.access) {
+      if (!isObj(a) || typeof a.repo !== 'string' || !REPO_RE.test(a.repo) || !SCOPES.includes(a.scope)) return fail(`malformed access entry ${JSON.stringify(a)}`);
+      const ok = (c.access || []).some(g => repoPatternMatches(spec, g.repo, a.repo) && (a.scope === 'read' || g.scope === 'read/write'));
+      if (!ok) return fail(`access ${a.scope} to '${a.repo}' is not allowed for caller '${caller}'`);
+      extra.push({ repo: a.repo, scope: a.scope });
+    }
+  }
+
+  let callback = null;
+  if (req.callback !== undefined && req.callback !== null) {
+    const cb = req.callback;
+    if (!isObj(cb) || typeof cb.repo !== 'string' || typeof cb.workflow !== 'string') return fail('callback must be {repo, workflow}');
+    const ok = (c.callbacks || []).some(g => repoPatternMatches(spec, g.repo, cb.repo) && g.workflow === cb.workflow);
+    if (!ok) return fail(`callback ${cb.repo}/${cb.workflow} is not allowed for caller '${caller}'`);
+    callback = { repo: cb.repo, workflow: cb.workflow };
+  }
+
+  let context = {};
+  if (req.context !== undefined && req.context !== null) {
+    if (!isObj(req.context)) return fail('context must be a JSON object');
+    context = req.context;
+  }
+  if (JSON.stringify(context).length > MAX_DISPATCH_CONTEXT) return fail(`context is larger than ${MAX_DISPATCH_CONTEXT} characters`);
+
+  // Prompt: `owner/repo:path@ref` (pinned; the resolved sha is recorded at
+  // fetch time) or inline text when the caller is allowed inline prompts.
+  const rawPrompt = req.prompt;
+  if (typeof rawPrompt !== 'string' || !rawPrompt.trim()) return fail('prompt is required');
+  if (rawPrompt.length > MAX_DISPATCH_PROMPT) return fail(`prompt is larger than ${MAX_DISPATCH_PROMPT} characters`);
+  let promptSource = null;
+  let inlinePrompt = null;
+  const m = PROMPT_SOURCE_RE.exec(rawPrompt.trim());
+  if (m) {
+    const [, srepo, spath, sref] = m;
+    if (spath.startsWith('/') || spath.split('/').includes('..') || sref.includes('..')) return fail('prompt source path/ref is not a safe relative reference');
+    const ok = (c.prompts || []).some(g => repoPatternMatches(spec, g.repo, srepo)
+      && g.paths.some(p => globToRegExp(p).test(spath)) && g.refs.some(r => globToRegExp(r).test(sref)));
+    if (!ok) return fail(`prompt source ${srepo}:${spath}@${sref} is not allowed for caller '${caller}'`);
+    promptSource = { repo: srepo, path: spath, ref: sref };
+  } else {
+    if (c.inline_prompt !== true) return fail(`inline prompts are not allowed for caller '${caller}'`);
+    inlinePrompt = rawPrompt;
+  }
+
+  const backend = req.backend ? String(req.backend).toLowerCase() : '';
+  return {
+    values: {
+      repo, author: caller, issue_number: pr ?? issue, text: inlinePrompt ?? '',
+      params: backend ? { backend } : {},
+      dispatch: {
+        caller, repo, issue, pr, attempt, max_attempts: maxAttempts, model: req.model || '', effort: req.effort || '',
+        backend, access: extra, callback, context: { ...context, attempt, max_attempts: maxAttempts },
+        prompt_source: promptSource,
+      },
+    },
+  };
+}
+
 // Detect agents whose triggers could both fire on one event.
 function checkAmbiguity(spec, errors) {
   const seen = new Map();
@@ -531,6 +743,7 @@ function checkAmbiguity(spec, errors) {
     else if (kind === 'schedule') key = `schedule:${def.cron}`;
     else if (SYSTEM_FIELDS[kind]) key = `${kind}:${lc(spec.repos[def.repo] || def.repo || '*')}`;
     else if (kind === 'telegram') key = 'telegram';
+    else if (kind === 'dispatch') key = 'dispatch';
     if (key === null) continue;
     if (seen.has(key)) errors.push(`agents.${name}: ambiguous trigger, same as agent '${seen.get(key)}'`);
     else seen.set(key, name);
@@ -553,6 +766,7 @@ function loadSpecObject(raw) {
     allowed_owners: raw.allowed_owners || [],
     prompt_repos: raw.prompt_repos || [],
     snippets: raw.snippets || {},
+    dispatch: raw.dispatch || {},
     agents: raw.agents || {},
   };
   if (typeof spec.bot !== 'string' || !/^[\w-]+$/.test(spec.bot)) errors.push('bot: must be a GitHub login');
@@ -579,6 +793,7 @@ function loadSpecObject(raw) {
     errors.push('agents: at least one agent required');
     return { spec: null, errors };
   }
+  validateDispatch(spec, errors);
   for (const [name, agent] of Object.entries(spec.agents)) validateAgent(name, agent, spec, errors);
   if (!errors.length) checkAmbiguity(spec, errors);
   return { spec: errors.length ? null : spec, errors };
@@ -717,6 +932,10 @@ function matchAgent(spec, name, event) {
     for (const f of SYSTEM_FIELDS[kind]) values[f] = event[f] ?? '';
     return { kind, values };
   }
+  if (kind === 'dispatch') {
+    const r = normalizeDispatch(spec, event);
+    return r.error ? { error: r.error } : { kind, values: r.values };
+  }
   if (kind === 'schedule') return event.agent === name ? { kind, values: {} } : null;
   if (kind === 'manual') {
     if (event.agent !== name) return null;
@@ -804,6 +1023,22 @@ function resolveAgent(spec, name, match) {
     ...(r.branches ? { branches: r.branches } : {}),
     ...(r.paths ? { paths: r.paths } : {}),
   }));
+  const dispatch = match.kind === 'dispatch' ? match.values.dispatch : null;
+  if (dispatch) {
+    // The allowlist already vetted these in normalizeDispatch; here they only
+    // become the token scope: the target (read/write) and the extra grants.
+    // The prompt source is fetched with its own read-only token, so it is not
+    // listed here. A repo listed twice keeps the wider scope.
+    const wanted = [
+      { repo: dispatch.repo, scope: 'read/write' },
+      ...dispatch.access,
+    ];
+    for (const w of wanted) {
+      const have = access.find(a => lc(a.repo) === lc(w.repo));
+      if (!have) access.push({ repo: w.repo, scope: w.scope });
+      else if (w.scope === 'read/write') have.scope = 'read/write';
+    }
+  }
   let prompt = null;
   let prompt_file = null;
   if (agent.prompt_file) {
@@ -826,9 +1061,9 @@ function resolveAgent(spec, name, match) {
   return {
     agent: name,
     trigger: match.kind,
-    backend: resolveSetting(pick('backend', 'claude'), ctx),
-    model: resolveSetting(pick('model', 'default'), ctx),
-    effort: resolveSetting(pick('effort', 'default'), ctx),
+    backend: dispatch?.backend || resolveSetting(pick('backend', 'claude'), ctx),
+    model: dispatch?.model || resolveSetting(pick('model', 'default'), ctx),
+    effort: dispatch?.effort || resolveSetting(pick('effort', 'default'), ctx),
     timeout_seconds: parseDuration(pick('timeout', '60m')),
     limits: { max_runs_per_hour: (agent.limits || d.limits || {}).max_runs_per_hour ?? null },
     access,
@@ -848,6 +1083,7 @@ function resolveAgent(spec, name, match) {
     // triggers that carry no free text.
     text: match.values.text ?? null,
     actions,
+    dispatch,
     repo: ctx.repo ?? null,
     issue_number: ctx.issue_number ?? null,
   };
@@ -1062,5 +1298,5 @@ function eventFromTelegram(message) {
 
 module.exports = {
   loadSpecObject, matchAgent, route, resolveAgent, resolveAction, explain, accessAllows, branchPattern,
-  parseDuration, eventFromWebhook, eventFromTelegram, eventFromSystem, systemActors, botLogin, ALL_REPOS, JOBS,
+  parseDuration, eventFromWebhook, eventFromTelegram, eventFromSystem, eventFromDispatch, normalizeDispatch, systemActors, botLogin, ALL_REPOS, JOBS,
 };

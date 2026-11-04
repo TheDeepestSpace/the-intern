@@ -46,6 +46,8 @@ async function main(env = process.env) {
   fs.writeFileSync(env.OUT_FILE || 'prompt_file.txt', text, 'utf8');
   console.log(`Prompt file ${env.PROMPT_REPO}/${env.PROMPT_PATH} @ ${sha} (${env.PROMPT_REF ? 'pinned ref' : 'default branch'} ${ref}), ${text.length} chars`);
   if (env.GITHUB_OUTPUT) fs.appendFileSync(env.GITHUB_OUTPUT, `prompt_sha=${sha}\n`);
+  // Visible on the run page, so a dispatched run can be traced to the exact prompt.
+  if (env.GITHUB_STEP_SUMMARY) fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `Prompt \`${env.PROMPT_REPO}/${env.PROMPT_PATH}\` resolved from \`${ref}\` to \`${sha}\`\n`);
   return sha;
 }
 
