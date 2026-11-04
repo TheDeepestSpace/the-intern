@@ -8,7 +8,7 @@ name: nightly crawl
 #  3. report — comment on a static open issue in this repo (GitHub emails the
 #     @-mentioned owner), plus Telegram.
 # State (verdicts, confirmation clocks, conflict dedupe) lives on the
-# `nightly-crawl` branch of the-intern-data (scripts/manage-nightly-crawl-state.js).
+# `state/nightly-crawl` branch of the-intern-data (scripts/manage-nightly-crawl-state.js).
 on:
   schedule:
     # 04:30 UTC — offset from ci.yaml (06:00) and cleanup-data-branches (07:00).

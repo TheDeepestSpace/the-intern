@@ -106,6 +106,20 @@ describe('manage-nightly-crawl-state', () => {
     expect(sh(`git rev-list --count ${BRANCH_NAME}`, dataRemoteDir)).toBe('1');
   });
 
+  it('ignores a same-named branch on the source repo origin when the data repo has none', async () => {
+    const originDir = path.join(tmpRoot, 'origin.git');
+    initBareRemote(originDir);
+    sh(`git push ${originDir} main:${BRANCH_NAME}`, workDir);
+    sh(`git remote add origin ${originDir}`, workDir);
+    sh('git fetch origin', workDir);
+
+    await updateState((state) => ({ state: markConflictDispatched(state, 'a/b#1', NOW) }));
+
+    const files = sh(`git ls-tree -r --name-only ${BRANCH_NAME}`, dataRemoteDir).split('\n');
+    expect(files).toEqual([FILE_NAME]);
+    expect(sh(`git rev-list --count ${BRANCH_NAME}`, dataRemoteDir)).toBe('1');
+  });
+
   it('leaves the caller checkout untouched', async () => {
     await updateState((state) => ({ state: markConflictDispatched(state, 'a/b#1', NOW) }));
     expect(sh('git rev-parse --abbrev-ref HEAD', workDir)).toBe('main');

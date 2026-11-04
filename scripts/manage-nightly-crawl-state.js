@@ -16,7 +16,9 @@ const { execFileSync } = require('child_process');
 const { resolveDataRepoRemoteUrl, redactUrl, runWithRetryOnNotFound } = require('./data-repo-remote.js');
 const { parseState, emptyState } = require('./nightly-crawl-store.js');
 
-const BRANCH_NAME = 'nightly-crawl';
+// Namespaced so it can never collide with a branch of the-intern itself
+// (which a DWIM `git checkout <name>` would silently pick up from origin).
+const BRANCH_NAME = 'state/nightly-crawl';
 const FILE_NAME = 'nightly-crawl.json';
 
 // Args are passed as an array (execFileSync, not a shell) so the remote URL
@@ -112,6 +114,7 @@ async function updateState(mutate) {
       // when the remote branch is absent.
       runGit(['checkout', '--detach'], { ...gitOpts, allowFailure: true });
       runGit(['branch', '-D', BRANCH_NAME], { ...gitOpts, allowFailure: true });
+      let fetched = true;
       try {
         await runWithRetryOnNotFound(remoteUrl, (url) => {
           remoteUrl = url;
@@ -122,11 +125,15 @@ async function updateState(mutate) {
         // below creates it. Any other fetch failure must not fall through
         // to a fresh orphan branch.
         if (!/couldn't find remote ref/i.test(err.message)) throw err;
+        fetched = false;
       }
 
-      try {
-        runGit(['checkout', BRANCH_NAME], { ...gitOpts, stdio: ['pipe', 'pipe', 'pipe'] });
-      } catch {
+      // Only check out the fetched branch. Never fall back on `checkout`
+      // guessing: it would create the branch from origin's same-named branch
+      // (the-intern's, not the data repo's) when the fetch found nothing.
+      if (fetched) {
+        runGit(['checkout', '--no-guess', BRANCH_NAME], { ...gitOpts, stdio: ['pipe', 'pipe', 'pipe'] });
+      } else {
         runGit(['checkout', '--orphan', BRANCH_NAME], gitOpts);
         resetToEmptyTree(worktreeDir);
       }
