@@ -634,10 +634,16 @@ function normalizeDispatch(spec, event) {
   const req = event.request;
   for (const k of Object.keys(req)) if (!DISPATCH_REQUEST_KEYS.includes(k)) return fail(`unknown field '${k}'`);
 
-  const repo = req.repo;
-  if (typeof repo !== 'string' || !REPO_RE.test(repo)) return fail('repo must be owner/repo');
-  if (!allowedOwners(spec).has(lc(repo.split('/')[0]))) return fail(`owner of '${repo}' is not allowlisted`);
-  if (!c.repos.some(p => repoPatternMatches(spec, p, repo))) return fail(`caller '${caller}' may not target '${repo}'`);
+  // `repo` / `issue` / `pr` are optional: target details may instead come from
+  // the prompt, within the caller's `access` allowlist. A given repo is still
+  // checked against `repos` and becomes the read/write workspace.
+  let repo = '';
+  if (req.repo !== undefined && req.repo !== null && req.repo !== '') {
+    repo = req.repo;
+    if (typeof repo !== 'string' || !REPO_RE.test(repo)) return fail('repo must be owner/repo');
+    if (!allowedOwners(spec).has(lc(repo.split('/')[0]))) return fail(`owner of '${repo}' is not allowlisted`);
+    if (!c.repos.some(p => repoPatternMatches(spec, p, repo))) return fail(`caller '${caller}' may not target '${repo}'`);
+  }
 
   const int = (v, what) => {
     const n = typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : v;
@@ -651,7 +657,7 @@ function normalizeDispatch(spec, event) {
     if (typeof n === 'string') return fail(n);
     if (key === 'issue') issue = n; else pr = n;
   }
-  if (issue === null && pr === null) return fail('issue or pr is required');
+  if ((issue !== null || pr !== null) && !repo) return fail('issue / pr need a repo');
 
   const cap = d.max_attempts ?? DEFAULT_MAX_ATTEMPTS_CAP;
   const attempt = req.attempt === undefined ? 1 : int(req.attempt, 'attempt');
@@ -719,7 +725,7 @@ function normalizeDispatch(spec, event) {
   const backend = req.backend ? String(req.backend).toLowerCase() : '';
   return {
     values: {
-      repo, author: caller, issue_number: pr ?? issue, text: inlinePrompt ?? '',
+      repo, author: caller, issue_number: pr ?? issue ?? '', text: inlinePrompt ?? '',
       params: backend ? { backend } : {},
       dispatch: {
         caller, repo, issue, pr, attempt, max_attempts: maxAttempts, model: req.model || '', effort: req.effort || '',
@@ -1030,7 +1036,7 @@ function resolveAgent(spec, name, match) {
     // The prompt source is fetched with its own read-only token, so it is not
     // listed here. A repo listed twice keeps the wider scope.
     const wanted = [
-      { repo: dispatch.repo, scope: 'read/write' },
+      ...(dispatch.repo ? [{ repo: dispatch.repo, scope: 'read/write' }] : []),
       ...dispatch.access,
     ];
     for (const w of wanted) {

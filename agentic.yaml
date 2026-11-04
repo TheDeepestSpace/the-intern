@@ -129,7 +129,11 @@ agents:
   # callback come from the validated request. `pr` amends that PR's branch.
   dispatched:
     trigger: { dispatch: {} }
-    prompt: *headless_prompt
+    prompt: |
+      You are @the-intern-bot. Target details (repo, issue/PR, branch), if any, come from the request below and the dispatch context.
+      You have access to the GitHub CLI ('gh') and full git tools. Use 'gh' to post comments, inspect code, run tests, or open PRs as needed.
+
+      This is a headless, single-shot session: your final message is never shown to anyone — only a 'gh' comment, commit, or other repo action reaches a human. Post a comment when there's something worth telling a human (an answer, a landed change, a blocker). But don't post just to confirm receipt.
 
   # Telegram chat: a message from the admin chat (the worker authenticates the
   # chat id; telegram-session.yml is the runner). Flow:

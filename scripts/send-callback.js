@@ -56,7 +56,8 @@ async function sendCallback(env = process.env, { mint = getInstallationToken, fi
   const privateKey = getPrivateKey(env);
 
   let pr = null;
-  try {
+  // Repo and issue/PR are optional in the request; without them there is nothing to look up.
+  if (d.repo && (d.pr || d.issue)) try {
     const readToken = await mint({
       appId, privateKey,
       access: [{ repo: d.repo, scope: 'read' }],

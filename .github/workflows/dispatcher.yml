@@ -28,7 +28,7 @@ on:
       # Generic caller entrypoint: one JSON object validated against the
       # `dispatch` allowlist in agentic.yaml (README "dispatch_agent").
       dispatch:
-        description: 'dispatch_agent request JSON: prompt, repo, issue/pr, backend, model, access, callback, context, attempt, max_attempts (optional)'
+        description: 'dispatch_agent request JSON: prompt, repo (optional), issue/pr (optional), backend, model, access, callback, context, attempt, max_attempts (optional)'
         required: false
 
 permissions:
@@ -330,7 +330,6 @@ jobs:
       # consuming needs.detect-image.outputs.* via a step `env:` key below
       # (issue #226) — see that job's upload step for why.
       - name: Download request text and resolved agent from detect-image job
-        if: needs.detect-image.outputs.target_repo != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: clean-prompt-${{ github.run_id }}

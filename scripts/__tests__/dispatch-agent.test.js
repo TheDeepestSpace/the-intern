@@ -54,13 +54,24 @@ describe('dispatch_agent allowlist', () => {
     ['an inline prompt when not permitted', { prompt: 'just do it' }, CALLER, /inline prompts are not allowed/],
     ['attempt > max_attempts', { attempt: 4, max_attempts: 3 }, CALLER, /attempt 4 exceeds max_attempts 3/],
     ['max_attempts above the cap', { max_attempts: 99 }, CALLER, /exceeds the cap/],
-    ['a missing issue/pr', { issue: undefined }, CALLER, /issue or pr is required/],
+    ['an issue without a repo', { repo: undefined }, CALLER, /issue \/ pr need a repo/],
     ['an unknown field', { sudo: true }, CALLER, /unknown field/],
     ['a bad backend', { backend: 'gpt' }, CALLER, /invalid backend/],
   ])('rejects %s', (_name, over, actor, re) => {
     const r = go(over, actor);
     expect(r.matched).toBe(false);
     expect(r.reason).toMatch(re);
+  });
+
+  it('needs neither repo nor issue/pr: only the extra access is granted', () => {
+    const r = go({ repo: undefined, issue: undefined });
+    expect(r).toMatchObject({ matched: true, repo: '', issue_number: '' });
+    expect(r.access).toEqual([{ repo: 'TheDeepestSpace/specage-data', scope: 'read/write' }]);
+    expect(r.dispatch).toMatchObject({ repo: '', issue: null, pr: null });
+  });
+
+  it('allows a repo without issue/pr', () => {
+    expect(go({ issue: undefined })).toMatchObject({ matched: true, repo: PROJECT, issue_number: '' });
   });
 
   it('allows inline prompts only for callers with inline_prompt: true', () => {
@@ -100,6 +111,12 @@ describe('resolve-agent (workflow_dispatch with dispatch input)', () => {
     }
   };
 
+  it('runs without repo / issue: empty target outputs, no throw', () => {
+    const { outputs, agent } = run({ ...base, repo: undefined, issue: undefined });
+    expect(outputs).toMatchObject({ agent: 'dispatched', target_repo: '', issue_number: '' });
+    expect(agent.dispatch).toMatchObject({ repo: '', issue: null, pr: null });
+  });
+
   it('routes to the dispatched agent and exposes prompt source, callback and access outputs', () => {
     const { outputs, agent, out } = run(base);
     expect(outputs).toMatchObject({
@@ -107,7 +124,7 @@ describe('resolve-agent (workflow_dispatch with dispatch input)', () => {
       prompt_repo: 'TheDeepestSpace/specage', prompt_ref: 'main', prompt_path: 'prompts/implement.md', callback_repo: 'TheDeepestSpace/specage',
     });
     expect(agent.dispatch.context).toMatchObject({ attempt: 1, max_attempts: 3, project: 'p' });
-    expect(agent.prompt).toMatch(/^You are @the-intern-bot working on repository TheDeepestSpace\/some-project, issue\/PR #12\./);
+    expect(agent.prompt).toMatch(/^You are @the-intern-bot\. Target details/);
     // Context is opaque caller data: it goes to agent.json only, never $GITHUB_OUTPUT.
     expect(out).not.toContain('spec_ids');
   });
@@ -144,6 +161,15 @@ describe('send-callback', () => {
 
   it('maps job results to success|failure|cancelled', () => {
     expect(['success', 'failure', 'cancelled', 'skipped', ''].map(statusFrom)).toEqual(['success', 'failure', 'cancelled', 'failure', 'failure']);
+  });
+
+  it('sends the callback without a PR lookup when there is no repo / issue', async () => {
+    let looked = false;
+    const inputs = await sendCallback(env(agentFile({ ...dispatch, repo: '', issue: null, pr: null }), 'success'), {
+      mint, findPrFn: async () => { looked = true; },
+    });
+    expect(looked).toBe(false);
+    expect(inputs).toMatchObject({ pr: '', issue: '', branch: '' });
   });
 
   it.each(['success', 'failure', 'cancelled'])('dispatches the callback workflow with string inputs on %s', async (result) => {
