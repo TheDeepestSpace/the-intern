@@ -44,16 +44,28 @@ describe('assemble-prompt', () => {
     expect(model).toBe('opus');
   });
 
-  it('adds the inline-review-thread rule and the specage block only when they apply', () => {
+  it('adds the inline-review-thread rule and the dispatch block only when they apply', () => {
     const plain = build(baseAgent).prompt;
     expect(plain).not.toContain('review thread');
     expect(plain).not.toContain('specage');
     const threaded = build({ ...baseAgent, event_type: 'pull_request_review_comment', comment_id: '99' }).prompt;
     expect(threaded).toContain('gh api -X POST repos/A/b/pulls/7/comments/99/replies');
-    const granted = build({ ...baseAgent, params: { specage: true }, access: [...baseAgent.access, { repo: 'A/specage-data', scope: 'read' }] }).prompt;
-    expect(granted).toContain('Your token also has read access to the specage data repo A/specage-data');
-    const denied = build({ ...baseAgent, params: { specage: true } }).prompt;
-    expect(denied).toContain('no access to a specage data repository');
+    const dispatch = { caller: 'x[bot]', repo: 'A/b', issue: 3, pr: null, attempt: 1, max_attempts: 2, context: { k: 'v', attempt: 1, max_attempts: 2 }, prompt_source: null };
+    const issue = build({ ...baseAgent, dispatch }).prompt;
+    expect(issue).toContain('dispatched by x[bot] (dispatch_agent), attempt 1 of 2');
+    expect(issue).toContain('work is for issue #3 of A/b; open a single PR');
+    expect(issue).toContain('{"k":"v","attempt":1,"max_attempts":2}');
+    const amend = build({ ...baseAgent, dispatch: { ...dispatch, issue: null, pr: 9, attempt: 2 } }).prompt;
+    expect(amend).toContain('existing PR #9 of A/b: check out its branch (gh pr checkout 9)');
+    expect(amend).toContain('Do not open a new PR');
+  });
+
+  it('puts a fetched dispatch prompt after "New request:" and refuses a missing one', () => {
+    const pf = path.join(dir, 'dispatch.md');
+    fs.writeFileSync(pf, 'IMPLEMENT THIS');
+    const agent = { ...baseAgent, dispatch: { caller: 'x', repo: 'A/b', issue: 3, pr: null, attempt: 1, max_attempts: 1, context: {}, prompt_source: { repo: 'A/p', path: 'p.md', ref: 'main' } } };
+    expect(build(agent, { PROMPT_FILE_TEXT: pf }).prompt.endsWith('New request:\nIMPLEMENT THIS')).toBe(true);
+    expect(() => build(agent)).toThrow(/was not fetched/);
   });
 
   it('uses the fetched prompt file plus snippets and lists declared actions', () => {

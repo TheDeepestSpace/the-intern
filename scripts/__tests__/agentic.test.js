@@ -258,8 +258,8 @@ describe('cutover behaviours (issue #273)', () => {
 
   it('strips every mention and the leading declared tokens into `text`, like parse-trigger.js did', () => {
     expect(explain(spec, comment('hey @the-intern-bot please help')).text).toBe('hey please help');
-    const r = explain(spec, comment('@the-intern-bot codex model=gpt-x effort=high specage=true fix the -c model="sol" flag'));
-    expect(r.params).toEqual({ backend: 'codex', model: 'gpt-x', effort: 'high', specage: true });
+    const r = explain(spec, comment('@the-intern-bot codex model=gpt-x effort=high fix the -c model="sol" flag'));
+    expect(r.params).toEqual({ backend: 'codex', model: 'gpt-x', effort: 'high' });
     expect(r.text).toBe('fix the -c model="sol" flag');
     // An undeclared key=value ends the control-token run and stays prompt text.
     expect(explain(spec, comment('@the-intern-bot foo=1 model=x do it')).text).toBe('foo=1 model=x do it');
@@ -276,13 +276,10 @@ describe('cutover behaviours (issue #273)', () => {
     expect(explain(spec, comment('backend=codex go', { implicit: true })).backend).toBe('codex');
   });
 
-  it('grants the specage data repo only when specage=true (access `when`)', () => {
-    expect(explain(spec, comment('@the-intern-bot fix')).access).toEqual([{ repo: 'TheDeepestSpace/the-intern', scope: 'read/write' }]);
-    expect(explain(spec, comment('@the-intern-bot specage=true implement')).access).toEqual([
-      { repo: 'TheDeepestSpace/the-intern', scope: 'read/write' },
-      { repo: 'TheDeepestSpace/specage-data', scope: 'read' },
-    ]);
-    expect(explain(spec, comment('@the-intern-bot specage=yes implement')).access).toHaveLength(1);
+  it('no longer special-cases specage=true (replaced by dispatch_agent); `when` still needs a boolean param', () => {
+    const r = explain(spec, comment('@the-intern-bot specage=true implement'));
+    expect(r.access).toEqual([{ repo: 'TheDeepestSpace/the-intern', scope: 'read/write' }]);
+    expect(r.text).toBe('specage=true implement');
     expect(errs(`  a:\n    trigger: {comment: {params: {x: string}}}\n    access: {repos: [{name: data, scope: read, when: $trigger.comment.param.x}]}\n    prompt: hi\n`).join()).toMatch(/boolean param/);
     expect(errs(`  a:\n    trigger: {comment: {params: {x: boolean}}}\n    access: {repos: [{name: data, scope: read, when: $trigger.comment.param.x}]}\n    prompt: hi\n`)).toEqual([]);
   });

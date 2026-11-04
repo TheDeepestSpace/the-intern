@@ -5,7 +5,7 @@ const path = require('path');
 // specage.yml from the agent resolved by resolve-agent.js (AGENT_FILE) plus
 // the runtime-assembled parts that are not representable in agentic.yaml:
 // the token's access list, the workspace-restore note, the inline-review-
-// thread reply rule, the specage block, the declared actions, shared-style.md,
+// thread reply rule, the dispatch_agent block, the declared actions, shared-style.md,
 // the prior-run summary and finally "New request:" + the request text.
 // Runs in the trusted root context before run_as_dev.sh is generated, so the
 // untrusted request text only ever reaches the agent through a file.
@@ -31,15 +31,20 @@ function accessLine(access) {
   return `Repositories your token can access: ${parts.join(', ')}. Anything else is out of reach by design; do not try to widen it.`;
 }
 
-function specageBlock(agent) {
-  if (agent.params?.specage !== true) return '';
-  const repo = agent.target_repo || agent.repo || '';
-  const dataRepo = agent.spec_repos?.specage_data || '';
-  const granted = dataRepo && agent.access.some((a) => a.repo === '*' || a.repo.toLowerCase() === dataRepo.toLowerCase());
-  if (granted) {
-    return `This request was filed by specage (specage=true). Your token also has read access to the specage data repo ${dataRepo}. The project spec lives there on the branch specages/<project>/spec, where <project> is the specage project for ${repo} (if the issue does not name it, list the branches matching specages/*/spec and pick the one whose .specage/config.yaml has repo: ${repo}). Read the spec file, .specage/PROTOCOL.md (follow its Implement section) and GRAMMAR.md directly from that branch, e.g. gh api repos/${dataRepo}/contents/<path>?ref=specages/<project>/spec -H 'Accept: application/vnd.github.raw+json', or git clone --branch specages/<project>/spec. Never push to the spec or trail branches.\n\n`;
+// Context for a run started through the generic dispatch_agent entrypoint:
+// who asked, the retry counters and opaque context, and what to do with the
+// issue / existing PR.
+function dispatchBlock(agent) {
+  const d = agent.dispatch;
+  if (!d) return '';
+  const lines = [`This run was dispatched by ${d.caller} (dispatch_agent), attempt ${d.attempt} of ${d.max_attempts}.`];
+  if (d.pr) {
+    lines.push(`Fix this in place on existing PR #${d.pr} of ${d.repo}: check out its branch (gh pr checkout ${d.pr}), amend/add commits and push to that same branch. Do not open a new PR.`);
+  } else {
+    lines.push(`The work is for issue #${d.issue} of ${d.repo}; open a single PR that references it.`);
   }
-  return `This request was filed by specage (specage=true), but your token has no access to a specage data repository for ${repo}. Report that access limitation instead of claiming to have read the spec.\n\n`;
+  lines.push(`Caller context (opaque JSON, echoed back to the caller when the run ends): ${JSON.stringify(d.context)}`);
+  return `${lines.join('\n')}\n\n`;
 }
 
 function actionsBlock(agent, env) {
@@ -85,11 +90,17 @@ function assemble(env = process.env) {
   if (agent.event_type === 'pull_request_review_comment' && commentId) {
     prompt += `This request came from an inline PR review comment that is part of a review thread (comment id ${commentId}). You must reply within that same thread using:\ngh api -X POST repos/${repo}/pulls/${issue}/comments/${commentId}/replies -f body="..."\nrather than 'gh pr comment' / 'gh issue comment', which posts a new general PR comment and breaks thread continuity.\n\n`;
   }
-  prompt += specageBlock(agent);
+  prompt += dispatchBlock(agent);
   prompt += actionsBlock(agent, env);
   if (style.trim()) prompt += `${style}\n\n`;
   if (prior.trim()) prompt += `Previous work summary on this issue/PR:\n${prior}\n\n`;
-  prompt += `New request:\n${request}`;
+  let body = request;
+  if (agent.dispatch?.prompt_source) {
+    body = readOr(env.PROMPT_FILE_TEXT);
+    const src = agent.dispatch.prompt_source;
+    if (!body.trim()) throw new Error(`dispatch prompt ${src.repo}/${src.path}@${src.ref} was not fetched (PROMPT_FILE_TEXT)`);
+  }
+  prompt += `New request:\n${body}`;
 
   fs.writeFileSync(env.OUT_FILE || '/tmp/prompt.txt', prompt);
   // Raw MODEL value, written here (trusted root context, before run_as_dev.sh
@@ -109,4 +120,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { assemble, accessLine, specageBlock, actionsBlock };
+module.exports = { assemble, accessLine, dispatchBlock, actionsBlock };

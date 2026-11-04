@@ -22,6 +22,7 @@ node scripts/validate-agentic.js --explain event.json # dry-run: which agent, ac
 | --- | --- | --- |
 | `comment` | `@the-intern-bot …` on an issue, PR or inline review thread (`verb: '*'` = any mention). A reply on a thread the bot opened and a manual `workflow_dispatch` count as implicit mentions. | `dispatcher.yml` |
 | `commit` | A push to `repo` on a `branch` pattern (`@name` captures one segment) by a trusted `author` (also the loop guard). | `specage.yml` (`agent_commit` dispatch) |
+| `dispatch` | `workflow_dispatch` of `dispatcher.yml` with a `dispatch` JSON input from an allowlisted caller (see [dispatch_agent](#dispatch_agent-generic-caller-dispatch)). | `dispatcher.yml` |
 | `manual` | `workflow_dispatch` of `dispatcher.yml` with `agent` + `parameters` (JSON, typed) — what a `dispatch_agent` action fires. | `dispatcher.yml` |
 | `telegram` | A message in the admin chat. | `telegram-session.yml` |
 | `ci_failure` | A check suite failed on a PR whose author is in `pr_authors` (the worker; `dedup` = once per PR+commit for that long, `skip_preexisting` = not when every failing check already fails on the base). | `dispatcher.yml` (`ci_failure` dispatch) |
@@ -69,8 +70,7 @@ list by `scripts/refresh-gh-token.js`):
   permissions are per token, so a list mixing scopes gets read/write on all
   of it.
 - `when: $trigger.comment.param.<boolean>` grants an entry only when that
-  declared boolean param is true (how `specage=true` adds read access to
-  the specage data repo).
+  declared boolean param is true.
 - A branch capture used as a repo must be a declared alias (onboarding a
   project = adding it to `repos:`); owners outside `repos:`/`allowed_owners`
   are refused. Any unresolvable entry fails the run — never a partial scope.
@@ -83,7 +83,7 @@ for that repo; `ref` pins it, otherwise the default branch is used; the
 resolved sha is logged). `prompt_append` adds shared `snippets`. The runtime
 parts (`scripts/assemble-prompt.js`) are appended after it: the token's
 access list, the workspace-restore note, the inline-review-thread reply rule,
-the specage block, the declared actions, `instructions/shared-style.md`, the
+the `dispatch_agent` block, the declared actions, `instructions/shared-style.md`, the
 prior-run summary, then `New request:` + the request text.
 
 ### Actions
@@ -96,6 +96,54 @@ parameters, repos inside the agent's access) and executes it with system
 credentials. Today `dispatch_agent` is executable (→ `workflow_dispatch` of
 `dispatcher.yml` with `agent` + `parameters`); a rejected action fails the
 step and notifies.
+
+### dispatch_agent: generic caller dispatch
+
+External callers (e.g. specage) run the-intern agents with their own prompt
+and get a callback; the-intern holds no caller-specific code. The caller fires
+`dispatcher.yml` (`workflow_dispatch`, or `POST
+/repos/TheDeepestSpace/the-intern/actions/workflows/dispatcher.yml/dispatches`)
+with one input, `dispatch`, a JSON object:
+
+| field | |
+| --- | --- |
+| `prompt` | `owner/repo:path@ref` (pinned; the ref is resolved to a sha, recorded in the run summary and log) — or inline text, only for callers with `inline_prompt: true`. The prompt is untrusted-but-allowlisted. |
+| `repo`, `issue` / `pr` | target repo (read/write) and the issue to implement. With `pr=N` the agent checks out that PR's branch and amends it instead of opening a new PR. One of them is required. |
+| `backend`, `model`, `effort` | optional, same values as comment params. |
+| `access` | extra `[{repo, scope}]` grants (read / read/write), each within the caller's allowlist. The prompt-source repo gets read automatically. |
+| `callback` | `{repo, workflow}` to fire when the run ends. |
+| `context` | opaque JSON object, echoed back. |
+| `attempt`, `max_attempts` | default 1 / 1. Echoed into `context` (and shown to the agent). Refused when `attempt > max_attempts` or `max_attempts` exceeds `dispatch.max_attempts`. |
+
+**Allowlist** (`dispatch.callers` in `agentic.yaml`, reviewed via CODEOWNERS):
+keyed by the GitHub login that fires the dispatch (`github.actor`, not
+caller-controlled). Per caller: `repos` (targets; alias, `owner/repo` or
+`owner/*`), `access` (extra grants and max scope), `callbacks`
+(`{repo, workflow}`), `prompts` (`{repo, paths, refs}` globs) and
+`inline_prompt`. Anything else is rejected before a run starts (the
+`detect-image` job fails and Telegram is pinged; no callback is sent for a
+refused dispatch). `the-intern-bot[bot]` itself is always refused, so the
+bot's dispatches and callbacks never self-trigger.
+
+**Callback**: the `callback` job (`if: always()`) fires `workflow_dispatch`
+on `callback.repo/callback.workflow` (default branch) with string inputs
+`status` (`success|failure|cancelled`), `run_url`, `pr`, `issue`, `branch`,
+`head_sha` and `context` (echoed, incl. `attempt` / `max_attempts`).
+`pr`/`branch`/`head_sha` are looked up best effort. The payload is a hint:
+receivers must re-read GitHub state. Details live in the PR and the run.
+
+**Auth setup**
+- Callers need rights to dispatch workflows in this repo: a GitHub App
+  installed here with *Actions: write* (its login, e.g. `specage-app[bot]`,
+  is the allowlist key), or a user/token with write access.
+- The the-intern App needs *Actions: write* on every callback repo and must
+  be installed on the target and any `access` repos.
+- Add the caller (and its repos, callbacks, prompt paths/refs) to
+  `dispatch.callers`; the callback workflow must exist on the callback
+  repo's default branch with a matching `workflow_dispatch` input set.
+
+`specage=true` and the comment-time specage data grant were removed in favour
+of this (callers pass `access` instead). Comment dispatch is unchanged.
 
 ### Deploying a change
 
