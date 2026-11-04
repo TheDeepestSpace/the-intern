@@ -42,7 +42,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_ADMIN_CHAT_ID: ${{ secrets.TG_ADMIN_CHAT_ID }}
-          RETRY_LOCK_MINUTES: 25
           # Lets manage-pending-retries.js authenticate to the-intern-data
           # (issue #124) — pending-retries.json now lives solely on the-intern-data.
           DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}

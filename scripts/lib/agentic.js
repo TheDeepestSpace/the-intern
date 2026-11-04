@@ -279,7 +279,11 @@ function validateTrigger(name, trigger, spec, errors) {
         strList('actions');
       }
       if (def.skip_preexisting !== undefined && typeof def.skip_preexisting !== 'boolean') errors.push(`${w}.skip_preexisting: must be a boolean`);
-      if (def.dedup !== undefined && parseDuration(def.dedup) === null) errors.push(`${w}.dedup: like 30m|2h|14d`);
+      if (def.dedup !== undefined) {
+        const dedupSeconds = parseDuration(def.dedup);
+        // Cloudflare KV rejects an expirationTtl below 60s; 0 means no dedup.
+        if (dedupSeconds === null || (dedupSeconds !== 0 && dedupSeconds < 60)) errors.push(`${w}.dedup: like 30m|2h|14d (at least 60s)`);
+      }
       break;
     }
     case 'schedule':
