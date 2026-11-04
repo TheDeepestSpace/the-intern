@@ -38,10 +38,14 @@ function dispatchBlock(agent) {
   const d = agent.dispatch;
   if (!d) return '';
   const lines = [`This run was dispatched by ${d.caller} (dispatch_agent), attempt ${d.attempt} of ${d.max_attempts}.`];
-  if (d.pr) {
+  if (!d.repo) {
+    lines.push('No target repo, issue or PR was given; take them from the request below, within your access.');
+  } else if (d.pr) {
     lines.push(`Fix this in place on existing PR #${d.pr} of ${d.repo}: check out its branch (gh pr checkout ${d.pr}), amend/add commits and push to that same branch. Do not open a new PR.`);
-  } else {
+  } else if (d.issue) {
     lines.push(`The work is for issue #${d.issue} of ${d.repo}; open a single PR that references it.`);
+  } else {
+    lines.push(`The target repo is ${d.repo}; no issue or PR was given, so take any from the request below.`);
   }
   lines.push(`Caller context (opaque JSON, echoed back to the caller when the run ends): ${JSON.stringify(d.context)}`);
   return `${lines.join('\n')}\n\n`;

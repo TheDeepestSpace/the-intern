@@ -28,7 +28,7 @@ on:
       # Generic caller entrypoint: one JSON object validated against the
       # `dispatch` allowlist in agentic.yaml (README "dispatch_agent").
       dispatch:
-        description: 'dispatch_agent request JSON: prompt, repo, issue/pr, backend, model, access, callback, context, attempt, max_attempts (optional)'
+        description: 'dispatch_agent request JSON: prompt, repo (optional), issue/pr (optional), backend, model, access, callback, context, attempt, max_attempts (optional)'
         required: false
 
 permissions:
@@ -119,6 +119,7 @@ jobs:
 
       - name: Mint temporary token for image check
         id: temp_token
+        if: steps.parse.outputs.access != '[]'
         run: node scripts/mint-installation-token.js
         env:
           APP_ID: ${{ secrets.APP_ID }}
@@ -197,7 +198,7 @@ jobs:
 
       - name: Mint temporary token for base image access
         id: temp_token
-        if: steps.fallback_check.outputs.is_fallback != 'true'
+        if: steps.fallback_check.outputs.is_fallback != 'true' && needs.detect-image.outputs.access != '[]'
         run: node scripts/mint-installation-token.js
         env:
           APP_ID: ${{ secrets.APP_ID }}
@@ -330,7 +331,6 @@ jobs:
       # consuming needs.detect-image.outputs.* via a step `env:` key below
       # (issue #226) — see that job's upload step for why.
       - name: Download request text and resolved agent from detect-image job
-        if: needs.detect-image.outputs.target_repo != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: clean-prompt-${{ github.run_id }}
@@ -339,6 +339,8 @@ jobs:
       # those repositories, contents read-only when every entry is `read`.
       - name: Mint installation token
         id: token
+        # Targetless dispatch with no granted access: no repositories to scope to.
+        if: needs.detect-image.outputs.access != '[]'
         run: |
           exec >> "$LOG_FILE" 2>&1
           node scripts/mint-installation-token.js
@@ -385,6 +387,15 @@ jobs:
           repository: ${{ needs.detect-image.outputs.target_repo }}
           token: ${{ steps.token.outputs.token }}
           path: target
+
+      # Targetless dispatch: no repo to check out, but the agent step still needs a
+      # valid git working directory (it takes its targets from the prompt).
+      - name: Create empty workspace (no target repository)
+        if: needs.detect-image.outputs.target_repo == ''
+        run: |
+          exec >> "$LOG_FILE" 2>&1
+          mkdir target
+          git -C target init -q
 
       - name: Fetch prior session summary context
         id: summary_context
@@ -438,7 +449,6 @@ jobs:
       # the devcontainer postStartCommand step below (issue #207) — without either
       # step duplicating a slightly-different copy of this logic.
       - name: Ensure dev user and workspace ownership
-        if: needs.detect-image.outputs.target_repo != ''
         working-directory: target
         run: |
           exec >> "$LOG_FILE" 2>&1
@@ -507,7 +517,6 @@ jobs:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
 
       - name: Run agent (fresh session per trigger, as non-root user)
-        if: needs.detect-image.outputs.target_repo != ''
         working-directory: target
         env:
           AGENT: ${{ needs.detect-image.outputs.agent }}
@@ -722,7 +731,7 @@ jobs:
           # installation-token cap without needing to reach the already-running
           # agent process (re-exporting env vars mid-step doesn't propagate to
           # an already-spawned process or its children).
-          if command -v gh >/dev/null 2>&1; then
+          if [ -n "$GH_TOKEN" ] && command -v gh >/dev/null 2>&1; then
             INIT_TOKEN="$GH_TOKEN" env -u GH_TOKEN -u GITHUB_TOKEN su dev -c 'echo "$INIT_TOKEN" | gh auth login --with-token && gh auth setup-git'
           fi
 
@@ -732,17 +741,21 @@ jobs:
           # dev user — the same untrusted context the agent CLI runs in.
           # Killed by PID as soon as the agent process exits, before any
           # always() cleanup steps.
-          node "$GITHUB_WORKSPACE/scripts/refresh-gh-token.js" &
-          REFRESHER_PID=$!
+          if [ -n "$GH_TOKEN" ]; then
+            node "$GITHUB_WORKSPACE/scripts/refresh-gh-token.js" &
+            REFRESHER_PID=$!
+          fi
           # su dev -c below runs under this step's default set -e, so a
           # non-zero exit (e.g. the agent CLI failing) would skip straight
           # past the kill/wait further down and leak the refresher process.
-          trap 'kill "$REFRESHER_PID" 2>/dev/null || true; wait "$REFRESHER_PID" 2>/dev/null || true' EXIT
+          trap '[ -n "$REFRESHER_PID" ] && { kill "$REFRESHER_PID" 2>/dev/null || true; wait "$REFRESHER_PID" 2>/dev/null || true; }' EXIT
 
           env -u TG_BOT_TOKEN -u TG_ADMIN_CHAT_ID -u DATA_REPO_TOKEN -u APP_ID -u APP_PRIVATE_KEY -u GH_TOKEN -u GITHUB_TOKEN su dev -c /tmp/run_as_dev.sh
 
-          kill "$REFRESHER_PID" 2>/dev/null || true
-          wait "$REFRESHER_PID" 2>/dev/null || true
+          if [ -n "$REFRESHER_PID" ]; then
+            kill "$REFRESHER_PID" 2>/dev/null || true
+            wait "$REFRESHER_PID" 2>/dev/null || true
+          fi
           trap - EXIT
 
           # the agent's own gh calls are how it normally reports back; if the session

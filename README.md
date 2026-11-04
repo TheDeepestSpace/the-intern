@@ -108,7 +108,7 @@ with one input, `dispatch`, a JSON object:
 | field | |
 | --- | --- |
 | `prompt` | `owner/repo:path@ref` (pinned; the ref is resolved to a sha, recorded in the run summary and log) — or inline text, only for callers with `inline_prompt: true`. The prompt is untrusted-but-allowlisted. |
-| `repo`, `issue` / `pr` | target repo (read/write) and the issue to implement. With `pr=N` the agent checks out that PR's branch and amends it instead of opening a new PR. One of them is required. |
+| `repo`, `issue` / `pr` | all optional. `repo` is the target (read/write, must match the caller's `repos`); `issue` / `pr` need a `repo`. With `pr=N` the agent amends that PR's branch instead of opening a new PR. Without them, target details come from the prompt, within the granted `access`; no checkout, summary or 👀-style issue steps run, and the callback carries empty `pr` / `issue`. |
 | `backend`, `model`, `effort` | optional, same values as comment params. |
 | `access` | extra `[{repo, scope}]` grants (read / read/write), each within the caller's allowlist. The prompt-source repo gets read automatically. |
 | `callback` | `{repo, workflow}` to fire when the run ends. |
