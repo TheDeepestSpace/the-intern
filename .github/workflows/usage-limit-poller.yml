@@ -33,6 +33,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Install root dependencies (agentic.yaml parser)
+        run: npm ci --omit=dev --include=prod --no-audit --no-fund
+
       - name: Re-fire due retries
         run: node scripts/poll-pending-retries.js
         env:

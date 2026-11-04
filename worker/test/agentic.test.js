@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import { SPEC } from '../src/agentic.generated.js';
-import { baseGithubEnv, baseTelegramEnv, githubRequest, mockGithubDispatchFlow, telegramRequest } from './fixtures.js';
+import {
+  baseGithubEnv, baseTelegramEnv, githubRequest, mockCheckSuiteDispatchFlow, mockGithubDispatchFlow, mockPushDispatchFlow,
+  telegramRequest,
+} from './fixtures.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -258,5 +261,117 @@ describe('fail closed', () => {
     );
     expect(res.status).toBe(500);
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+// System-synthesized triggers (issue #276): ci_failure, merge_conflict and
+// review are declared in agentic.yaml, so editing the spec changes what the
+// worker dispatches (AGENTIC_SPEC is the test hook for a modified spec).
+describe('system triggers: ci_failure / merge_conflict / review', () => {
+  const REPO = 'TheDeepestSpace/the-intern';
+  const specWith = edit => {
+    const spec = structuredClone(SPEC);
+    edit(spec.agents);
+    return baseGithubEnv({ AGENTIC_SPEC: JSON.stringify(spec) });
+  };
+  const checkSuite = () => ({
+    action: 'completed',
+    installation: { id: 42 },
+    repository: { full_name: REPO, owner: { login: 'TheDeepestSpace' }, name: 'the-intern' },
+    check_suite: {
+      head_sha: 'sha-abc123', conclusion: 'failure', html_url: 'https://github.com/x/pull/7/checks',
+      pull_requests: [{ number: 7 }, { number: 8 }],
+    },
+  });
+  const dispatches = spy => spy.mock.calls
+    .filter(([i, init]) => init?.method === 'POST' && new URL(i.url ?? i).pathname.endsWith('/dispatches'))
+    .map(([, init]) => JSON.parse(init.body));
+  const failing = [{ name: 'test', status: 'completed', conclusion: 'failure' }];
+
+  it('ci_failure names the ci_fixer agent in the dispatch', async () => {
+    const spy = mockCheckSuiteDispatchFlow();
+    const res = await worker.fetch(githubRequest({ eventType: 'check_suite', body: { ...checkSuite(), check_suite: { ...checkSuite().check_suite, pull_requests: [{ number: 7 }] } } }), baseGithubEnv());
+    expect(await res.text()).toBe('ok');
+    expect(dispatches(spy)[0]).toMatchObject({ event_type: 'ci_failure', client_payload: { agent: 'ci_fixer' } });
+  });
+
+  it('ci_failure follows pr_authors from agentic.yaml, not a hardcoded bot login', async () => {
+    const env = specWith(a => { a.ci_fixer.trigger.ci_failure.pr_authors = ['someone-else']; });
+    const spy = mockCheckSuiteDispatchFlow();
+    const body = { ...checkSuite(), check_suite: { ...checkSuite().check_suite, pull_requests: [{ number: 7 }] } };
+    expect(await (await worker.fetch(githubRequest({ eventType: 'check_suite', body }), env)).text())
+      .toBe('ignored: no bot-authored pull requests');
+    expect(dispatches(spy)).toHaveLength(0);
+    spy.mockRestore();
+    const spy2 = mockCheckSuiteDispatchFlow({ pullRequestAuthor: 'someone-else' });
+    expect(await (await worker.fetch(githubRequest({ eventType: 'check_suite', body }), env)).text()).toBe('ok');
+    expect(dispatches(spy2)).toHaveLength(1);
+  });
+
+  it('ci_failure skip_preexisting and dedup are read from the trigger', async () => {
+    const runs = { 'sha-abc123': failing, 'base-sha': failing };
+    const body = { ...checkSuite(), check_suite: { ...checkSuite().check_suite, pull_requests: [{ number: 7 }] } };
+    // Declared (default): pre-existing failures are skipped.
+    const spy = mockCheckSuiteDispatchFlow({ checkRunsByRef: runs });
+    expect(await (await worker.fetch(githubRequest({ eventType: 'check_suite', body }), baseGithubEnv())).text())
+      .toBe('ignored: all failures pre-existing on base branch');
+    spy.mockRestore();
+    // Turned off in yaml: dispatches, and without dedup a repeat dispatches again.
+    const env = specWith(a => {
+      a.ci_fixer.trigger.ci_failure.skip_preexisting = false;
+      delete a.ci_fixer.trigger.ci_failure.dedup;
+    });
+    const spy2 = mockCheckSuiteDispatchFlow({ checkRunsByRef: runs });
+    for (let i = 0; i < 2; i++) {
+      expect(await (await worker.fetch(githubRequest({ eventType: 'check_suite', body }), env)).text()).toBe('ok');
+    }
+    expect(dispatches(spy2)).toHaveLength(2);
+  });
+
+  it('ci_failure is capped by the agent max_runs_per_hour', async () => {
+    const env = specWith(a => { a.ci_fixer.limits = { max_runs_per_hour: 1 }; });
+    const spy = mockCheckSuiteDispatchFlow();
+    const res = await worker.fetch(githubRequest({ eventType: 'check_suite', body: checkSuite() }), env);
+    expect(await res.text()).toBe('ok');
+    expect(dispatches(spy)).toHaveLength(1);
+  });
+
+  it('merge_conflict names the conflict_fixer agent and follows pr_authors', async () => {
+    const payload = { ref: 'refs/heads/main', installation: { id: 42 },
+      repository: { full_name: REPO, owner: { login: 'TheDeepestSpace' }, name: 'the-intern', default_branch: 'main' } };
+    const spy = mockPushDispatchFlow({ mergeableStates: { 7: 'dirty' } });
+    const res = await worker.fetch(githubRequest({ eventType: 'push', body: payload }), baseGithubEnv({ MERGEABLE_POLL_DELAY_MS: '1' }));
+    expect(await res.text()).toBe('ok');
+    expect(dispatches(spy)[0]).toMatchObject({ event_type: 'merge_conflict', client_payload: { agent: 'conflict_fixer' } });
+    spy.mockRestore();
+
+    const env = specWith(a => { a.conflict_fixer.trigger.merge_conflict.pr_authors = ['someone-else']; });
+    const spy2 = mockPushDispatchFlow({ mergeableStates: { 7: 'dirty' } });
+    const res2 = await worker.fetch(githubRequest({ eventType: 'push', body: payload }), { ...env, MERGEABLE_POLL_DELAY_MS: '1' });
+    expect(await res2.text()).toBe('ignored: no bot-authored pull requests became unmergeable');
+    expect(dispatches(spy2)).toHaveLength(0);
+  });
+
+  it('review names the review_responder agent and only fires for declared reviewers', async () => {
+    const payload = (login) => ({
+      action: 'submitted', installation: { id: 42 }, repository: { full_name: REPO },
+      review: { user: { login }, body: 'x', html_url: 'https://github.com/x/pull/7#r1' },
+      pull_request: { number: 7, user: { login: 'the-intern-bot[bot]' } },
+    });
+    const spy = mockGithubDispatchFlow();
+    const res = await worker.fetch(githubRequest({ eventType: 'pull_request_review', body: payload('coderabbitai[bot]') }), baseGithubEnv());
+    expect(await res.text()).toBe('ok');
+    const d = dispatches(spy)[0];
+    expect(d).toMatchObject({ event_type: 'coderabbit_review', client_payload: { agent: 'review_responder' } });
+    expect(JSON.stringify(d)).not.toContain('"body"');
+    spy.mockRestore();
+
+    const env = specWith(a => { a.review_responder.trigger.review.reviewers = ['other-reviewer[bot]']; });
+    const spy2 = mockGithubDispatchFlow();
+    const res2 = await worker.fetch(githubRequest({ eventType: 'pull_request_review', body: payload('coderabbitai[bot]') }), env);
+    // No longer a declared reviewer: an ordinary review on a bot-authored PR,
+    // i.e. an implicit mention for the catch-all agent.
+    expect(await res2.text()).toBe('ok');
+    expect(dispatches(spy2)[0]).toMatchObject({ event_type: 'pull_request_review', client_payload: { agent: 'default' } });
   });
 });

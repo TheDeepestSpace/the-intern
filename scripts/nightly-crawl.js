@@ -22,12 +22,18 @@ const { DATA_REPO } = require('./data-repo-remote.js');
 const store = require('./nightly-crawl-store.js');
 const { readState, updateState } = require('./manage-nightly-crawl-state.js');
 const { postReportComment } = require('./send-report.js');
+const { jobSettings } = require('./lib/job-settings.js');
 
 const GH_API = 'https://api.github.com';
 const FETCH_TIMEOUT_MS = 30_000;
-const DEFAULT_MAX_REVIEWS = 20;
-const MERGEABLE_POLL_ATTEMPTS = 4;
-const MERGEABLE_POLL_DELAY_MS = 1500;
+// Tunables live in agentic.yaml (the nightly_crawl agent's `settings`); these
+// are only the fallbacks for a key the file omits.
+const DEFAULTS = { max_reviews: 20, mergeable_poll_attempts: 4, mergeable_poll_delay_ms: 1500 };
+let cachedSettings = null;
+function settings() {
+  if (!cachedSettings) cachedSettings = { ...DEFAULTS, ...jobSettings('nightly-crawl') };
+  return cachedSettings;
+}
 
 // ------------------------------------------------------------ GitHub API
 
@@ -149,10 +155,10 @@ function makeTokenMinter(env, permissions) {
 async function getPrDetail(token, repo, number, deps) {
   const { fetchImpl = fetch, sleep: sleepFn = sleep } = deps;
   let pr = null;
-  for (let attempt = 0; attempt < MERGEABLE_POLL_ATTEMPTS; attempt++) {
+  for (let attempt = 0; attempt < settings().mergeable_poll_attempts; attempt++) {
     pr = await ghJson(token, `/repos/${repo}/pulls/${number}`, {}, fetchImpl);
     if (pr.state !== 'open' || pr.mergeable !== null) return pr;
-    await sleepFn(MERGEABLE_POLL_DELAY_MS);
+    await sleepFn(settings().mergeable_poll_delay_ms);
   }
   return pr;
 }
@@ -190,6 +196,7 @@ async function dispatchMergeConflict(env, { repo, pr, installationId, defaultBra
       number: pr.number,
       title: pr.title,
       html_url: pr.html_url,
+      user: { login: pr.user?.login },
       head: { ref: pr.head?.ref, sha: pr.head?.sha },
       base: { ref: pr.base?.ref },
       mergeable_state: pr.mergeable_state,
@@ -218,7 +225,7 @@ function appendOutput(env, key, value) {
 async function plan(env = process.env, deps = {}) {
   const dryRun = env.DRY_RUN === 'true';
   const now = deps.now ? deps.now() : Date.now();
-  const maxReviews = Number(env.MAX_REVIEWS) > 0 ? Number(env.MAX_REVIEWS) : DEFAULT_MAX_REVIEWS;
+  const maxReviews = Number(env.MAX_REVIEWS) > 0 ? Number(env.MAX_REVIEWS) : settings().max_reviews;
   const mintToken = deps.mintToken || makeTokenMinter(env);
   const d = { fetchImpl: fetch, sleep, ...deps, mintToken };
 

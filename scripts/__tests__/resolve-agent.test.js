@@ -112,16 +112,65 @@ describe('comment trigger (review comment, system events, workflow_dispatch)', (
     expect(outputs).toMatchObject({ agent: 'default', issue_number: '3', comment_id: '555', event_type: 'pull_request_review_comment', backend: 'agy' });
   });
 
-  it('routes a synthesized ci_failure to the default agent with the synthesized text', () => {
-    const { outputs, text } = run('repository_dispatch', dispatch('ci_failure', {
+  const BOT = 'the-intern-bot[bot]';
+
+  it('routes ci_failure to ci_fixer with the declared request (and the default preamble)', () => {
+    const { outputs, text, agent } = run('repository_dispatch', dispatch('ci_failure', {
       raw: {
-        installation: { id: 1 }, repository: { full_name: INTERN }, pull_request: { number: 9 },
+        installation: { id: 1 }, repository: { full_name: INTERN }, pull_request: { number: 9, user: { login: BOT } },
         check_suite: { conclusion: 'failure', html_url: 'https://x/checks', head_sha: 'deadbeef' },
       },
     }));
-    expect(outputs).toMatchObject({ agent: 'default', target_repo: INTERN, issue_number: '9', event_type: 'ci_failure', backend: 'claude' });
-    expect(text).toMatch(/^CI is failing on this PR \(conclusion: failure\)/);
-    expect(text).toContain('deadbeef');
+    expect(outputs).toMatchObject({ agent: 'ci_fixer', target_repo: INTERN, issue_number: '9', installation_id: '1', event_type: 'ci_failure', backend: 'claude' });
+    expect(JSON.parse(outputs.access)).toEqual([{ repo: INTERN, scope: 'read/write' }]);
+    expect(text).toBe(
+      'CI is failing on this PR (conclusion: failure). Check suite: https://x/checks. This check suite ran against commit `deadbeef`. '
+      + 'Before investigating, compare that commit to the PR\'s current head (e.g. `gh pr view 9 --json headRefOid`). '
+      + 'If the PR\'s head has already moved past `deadbeef`, this failure is stale - a newer commit supersedes it, so stop immediately without commenting or pushing anything. '
+      + 'Otherwise, investigate the failing checks and push a fix.',
+    );
+    expect(agent.prompt).toMatch(/^You are @the-intern-bot working on repository TheDeepestSpace\/the-intern, issue\/PR #9\./);
+  });
+
+  it('routes merge_conflict to conflict_fixer', () => {
+    const { outputs, text } = run('repository_dispatch', dispatch('merge_conflict', {
+      raw: {
+        installation: { id: 1 }, repository: { full_name: INTERN }, pull_request: { number: 4, user: { login: BOT } },
+        merge_conflict: { mergeable_state: 'dirty', base_ref: 'main' },
+      },
+    }));
+    expect(outputs).toMatchObject({ agent: 'conflict_fixer', issue_number: '4', event_type: 'merge_conflict' });
+    expect(text).toBe('A push to main left this PR unmergeable (mergeable_state: dirty). Merge or rebase the latest default branch into this PR\'s branch, resolve the conflicts, and push the fix.');
+  });
+
+  it('routes coderabbit_review to review_responder', () => {
+    const { outputs, text } = run('repository_dispatch', dispatch('coderabbit_review', {
+      raw: {
+        installation: { id: 1 }, repository: { full_name: INTERN }, pull_request: { number: 6, user: { login: BOT } },
+        coderabbit_review: { html_url: 'https://x/r', reviewer: 'coderabbitai[bot]', action: 'submitted' },
+      },
+    }));
+    expect(outputs).toMatchObject({ agent: 'review_responder', issue_number: '6', event_type: 'coderabbit_review' });
+    expect(text).toBe('CodeRabbit posted a review on PR #6 (https://x/r). Read it and address any actionable feedback.');
+  });
+
+  it('refuses a system dispatch whose PR was not authored by an allowed author', () => {
+    expect(() => run('repository_dispatch', dispatch('ci_failure', {
+      raw: {
+        installation: { id: 1 }, repository: { full_name: INTERN }, pull_request: { number: 9, user: { login: 'mallory' } },
+        check_suite: { conclusion: 'failure', html_url: 'https://x/checks', head_sha: 'deadbeef' },
+      },
+    }))).toThrow(/no agent trigger/);
+  });
+
+  it('refuses a system dispatch the worker routed to a different agent', () => {
+    expect(() => run('repository_dispatch', dispatch('merge_conflict', {
+      agent: 'ci_fixer',
+      raw: {
+        installation: { id: 1 }, repository: { full_name: INTERN }, pull_request: { number: 4, user: { login: BOT } },
+        merge_conflict: { mergeable_state: 'dirty', base_ref: 'main' },
+      },
+    }))).toThrow(/named agent 'ci_fixer'/);
   });
 
   it('routes legacy workflow_dispatch inputs (incl. queued retries) to the default agent', () => {

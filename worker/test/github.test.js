@@ -391,7 +391,7 @@ describe('handleGitHub coderabbit_review handling', () => {
       baseGithubEnv()
     );
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe('ignored: coderabbit review not on a bot-authored PR');
+    expect(await res.text()).toBe('ignored: no agent trigger matches this review');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -405,7 +405,7 @@ describe('handleGitHub coderabbit_review handling', () => {
       baseGithubEnv()
     );
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe('ignored: coderabbit review not submitted');
+    expect(await res.text()).toBe('ignored: no agent trigger matches this review');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 

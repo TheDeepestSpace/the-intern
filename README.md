@@ -20,10 +20,35 @@ node scripts/validate-agentic.js --explain event.json # dry-run: which agent, ac
 
 | Kind | Fires on | Runner |
 | --- | --- | --- |
-| `comment` | `@the-intern-bot …` on an issue, PR or inline review thread (`verb: '*'` = any mention). A reply on a thread the bot opened, a system-synthesized request (CI failure, CodeRabbit review, merge conflict) and a manual `workflow_dispatch` count as implicit mentions. | `dispatcher.yml` |
+| `comment` | `@the-intern-bot …` on an issue, PR or inline review thread (`verb: '*'` = any mention). A reply on a thread the bot opened and a manual `workflow_dispatch` count as implicit mentions. | `dispatcher.yml` |
 | `commit` | A push to `repo` on a `branch` pattern (`@name` captures one segment) by a trusted `author` (also the loop guard). | `specage.yml` (`agent_commit` dispatch) |
 | `manual` | `workflow_dispatch` of `dispatcher.yml` with `agent` + `parameters` (JSON, typed) — what a `dispatch_agent` action fires. | `dispatcher.yml` |
 | `telegram` | A message in the admin chat. | `telegram-session.yml` |
+| `ci_failure` | A check suite failed on a PR whose author is in `pr_authors` (the worker; `dedup` = once per PR+commit for that long, `skip_preexisting` = not when every failing check already fails on the base). | `dispatcher.yml` (`ci_failure` dispatch) |
+| `merge_conflict` | A default-branch push (worker) or the nightly crawl's sweep left a PR by a `pr_authors` author `dirty`. | `dispatcher.yml` (`merge_conflict` dispatch) |
+| `review` | A review by one of `reviewers` (CodeRabbit) was `submitted` (`actions`) on a PR by a `pr_authors` author. | `dispatcher.yml` (`coderabbit_review` dispatch) |
+| `schedule` | A cron; the agent has `job:` instead of a prompt (see below). | its own workflow |
+
+The three system triggers have no human text: the agent's `request` template is
+the "New request:" (only `$trigger.<kind>.*` structural fields and `$repo` /
+`$issue_number` — never review bodies or titles; a field that resolves empty
+fails the run). `pr_authors` is mandatory (omitting it must not mean "any PR"),
+the PR's repo is the only repo in `access`, and `limits.max_runs_per_hour`
+applies per agent in the worker like for comments. Nothing about which PRs
+qualify lives in the worker any more.
+
+### Scheduled jobs
+
+A `schedule` agent declares `trigger.schedule.cron`, `job` (one of the names in
+`JOBS`, `scripts/lib/agentic.js`), `timeout`, `concurrency` (group, never
+cancel-in-progress), `secrets`, `permissions` and `settings` (scalar tunables
+the job's script reads through `scripts/lib/job-settings.js`; an env var of the
+old name, e.g. `MAX_REVIEWS`, still overrides). GitHub Actions needs the cron,
+`timeout-minutes`, concurrency group and `secrets.*` as literals in the
+workflow file, so `scripts/__tests__/schedule-sync.test.js` fails CI when a
+scheduled workflow drifts from its agent (cron, concurrency, timeouts, and any
+secret used but not declared or declared but unused).
+
 
 Params (`key=value`) are only recognised when declared: a leading run after
 the mention for comments (`@the-intern-bot codex model=x effort=high …`), or
