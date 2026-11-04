@@ -63,7 +63,6 @@ describe('parse-trigger', () => {
       expect(result.author).toBe('alice');
       expect(result.thread_author).toBe('bob');
       expect(result.on).toBe('issue');
-      expect(result.synthesized).toBe(false);
     });
   });
 
@@ -112,118 +111,27 @@ describe('parse-trigger', () => {
     });
   });
 
-  describe('repository_dispatch: check_suite (ci_failure) shape', () => {
-    it('synthesizes a comment body from the check_suite conclusion, URL, and head sha, with a staleness-check instruction', () => {
-      process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
-      process.env.GITHUB_EVENT_PATH = writeEventPayload({
-        action: 'ci_failure',
+  describe('repository_dispatch: system-synthesized events (ci_failure, coderabbit_review, merge_conflict)', () => {
+    // Their trigger event and request text are declared in agentic.yaml
+    // (resolve-agent.test.js); parse-trigger only extracts the structural shape.
+    it.each(['ci_failure', 'coderabbit_review', 'merge_conflict'])('%s: repo, PR number and installation only', (type) => {
+      const eventPath = writeEventPayload({
+        action: type,
         client_payload: {
           raw: {
-            installation: { id: 4242 },
-            repository: { full_name: 'acme/widgets' },
-            pull_request: { number: 9 },
-            check_suite: {
-              conclusion: 'failure',
-              html_url: 'https://github.com/acme/widgets/pull/9/checks',
-              head_sha: 'deadbeef1234',
-            },
+            installation: { id: 7 },
+            repository: { full_name: 'TheDeepestSpace/the-intern' },
+            pull_request: { number: 11 },
+            check_suite: { conclusion: 'failure', head_sha: 'abc' },
           },
         },
       });
-
-      const result = parseTrigger();
-
-      expect(result.target_repo).toBe('acme/widgets');
-      expect(result.issue_number).toBe('9');
-      expect(result.installation_id).toBe('4242');
-      expect(result.event_type).toBe('ci_failure');
-      expect(result.comment_body).toBe(
-        "CI is failing on this PR (conclusion: failure). Check suite: https://github.com/acme/widgets/pull/9/checks. This check suite ran against commit `deadbeef1234`. Before investigating, compare that commit to the PR's current head (e.g. `gh pr view 9 --json headRefOid`). If the PR's head has already moved past `deadbeef1234`, this failure is stale - a newer commit supersedes it, so stop immediately without commenting or pushing anything. Otherwise, investigate the failing checks and push a fix."
-      );
-      expect(result.synthesized).toBe(true);
-    });
-
-    it('falls back to a stop-without-acting instruction when check_suite.head_sha is absent', () => {
-      process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
-      process.env.GITHUB_EVENT_PATH = writeEventPayload({
-        action: 'ci_failure',
-        client_payload: {
-          raw: {
-            installation: { id: 4242 },
-            repository: { full_name: 'acme/widgets' },
-            pull_request: { number: 9 },
-            check_suite: {
-              conclusion: 'failure',
-              html_url: 'https://github.com/acme/widgets/pull/9/checks',
-            },
-          },
-        },
-      });
-
-      const result = parseTrigger();
-
-      expect(result.comment_body).toBe(
-        "CI is failing on this PR (conclusion: failure). Check suite: https://github.com/acme/widgets/pull/9/checks. This check suite's failing commit could not be determined, so staleness can't be safely verified - stop immediately without investigating, commenting, or pushing anything."
-      );
-      expect(result.comment_body).not.toContain('``');
-    });
-  });
-
-  describe('repository_dispatch: coderabbit_review shape', () => {
-    it('synthesizes a comment body from the review URL, without reading the review body', () => {
-      process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
-      process.env.GITHUB_EVENT_PATH = writeEventPayload({
-        action: 'coderabbit_review',
-        client_payload: {
-          raw: {
-            installation: { id: 4242 },
-            repository: { full_name: 'acme/widgets' },
-            pull_request: { number: 9 },
-            coderabbit_review: {
-              html_url: 'https://github.com/acme/widgets/pull/9#pullrequestreview-1',
-            },
-          },
-        },
-      });
-
-      const result = parseTrigger();
-
-      expect(result.target_repo).toBe('acme/widgets');
-      expect(result.issue_number).toBe('9');
-      expect(result.installation_id).toBe('4242');
-      expect(result.event_type).toBe('coderabbit_review');
-      expect(result.comment_body).toBe(
-        'CodeRabbit posted a review on PR #9 (https://github.com/acme/widgets/pull/9#pullrequestreview-1). Read it and address any actionable feedback.'
-      );
-      expect(result.synthesized).toBe(true);
-    });
-  });
-
-  describe('repository_dispatch: merge_conflict shape', () => {
-    it('synthesizes a comment body from the mergeable_state and base ref', () => {
-      process.env.GITHUB_EVENT_NAME = 'repository_dispatch';
-      process.env.GITHUB_EVENT_PATH = writeEventPayload({
-        action: 'merge_conflict',
-        client_payload: {
-          raw: {
-            installation: { id: 4242 },
-            repository: { full_name: 'acme/widgets' },
-            pull_request: { number: 9 },
-            merge_conflict: { mergeable_state: 'dirty', base_ref: 'main' },
-          },
-        },
-      });
-
-      const result = parseTrigger();
-
-      expect(result.target_repo).toBe('acme/widgets');
-      expect(result.issue_number).toBe('9');
-      expect(result.installation_id).toBe('4242');
-      expect(result.event_type).toBe('merge_conflict');
-      expect(result.comment_body).toBe(
-        "A push to main left this PR unmergeable (mergeable_state: dirty). Merge or rebase the latest default branch into this PR's branch, resolve the conflicts, and push the fix."
-      );
-      expect(result.synthesized).toBe(true);
+      const result = parseTrigger({ GITHUB_EVENT_NAME: 'repository_dispatch', GITHUB_EVENT_PATH: eventPath });
+      expect(result.target_repo).toBe('TheDeepestSpace/the-intern');
+      expect(result.issue_number).toBe('11');
+      expect(result.installation_id).toBe('7');
+      expect(result.event_type).toBe(type);
+      expect(result.comment_body).toBe('');
     });
   });
 
@@ -283,7 +191,6 @@ describe('parse-trigger', () => {
       expect(result.target_repo).toBe('');
       expect(result.issue_number).toBe('');
       expect(result.comment_body).toBe('');
-      expect(result.synthesized).toBe(false);
     });
   });
 });

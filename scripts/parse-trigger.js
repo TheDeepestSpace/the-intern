@@ -6,10 +6,10 @@ const fs = require('fs');
 // Which agent runs, and the `key=value` control-token grammar, are decided by
 // agentic.yaml via scripts/resolve-agent.js, which is the only caller.
 //
-// For the system-synthesized dispatches (ci_failure, coderabbit_review,
-// merge_conflict) the request text is built here: the worker never forwards
-// third-party review bodies (tier-2 injection-safe), so the instruction is
-// synthesized from structural fields only and `synthesized` is set.
+// System-synthesized dispatches (ci_failure, coderabbit_review,
+// merge_conflict) only use the structural fallback below (repo, PR number,
+// installation); their trigger event and request text are declared in
+// agentic.yaml (see eventFromSystem and each agent's `request`).
 function parseTrigger(env = process.env) {
   const eventName = env.GITHUB_EVENT_NAME;
   const rawPayloadPath = env.GITHUB_EVENT_PATH;
@@ -23,7 +23,6 @@ function parseTrigger(env = process.env) {
   let author = '';
   let threadAuthor = '';
   let on = '';
-  let synthesized = false;
   let payload = {};
 
   if (eventName === 'repository_dispatch') {
@@ -60,36 +59,6 @@ function parseTrigger(env = process.env) {
       author = payload.comment.user?.login || '';
       threadAuthor = payload.pull_request.user?.login || '';
       on = 'review_thread';
-    } else if (payload.pull_request && payload.check_suite) {
-      // ci_failure: synthesized instruction, no @the-intern-bot mention needed
-      // since this bypasses the mention gate entirely.
-      targetRepo = payload.repository?.full_name || '';
-      issueNumber = String(payload.pull_request.number || '');
-      const headSha = payload.check_suite.head_sha || '';
-      commentBody = headSha
-        ? `CI is failing on this PR (conclusion: ${payload.check_suite.conclusion}). Check suite: ${payload.check_suite.html_url}. This check suite ran against commit \`${headSha}\`. Before investigating, compare that commit to the PR's current head (e.g. \`gh pr view ${issueNumber} --json headRefOid\`). If the PR's head has already moved past \`${headSha}\`, this failure is stale - a newer commit supersedes it, so stop immediately without commenting or pushing anything. Otherwise, investigate the failing checks and push a fix.`
-        : `CI is failing on this PR (conclusion: ${payload.check_suite.conclusion}). Check suite: ${payload.check_suite.html_url}. This check suite's failing commit could not be determined, so staleness can't be safely verified - stop immediately without investigating, commenting, or pushing anything.`;
-      on = 'pr';
-      synthesized = true;
-    } else if (payload.pull_request && payload.coderabbit_review) {
-      // coderabbit_review: synthesized instruction, same shape as ci_failure
-      // above. The worker never reads/forwards the review body itself (tier-2
-      // injection-safe) - the dispatched session reads the actual review
-      // content itself via gh/api during normal operation.
-      targetRepo = payload.repository?.full_name || '';
-      issueNumber = String(payload.pull_request.number || '');
-      commentBody = `CodeRabbit posted a review on PR #${payload.pull_request.number} (${payload.coderabbit_review.html_url}). Read it and address any actionable feedback.`;
-      on = 'pr';
-      synthesized = true;
-    } else if (payload.pull_request && payload.merge_conflict) {
-      // merge_conflict: synthesized instruction, same shape as ci_failure/
-      // coderabbit_review above. Fires when a push to the default branch left
-      // this bot-authored PR unmergeable.
-      targetRepo = payload.repository?.full_name || '';
-      issueNumber = String(payload.pull_request.number || '');
-      commentBody = `A push to ${payload.merge_conflict.base_ref || 'the default branch'} left this PR unmergeable (mergeable_state: ${payload.merge_conflict.mergeable_state}). Merge or rebase the latest default branch into this PR's branch, resolve the conflicts, and push the fix.`;
-      on = 'pr';
-      synthesized = true;
     } else {
       // Fallback extraction
       targetRepo = payload.repository?.full_name || env.INPUT_TARGET_REPO || '';
@@ -116,7 +85,6 @@ function parseTrigger(env = process.env) {
     author,
     thread_author: threadAuthor,
     on,
-    synthesized,
   };
 }
 

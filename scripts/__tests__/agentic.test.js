@@ -109,6 +109,45 @@ describe('validation', () => {
     expect(errs(`  a:\n    trigger: {manual: {}}\n    prompt: hi\n    actions: [{name: x, dispatch_agent: {agent: ghost}}]\n`).join()).toMatch(/unknown agent 'ghost'/);
   });
 
+  it('validates system triggers (ci_failure, merge_conflict, review)', () => {
+    const ok = `  a:
+    trigger: {ci_failure: {pr_authors: ["bot[bot]"], skip_preexisting: true, dedup: 14d}}
+    access: {repos: [{name: $trigger.ci_failure.repo, scope: read/write}]}
+    prompt: 'fix $repo#$issue_number'
+    request: 'CI failed ($trigger.ci_failure.conclusion) at $trigger.ci_failure.head_sha'
+`;
+    expect(errs(ok)).toEqual([]);
+    // The PR-author gate is mandatory: no list must never mean "any PR".
+    expect(errs(ok.replace('pr_authors: ["bot[bot]"], ', '')).join()).toMatch(/pr_authors: non-empty list required/);
+    expect(errs(ok.replace('pr_authors: ["bot[bot]"]', 'pr_authors: []')).join()).toMatch(/pr_authors: non-empty list required/);
+    expect(errs(ok.replace('    request:', '    #request:')).join()).toMatch(/request: required for a ci_failure trigger/);
+    expect(errs(ok.replace('$trigger.ci_failure.head_sha', '$trigger.ci_failure.nope')).join()).toMatch(/unknown variable/);
+    expect(errs(ok.replace('14d', '14w')).join()).toMatch(/dedup/);
+    expect(errs(`  a:\n    trigger: {merge_conflict: {pr_authors: [x], skip_preexisting: true}}\n    prompt: hi\n    request: hi\n`).join()).toMatch(/unknown key 'skip_preexisting'/);
+    expect(errs(`  a:\n    trigger: {review: {pr_authors: [x]}}\n    prompt: hi\n    request: hi\n`).join()).toMatch(/reviewers: non-empty list required/);
+    expect(errs(`  a:\n    trigger: {manual: {}}\n    prompt: hi\n    request: hi\n`).join()).toMatch(/request: only valid with/);
+    // Free text is never a trusted source for a repo, but the event's repo is.
+    expect(errs(ok.replace('$trigger.ci_failure.repo', '$trigger.ci_failure.conclusion')).join()).toMatch(/not a trusted source/);
+  });
+
+  it('validates schedule job agents', () => {
+    const ok = `  j:
+    trigger: {schedule: {cron: '0 7 * * *'}}
+    job: cleanup-data-branches
+    concurrency: grp
+    secrets: [DATA_REPO_TOKEN]
+    settings: {n: 3, flag: true}
+`;
+    expect(errs(ok)).toEqual([]);
+    expect(errs(ok.replace('job: cleanup-data-branches', 'job: rm-rf')).join()).toMatch(/job: must be one of/);
+    expect(errs(ok.replace('    job: cleanup-data-branches\n', '    prompt: hi\n')).join()).toMatch(/job: required for a schedule trigger/);
+    expect(errs(ok + '    prompt: hi\n').join()).toMatch(/prompt: not allowed on a job agent/);
+    expect(errs(ok.replace("'0 7 * * *'", "'0 7 *'")).join()).toMatch(/5-field cron/);
+    expect(errs(ok.replace('{n: 3, flag: true}', '{n: [1]}')).join()).toMatch(/settings.n: must be a scalar/);
+    expect(errs(`  a:\n    trigger: {manual: {}}\n    prompt: hi\n    job: update-model-list\n`).join()).toMatch(/job: only valid with a schedule trigger/);
+    expect(errs(ok.replace('agents:', '') + `  k:\n    trigger: {schedule: {cron: '0 7 * * *'}}\n    job: update-model-list\n`).join()).toMatch(/ambiguous trigger/);
+  });
+
   it('flags ambiguous triggers', () => {
     const e = errs(`  a:\n    trigger: {comment: {verb: go}}\n    prompt: hi\n  b:\n    trigger: {comment: {verb: GO}}\n    prompt: hi\n`);
     expect(e.join()).toMatch(/ambiguous trigger/);

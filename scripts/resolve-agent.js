@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  loadSpecFile, route, resolveAgent, eventFromWebhook, eventFromTelegram, botLogin,
+  loadSpecFile, route, resolveAgent, eventFromWebhook, eventFromTelegram, eventFromSystem, botLogin,
 } = require('./lib/agentic-yaml');
 const { parseTrigger } = require('./parse-trigger');
 
@@ -19,6 +19,8 @@ const { parseTrigger } = require('./parse-trigger');
 // $GITHUB_OUTPUT or the log (issue #226).
 const DEFAULT_REQUEST = 'Please inspect the context and assist with this issue or pull request.';
 const COMMENT_EVENTS = ['issue_comment', 'pull_request_review', 'pull_request_review_comment'];
+// System-synthesized dispatch types; each is routed to an agentic.yaml agent
+// with the matching ci_failure | review | merge_conflict trigger.
 const SYNTHESIZED_EVENTS = ['ci_failure', 'coderabbit_review', 'merge_conflict'];
 
 function readEvent(env) {
@@ -75,10 +77,7 @@ function buildEvent(spec, env) {
   }
   if (SYNTHESIZED_EVENTS.includes(eventType)) {
     const shape = parseTrigger(env);
-    const event = {
-      kind: 'comment', repo: shape.target_repo, author: '', on: 'pr',
-      issue_number: Number(shape.issue_number), body: shape.comment_body, implicit: true,
-    };
+    const event = eventFromSystem(eventType, cp.raw || cp);
     return { event, expectedAgent: cp.agent || null, shape };
   }
   if (eventType === 'agent_commit') {
@@ -101,6 +100,8 @@ function buildEvent(spec, env) {
 function requestText(resolved, event) {
   if (event.kind === 'comment') return resolved.text || DEFAULT_REQUEST;
   if (event.kind === 'telegram') return resolved.text || '';
+  // ci_failure / merge_conflict / review: the agent's declared `request`.
+  if (resolved.request) return resolved.request;
   if (event.kind === 'commit') {
     const lines = [`Commit ${event.sha} was pushed to branch ${event.branch} of ${event.repo} by ${event.author}.`];
     const captures = Object.entries(resolved.match_captures || {});

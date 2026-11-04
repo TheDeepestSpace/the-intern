@@ -5,7 +5,21 @@
 // scripts/bundle-agentic.js), CI and tests can all share it. YAML parsing lives
 // in ./agentic-yaml.js so this file stays dependency-free.
 
-const TRIGGER_KINDS = ['comment', 'commit', 'pull_request', 'issue', 'schedule', 'manual', 'telegram'];
+const TRIGGER_KINDS = ['comment', 'commit', 'pull_request', 'issue', 'schedule', 'manual', 'telegram',
+  'ci_failure', 'merge_conflict', 'review'];
+// System-synthesized triggers: the worker (or the nightly crawl) turns a
+// GitHub event into one of these; the agent's `request` template is the text
+// the agent receives. Fields are the structural facts of the event only —
+// never third-party free text (review bodies, titles).
+const SYSTEM_FIELDS = {
+  ci_failure: ['pr_author', 'conclusion', 'head_sha', 'html_url'],
+  merge_conflict: ['pr_author', 'base_ref', 'mergeable_state'],
+  review: ['pr_author', 'reviewer', 'html_url'],
+};
+// Non-LLM scheduled jobs a `schedule` agent may run (`job:`). The code behind
+// each name lives in scripts/; yaml only decides when, how long, under which
+// concurrency group and with which tunables.
+const JOBS = ['nightly-crawl', 'cleanup-data-branches', 'update-model-list', 'poll-pending-retries'];
 const SCOPES = ['read', 'read/write'];
 // Access name meaning every repo the GitHub App is installed in.
 const ALL_REPOS = '*';
@@ -14,7 +28,8 @@ const PARAM_TYPES = ['string', 'integer', 'boolean'];
 const COMMENT_ON = ['issue', 'pr', 'review_thread'];
 const PERMISSIONS = ['contents', 'issues', 'pull_requests', 'workflows', 'actions', 'checks', 'statuses'];
 const AGENT_KEYS = ['trigger', 'access', 'prompt', 'prompt_file', 'prompt_append', 'backend', 'model',
-  'effort', 'timeout', 'limits', 'actions', 'permissions', 'secrets', 'network', 'tools'];
+  'effort', 'timeout', 'limits', 'actions', 'permissions', 'secrets', 'network', 'tools',
+  'request', 'job', 'concurrency', 'settings'];
 const DEFAULT_KEYS = ['backend', 'model', 'effort', 'timeout', 'limits'];
 const TOP_KEYS = ['version', 'bot', 'defaults', 'repos', 'allowed_owners', 'prompt_repos', 'snippets', 'agents'];
 const REPO_RE = /^[\w.-]+\/[\w.-]+$/;
@@ -59,9 +74,9 @@ function globToRegExp(glob) {
 }
 
 function parseDuration(v) {
-  const m = /^(\d+)(s|m|h)$/.exec(String(v));
+  const m = /^(\d+)(s|m|h|d)$/.exec(String(v));
   if (!m) return null;
-  return Number(m[1]) * { s: 1, m: 60, h: 3600 }[m[2]];
+  return Number(m[1]) * { s: 1, m: 60, h: 3600, d: 86400 }[m[2]];
 }
 
 // Declared params of a trigger definition (comment/telegram `params`, manual
@@ -98,6 +113,13 @@ function triggerContext(kind, def, values) {
     case 'issue':
       t = { ...base, number: ph('number') };
       break;
+    case 'ci_failure':
+    case 'merge_conflict':
+    case 'review': {
+      t = { ...base, number: ph('number') };
+      for (const f of SYSTEM_FIELDS[kind]) t[f] = ph(f);
+      break;
+    }
     case 'telegram': {
       const param = {};
       for (const p of Object.keys(def.params || {})) param[p] = v ? (v.params || {})[p] : true;
@@ -138,7 +160,7 @@ function lookup(ctx, dotted) {
 // Vars allowed inside `access`: only trusted trigger fields (repo, branch
 // captures, typed manual parameters) — never free-form comment params or text.
 function trustedForAccess(dotted) {
-  return /^(repo|trigger\.(comment|commit|pull_request|issue)\.repo|trigger\.commit\.matcher\.[a-z_]\w*|trigger\.manual\.parameters\.[a-z_]\w*)$/i.test(dotted);
+  return /^(repo|trigger\.(comment|commit|pull_request|issue|ci_failure|merge_conflict|review)\.repo|trigger\.commit\.matcher\.[a-z_]\w*|trigger\.manual\.parameters\.[a-z_]\w*)$/i.test(dotted);
 }
 
 // Vars allowed as a prompt_file `ref`: the pushed commit/branch of a commit
@@ -241,6 +263,29 @@ function validateTrigger(name, trigger, spec, errors) {
       strList('labels');
       strList('authors');
       break;
+    case 'ci_failure':
+    case 'merge_conflict':
+    case 'review': {
+      unknownKeys(def, ['repo', 'pr_authors', ...(kind === 'ci_failure' ? ['skip_preexisting', 'dedup'] : []),
+        ...(kind === 'review' ? ['reviewers', 'actions'] : [])], w, errors);
+      repoRef('repo');
+      // The PR-author allowlist is the gate (the bot fixing only its own PRs),
+      // so it is mandatory: an omitted list must never mean "any PR".
+      if (!Array.isArray(def.pr_authors) || !def.pr_authors.length) errors.push(`${w}.pr_authors: non-empty list required`);
+      strList('pr_authors');
+      if (kind === 'review') {
+        if (!Array.isArray(def.reviewers) || !def.reviewers.length) errors.push(`${w}.reviewers: non-empty list required`);
+        strList('reviewers');
+        strList('actions');
+      }
+      if (def.skip_preexisting !== undefined && typeof def.skip_preexisting !== 'boolean') errors.push(`${w}.skip_preexisting: must be a boolean`);
+      if (def.dedup !== undefined) {
+        const dedupSeconds = parseDuration(def.dedup);
+        // Cloudflare KV rejects an expirationTtl below 60s; 0 means no dedup.
+        if (dedupSeconds === null || (dedupSeconds !== 0 && dedupSeconds < 60)) errors.push(`${w}.dedup: like 30m|2h|14d (at least 60s)`);
+      }
+      break;
+    }
     case 'schedule':
       unknownKeys(def, ['cron'], w, errors);
       if (typeof def.cron !== 'string' || def.cron.trim().split(/\s+/).length !== 5) {
@@ -309,10 +354,41 @@ function validateAgent(name, agent, spec, errors) {
     errors.push(`${where}.secrets: must be a list of secret names`);
   }
 
+  // job (scheduled non-LLM work) vs prompt (an LLM session)
+  const isJob = agent.job !== undefined;
+  if (isJob) {
+    if (kind !== 'schedule') errors.push(`${where}.job: only valid with a schedule trigger`);
+    if (!JOBS.includes(agent.job)) errors.push(`${where}.job: must be one of ${JOBS.join('|')}`);
+    for (const k of ['prompt', 'prompt_file', 'prompt_append', 'request', 'actions']) {
+      if (agent[k] !== undefined) errors.push(`${where}.${k}: not allowed on a job agent`);
+    }
+  } else if (kind === 'schedule') {
+    errors.push(`${where}.job: required for a schedule trigger`);
+  }
+  if (agent.concurrency !== undefined) {
+    if (kind !== 'schedule') errors.push(`${where}.concurrency: only valid with a schedule trigger`);
+    else if (typeof agent.concurrency !== 'string' || !/^[\w.-]+$/.test(agent.concurrency)) errors.push(`${where}.concurrency: must be a group name`);
+  }
+  if (agent.settings !== undefined) {
+    if (!isJob) errors.push(`${where}.settings: only valid on a job agent`);
+    else if (!isObj(agent.settings)) errors.push(`${where}.settings: must be a map`);
+    else for (const [k, v] of Object.entries(agent.settings)) {
+      if (!/^[a-z][a-z0-9_]*$/.test(k)) errors.push(`${where}.settings.${k}: invalid name`);
+      if (!['string', 'number', 'boolean'].includes(typeof v)) errors.push(`${where}.settings.${k}: must be a scalar`);
+    }
+  }
+  // request: the synthesized text a system trigger hands the agent.
+  if (SYSTEM_FIELDS[kind]) {
+    if (typeof agent.request !== 'string' || !agent.request.trim()) errors.push(`${where}.request: required for a ${kind} trigger`);
+    else checkVars(agent.request, ctx, [], `${where}.request`, errors);
+  } else if (agent.request !== undefined && !isJob) {
+    errors.push(`${where}.request: only valid with a ${Object.keys(SYSTEM_FIELDS).join('|')} trigger`);
+  }
+
   // prompt
   const hasInline = agent.prompt !== undefined;
   const hasFile = agent.prompt_file !== undefined;
-  if (hasInline === hasFile) errors.push(`${where}: exactly one of prompt|prompt_file required`);
+  if (!isJob && hasInline === hasFile) errors.push(`${where}: exactly one of prompt|prompt_file required`);
   if (hasInline) {
     if (typeof agent.prompt !== 'string' || !agent.prompt.trim()) errors.push(`${where}.prompt: must be a non-empty string`);
     else checkVars(agent.prompt, ctx, [], `${where}.prompt`, errors);
@@ -453,6 +529,7 @@ function checkAmbiguity(spec, errors) {
     if (kind === 'comment') key = `comment:${(def.verb || name).toLowerCase()}:${(def.on || COMMENT_ON).slice().sort()}`;
     else if (kind === 'commit') key = `commit:${spec.repos[def.repo] || def.repo}:${def.branch}`.toLowerCase();
     else if (kind === 'schedule') key = `schedule:${def.cron}`;
+    else if (SYSTEM_FIELDS[kind]) key = `${kind}:${lc(spec.repos[def.repo] || def.repo || '*')}`;
     else if (kind === 'telegram') key = 'telegram';
     if (key === null) continue;
     if (seen.has(key)) errors.push(`agents.${name}: ambiguous trigger, same as agent '${seen.get(key)}'`);
@@ -626,6 +703,20 @@ function matchAgent(spec, name, event) {
       : body.replace(/\s+/g, ' ').trim();
     return { kind, values: { chat_id: event.chat_id, message_id: event.message_id, params, text } };
   }
+  if (SYSTEM_FIELDS[kind]) {
+    // Structural gates only: who authored the PR (and, for a review, who
+    // reviewed it) decides whether the system may act on it.
+    if (!(def.pr_authors || []).map(lc).includes(lc(event.pr_author))) return null;
+    const values = { repo: event.repo, author: event.author || '', number: event.number };
+    if (kind === 'ci_failure' && !['failure', 'timed_out'].includes(event.conclusion)) return null;
+    if (kind === 'merge_conflict' && event.mergeable_state !== 'dirty') return null;
+    if (kind === 'review') {
+      if (!(def.reviewers || []).map(lc).includes(lc(event.reviewer))) return null;
+      if (!(def.actions || ['submitted']).includes(event.action)) return null;
+    }
+    for (const f of SYSTEM_FIELDS[kind]) values[f] = event[f] ?? '';
+    return { kind, values };
+  }
   if (kind === 'schedule') return event.agent === name ? { kind, values: {} } : null;
   if (kind === 'manual') {
     if (event.agent !== name) return null;
@@ -642,6 +733,18 @@ function interpolate(str, ctx, extra = {}) {
     if (name in extra) return String(extra[name]);
     const r = lookup(ctx, name);
     return r.found && r.value !== undefined && r.value !== null ? String(r.value) : whole;
+  });
+}
+
+// Like interpolate, but a variable that is missing or empty is an error: a
+// synthesized request must never reach the agent with a hole in it.
+function interpolateStrict(str, ctx) {
+  return str.replace(VAR_RE, (whole, name) => {
+    const r = lookup(ctx, name);
+    if (!r.found || r.value === undefined || r.value === null || r.value === '') {
+      throw new Error(`request: '$${name}' resolved to nothing`);
+    }
+    return String(r.value);
   });
 }
 
@@ -712,8 +815,9 @@ function resolveAgent(spec, name, match) {
     }
     prompt_file = { repo: resolveRepo(agent.prompt_file.repo), ref, path: agent.prompt_file.path };
   } else {
-    prompt = interpolate(agent.prompt, ctx);
+    prompt = agent.prompt === undefined ? null : interpolate(agent.prompt, ctx);
   }
+  const request = agent.request === undefined ? null : interpolateStrict(agent.request, ctx);
   const actions = (agent.actions || []).map(a => ({
     name: a.name,
     parameters: a.parameters || {},
@@ -731,6 +835,10 @@ function resolveAgent(spec, name, match) {
     permissions: agent.permissions || {},
     secrets: agent.secrets || [],
     prompt,
+    request,
+    job: agent.job ?? null,
+    concurrency: agent.concurrency ?? null,
+    settings: agent.settings || {},
     prompt_file,
     prompt_append: (agent.prompt_append || []).map(s => spec.snippets[s]),
     // Pinned = ref given; otherwise the default branch of that repo.
@@ -892,6 +1000,55 @@ function eventFromWebhook(spec, eventType, payload) {
   };
 }
 
+// Normalizes a system-synthesized request — the payload the worker forwards
+// (and the nightly crawl sends) as a repository_dispatch — into a trigger
+// event. `type` is the dispatch event type; returns null for other types. The
+// worker builds its dispatch payload and routes it through this same function,
+// so it and scripts/resolve-agent.js can never disagree.
+const SYSTEM_EVENT_TYPES = { ci_failure: 'ci_failure', merge_conflict: 'merge_conflict', coderabbit_review: 'review' };
+function eventFromSystem(type, raw) {
+  const kind = SYSTEM_EVENT_TYPES[type];
+  if (!kind) return null;
+  const pr = raw.pull_request || {};
+  const event = {
+    kind,
+    repo: raw.repository?.full_name || '',
+    author: '',
+    number: pr.number ?? null,
+    pr_author: pr.user?.login || '',
+  };
+  if (kind === 'ci_failure') {
+    Object.assign(event, {
+      conclusion: raw.check_suite?.conclusion || '',
+      head_sha: raw.check_suite?.head_sha || '',
+      html_url: raw.check_suite?.html_url || '',
+    });
+  } else if (kind === 'merge_conflict') {
+    Object.assign(event, {
+      base_ref: raw.merge_conflict?.base_ref || '',
+      mergeable_state: raw.merge_conflict?.mergeable_state || '',
+    });
+  } else {
+    Object.assign(event, {
+      reviewer: raw.coderabbit_review?.reviewer || '',
+      html_url: raw.coderabbit_review?.html_url || '',
+      action: raw.coderabbit_review?.action || '',
+    });
+  }
+  return event;
+}
+
+// Lower-cased logins named by any `field` list (`pr_authors`, `reviewers`) of
+// the agents with a `kind` trigger — lets the worker skip work for PRs/reviews
+// no agent could take before it makes API calls. Routing stays authoritative.
+function systemActors(spec, kind, field) {
+  const out = new Set();
+  for (const agent of Object.values(spec.agents || {})) {
+    for (const l of agent?.trigger?.[kind]?.[field] || []) out.add(lc(l));
+  }
+  return out;
+}
+
 // Normalizes a Telegram message (Bot API `message` object, or the worker's
 // forwarded client_payload) into a trigger event.
 function eventFromTelegram(message) {
@@ -905,5 +1062,5 @@ function eventFromTelegram(message) {
 
 module.exports = {
   loadSpecObject, matchAgent, route, resolveAgent, resolveAction, explain, accessAllows, branchPattern,
-  parseDuration, eventFromWebhook, eventFromTelegram, botLogin, ALL_REPOS,
+  parseDuration, eventFromWebhook, eventFromTelegram, eventFromSystem, systemActors, botLogin, ALL_REPOS, JOBS,
 };

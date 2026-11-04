@@ -9,6 +9,9 @@ import {
   resolveAgent,
   eventFromWebhook,
   eventFromTelegram,
+  eventFromSystem,
+  systemActors,
+  parseDuration,
 } from './agentic.generated.js';
 
 // agentic.yaml, re-validated once per isolate (fail closed: an invalid spec
@@ -90,7 +93,7 @@ export default {
 };
 
 // Shared dispatch POST used by the generic flow, handleCheckSuite, and
-// handleCodeRabbitReview: resolves the configured owner/repo, sets the
+// handleReview: resolves the configured owner/repo, sets the
 // common headers, and sends eventType + { raw: rawPayload, ...extra }.
 async function dispatchRepoEvent(env, token, eventType, rawPayload, extra = {}) {
   return postRepositoryDispatch(env, token, eventType, { raw: rawPayload, ...extra });
@@ -141,11 +144,12 @@ async function handleGitHub(request, env) {
     return handlePush(payload, env);
   }
 
-  // Likewise, a CodeRabbit review is never authored by an allowlisted human
-  // and never mentions the bot, so it needs its own bypass flow too.
+  // Likewise, a review by a reviewer some `review` trigger names (CodeRabbit)
+  // is never authored by an allowlisted human and never mentions the bot, so
+  // it needs its own bypass flow too.
   const reviewerLogin = (payload.review?.user?.login || '').toLowerCase();
-  if (eventType === 'pull_request_review' && reviewerLogin === 'coderabbitai[bot]') {
-    return handleCodeRabbitReview(payload, env);
+  if (eventType === 'pull_request_review' && systemActors(getSpecOrNull(env), 'review', 'reviewers').has(reviewerLogin)) {
+    return handleReview(payload, env);
   }
 
   // Extract comment / review / event author
@@ -300,7 +304,6 @@ async function handleCheckSuite(payload, env) {
     return new Response('missing installation id', { status: 400 });
   }
 
-  const botLogin = (env.BOT_LOGIN || 'the-intern-bot[bot]').toLowerCase();
   const sourceOwner = payload.repository?.owner?.login;
   const sourceRepo = payload.repository?.name;
   // checkSuite.head_sha is the commit this specific check suite actually ran
@@ -318,6 +321,7 @@ async function handleCheckSuite(payload, env) {
     let dispatched = 0;
     let deduped = 0;
     let skippedPreExisting = 0;
+    let rateLimited = 0;
     for (const { number } of pullRequests) {
       const prRes = await fetch(
         `https://api.github.com/repos/${sourceOwner}/${sourceRepo}/pulls/${number}`,
@@ -332,15 +336,31 @@ async function handleCheckSuite(payload, env) {
       if (!prRes.ok) continue;
       const pullRequest = await prRes.json();
 
-      if ((pullRequest.user?.login || '').toLowerCase() !== botLogin) continue;
+      // Which PRs are fixable (author allowlist), the dedup window and the
+      // pre-existing-failure guard all come from the matching ci_failure
+      // agent in agentic.yaml.
+      const routed = routeEvent(env, eventFromSystem('ci_failure', {
+        repository: payload.repository,
+        pull_request: pullRequest,
+        check_suite: checkSuite,
+      }), 'check suite');
+      if (routed.response) {
+        if (routed.response.status !== 200) return routed.response;
+        continue;
+      }
+      const { hit, resolved } = routed;
+      const trigger = routed.spec.agents[hit.name].trigger.ci_failure;
+      const dedupTtl = trigger.dedup ? parseDuration(trigger.dedup) : 0;
 
       const dedupKey = `ci_failure:${sourceOwner}/${sourceRepo}#${number}@${sha}`;
-      if (await env.CI_FAILURE_DEDUP.get(dedupKey)) {
+      if (dedupTtl && await env.CI_FAILURE_DEDUP.get(dedupKey)) {
         deduped++;
         continue;
       }
 
-      const headFailures = await getFailingCheckNames(sourceOwner, sourceRepo, checkSuite.head_sha, token);
+      const headFailures = trigger.skip_preexisting
+        ? await getFailingCheckNames(sourceOwner, sourceRepo, checkSuite.head_sha, token)
+        : null;
       if (headFailures && headFailures.size > 0 && pullRequest.base?.sha) {
         const baseFailures = await getFailingCheckNames(sourceOwner, sourceRepo, pullRequest.base.sha, token);
         if (baseFailures && [...headFailures].every(name => baseFailures.has(name))) {
@@ -351,12 +371,18 @@ async function handleCheckSuite(payload, env) {
         }
       }
 
+      const limit = await rateLimitKey(env, resolved);
+      if (limit.exceeded) {
+        rateLimited++;
+        continue;
+      }
+
       const dispatchRes = await dispatchRepoEvent(env, token, 'ci_failure', {
         repository: payload.repository,
         pull_request: pullRequest,
         check_suite: checkSuite,
         installation: payload.installation,
-      });
+      }, { agent: hit.name });
 
       if (!dispatchRes.ok) {
         const errorText = await dispatchRes.text();
@@ -365,7 +391,8 @@ async function handleCheckSuite(payload, env) {
       // Marked only after a successful dispatch, so a failed delivery leaves
       // the key unset and a subsequent retry (e.g. GitHub webhook redelivery)
       // can still go through instead of being permanently deduped.
-      await env.CI_FAILURE_DEDUP.put(dedupKey, '1', { expirationTtl: 60 * 60 * 24 * 14 });
+      if (dedupTtl) await env.CI_FAILURE_DEDUP.put(dedupKey, '1', { expirationTtl: dedupTtl });
+      await countRun(env, limit);
       dispatched++;
     }
 
@@ -377,6 +404,9 @@ async function handleCheckSuite(payload, env) {
     }
     if (skippedPreExisting > 0) {
       return new Response('ignored: all failures pre-existing on base branch', { status: 200 });
+    }
+    if (rateLimited > 0) {
+      return new Response('ignored: rate limit for the ci_failure agent reached', { status: 200 });
     }
     return new Response('ignored: no bot-authored pull requests', { status: 200 });
   } catch (err) {
@@ -417,7 +447,6 @@ async function handlePush(payload, env) {
     return new Response('missing installation id', { status: 400 });
   }
 
-  const botLogin = (env.BOT_LOGIN || 'the-intern-bot[bot]').toLowerCase();
   const sourceOwner = payload.repository?.owner?.login;
   const sourceRepo = payload.repository?.name;
   const pollAttempts = Number(env.MERGEABLE_POLL_ATTEMPTS) || 5;
@@ -443,13 +472,17 @@ async function handlePush(payload, env) {
       openPulls.push(...(await pullsRes.json()));
       pullsUrl = parseNextLinkUrl(pullsRes.headers.get('Link'));
     }
+    // Cheap pre-filter on the PR authors some merge_conflict agent accepts, so
+    // other people's PRs never cost a mergeable-state poll; routing below is
+    // the authoritative gate.
+    const conflictAuthors = systemActors(getSpecOrNull(env), 'merge_conflict', 'pr_authors');
     const botPulls = openPulls.filter(
-      pr => (pr.user?.login || '').toLowerCase() === botLogin
+      pr => conflictAuthors.has((pr.user?.login || '').toLowerCase())
     );
 
     let dispatched = 0;
-    for (const { number } of botPulls) {
-      const pullRequest = await pollMergeableState(
+    for (const { number, user: listedUser } of botPulls) {
+      const polled = await pollMergeableState(
         sourceOwner,
         sourceRepo,
         number,
@@ -457,19 +490,35 @@ async function handlePush(payload, env) {
         pollAttempts,
         pollDelayMs
       );
-      if (!pullRequest || pullRequest.mergeable_state !== 'dirty') continue;
+      if (!polled || polled.mergeable_state !== 'dirty') continue;
+      // The author the pre-filter matched on (the list entry) is authoritative.
+      const pullRequest = { ...polled, user: polled.user || listedUser };
+
+      const conflict = { mergeable_state: pullRequest.mergeable_state, base_ref: pushedBranch };
+      const routed = routeEvent(env, eventFromSystem('merge_conflict', {
+        repository: payload.repository,
+        pull_request: pullRequest,
+        merge_conflict: conflict,
+      }), 'merge conflict');
+      if (routed.response) {
+        if (routed.response.status !== 200) return routed.response;
+        continue;
+      }
+      const limit = await rateLimitKey(env, routed.resolved);
+      if (limit.exceeded) continue;
 
       const dispatchRes = await dispatchRepoEvent(env, token, 'merge_conflict', {
         repository: payload.repository,
         pull_request: pullRequest,
-        merge_conflict: { mergeable_state: pullRequest.mergeable_state, base_ref: pushedBranch },
+        merge_conflict: conflict,
         installation: payload.installation,
-      });
+      }, { agent: routed.hit.name });
 
       if (!dispatchRes.ok) {
         const errorText = await dispatchRes.text();
         return new Response(`dispatch failed: ${errorText}`, { status: 502 });
       }
+      await countRun(env, limit);
       dispatched++;
     }
 
@@ -584,24 +633,27 @@ function parseNextLinkUrl(linkHeader) {
   return null;
 }
 
-// Auto-queues a coderabbit_review dispatch when CodeRabbit reviews a PR the
-// bot itself opened, so unaddressed feedback gets picked up without a human
-// having to manually re-trigger the bot. Bypasses ALLOWED_USERS/mention
-// gating entirely, like handleCheckSuite. Tier-2 injection-safe: only
-// structural fields (repo, PR number, review URL) are ever forwarded here —
-// the review body itself is never read by the worker. The dispatched session
-// reads the actual review content itself via its own gh/api tool call later,
-// the same trust boundary ci_failure already operates under.
-async function handleCodeRabbitReview(payload, env) {
-  if (payload.action !== 'submitted') {
-    return new Response('ignored: coderabbit review not submitted', { status: 200 });
-  }
-
-  const botLogin = (env.BOT_LOGIN || 'the-intern-bot[bot]').toLowerCase();
-  const prAuthor = (payload.pull_request?.user?.login || '').toLowerCase();
-  if (prAuthor !== botLogin) {
-    return new Response('ignored: coderabbit review not on a bot-authored PR', { status: 200 });
-  }
+// Auto-queues a coderabbit_review dispatch when a reviewer a `review` trigger
+// names (CodeRabbit) reviews a PR an allowed author opened (the bot), so
+// unaddressed feedback gets picked up without a human having to manually
+// re-trigger the bot. Bypasses ALLOWED_USERS/mention gating entirely, like
+// handleCheckSuite. Tier-2 injection-safe: only structural fields (repo, PR
+// number and author, review URL and reviewer) are ever forwarded here — the
+// review body itself is never read by the worker. The dispatched session reads
+// the actual review content itself via its own gh/api tool call later, the
+// same trust boundary ci_failure already operates under.
+async function handleReview(payload, env) {
+  const raw = {
+    repository: { full_name: payload.repository?.full_name },
+    pull_request: { number: payload.pull_request?.number, user: { login: payload.pull_request?.user?.login } },
+    coderabbit_review: {
+      html_url: payload.review?.html_url,
+      reviewer: payload.review?.user?.login,
+      action: payload.action,
+    },
+  };
+  const routed = routeEvent(env, eventFromSystem('coderabbit_review', raw), 'review');
+  if (routed.response) return routed.response;
 
   const installationId = payload.installation?.id;
   if (!installationId) {
@@ -609,20 +661,24 @@ async function handleCodeRabbitReview(payload, env) {
   }
 
   try {
+    const limit = await rateLimitKey(env, routed.resolved);
+    if (limit.exceeded) {
+      return new Response(`ignored: rate limit for agent ${routed.hit.name} reached`, { status: 200 });
+    }
+
     const token = await getInstallationToken(env, installationId);
 
     const dispatchRes = await dispatchRepoEvent(env, token, 'coderabbit_review', {
-      repository: { full_name: payload.repository?.full_name },
-      pull_request: { number: payload.pull_request?.number },
-      coderabbit_review: { html_url: payload.review?.html_url },
+      ...raw,
       installation: { id: installationId },
-    });
+    }, { agent: routed.hit.name });
 
     if (!dispatchRes.ok) {
       const errorText = await dispatchRes.text();
       return new Response(`dispatch failed: ${errorText}`, { status: 502 });
     }
 
+    await countRun(env, limit);
     return new Response('ok', { status: 200 });
   } catch (err) {
     return new Response(`internal error: ${err.message}`, { status: 500 });

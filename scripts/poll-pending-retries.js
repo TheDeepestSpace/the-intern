@@ -7,7 +7,11 @@ const { execFileSync } = require('child_process');
 const { readEntries, updateEntries } = require('./manage-pending-retries');
 const { findDue, markFired, removeExhausted } = require('./pending-retries-store');
 
-const DEFAULT_RETRY_LOCK_MINUTES = 25;
+const { jobSettings } = require('./lib/job-settings');
+
+// The lock window comes from agentic.yaml (usage_limit_poller `settings`);
+// RETRY_LOCK_MINUTES overrides it, 25 is the fallback for a file that omits it.
+const DEFAULT_RETRY_LOCK_MINUTES = jobSettings('poll-pending-retries').retry_lock_minutes ?? 25;
 
 function resolveRetryLockMinutes(rawValue) {
   const parsed = Number(rawValue ?? DEFAULT_RETRY_LOCK_MINUTES);
