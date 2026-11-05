@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { loadSpec, explain, accessAllows, route, branchPattern, resolveAction, eventFromWebhook, eventFromTelegram } from '../lib/agentic-yaml.js';
+import { loadSpec, loadSpecObject, explain, accessAllows, route, branchPattern, resolveAction, eventFromWebhook, eventFromTelegram } from '../lib/agentic-yaml.js';
 import { main } from '../validate-agentic.js';
 
 const ROOT_FILE = path.join(import.meta.dirname, '..', '..', 'agentic.yaml');
@@ -173,12 +173,12 @@ describe('trigger matching and resolution', () => {
     expect(r.agent).toBe('specage_planner');
     expect(r.access).toEqual([
       { repo: 'TheDeepestSpace/specage', scope: 'read/write' },
-      { repo: 'TheDeepestSpace/specage-data', scope: 'read' },
+      { repo: 'TheDeepestSpace/specage-data', scope: 'read/write' },
     ]);
     expect(r.prompt_file.repo).toBe('TheDeepestSpace/specage');
     expect(r.prompt_pinned).toBe(false);
     expect(accessAllows(r, 'TheDeepestSpace/specage', 'write')).toBe(true);
-    expect(accessAllows(r, 'TheDeepestSpace/specage-data', 'write')).toBe(false);
+    expect(accessAllows(r, 'TheDeepestSpace/specage-data', 'write')).toBe(true);
     expect(accessAllows(r, 'TheDeepestSpace/other')).toBe(false);
   });
 
@@ -329,5 +329,13 @@ describe('cutover behaviours (issue #273)', () => {
     expect(eventFromWebhook(spec, 'push', { ref: 'refs/heads/b', after: '0'.repeat(40), deleted: true }).deleted).toBe(true);
     expect(eventFromWebhook(spec, 'star', {})).toBeNull();
     expect(eventFromTelegram({ chat: { id: 1 }, message_id: 2, caption: 'c' })).toEqual({ kind: 'telegram', chat_id: 1, message_id: 2, body: 'c' });
+  });
+});
+
+describe('relays', () => {
+  it('rejects a relay without an author or workflow', () => {
+    const raw = JSON.parse(JSON.stringify(loadSpec(fs.readFileSync(ROOT_FILE, 'utf8')).spec));
+    raw.relays = { r: { repo: 'specage_data', branch: 'b', paths: ['x'] } };
+    expect(loadSpecObject(raw).errors.join()).toMatch(/relays\.r\.author|relays\.r\.workflow/);
   });
 });

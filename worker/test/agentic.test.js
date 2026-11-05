@@ -375,3 +375,38 @@ describe('system triggers: ci_failure / merge_conflict / review', () => {
     expect(dispatches(spy2)[0]).toMatchObject({ event_type: 'pull_request_review', client_payload: { agent: 'default' } });
   });
 });
+
+describe('relay: outbox push -> specage workflow_dispatch', () => {
+  const outbox = (o = {}) => push({
+    ref: 'refs/heads/specages/specage/trail',
+    sender: { login: 'the-intern-bot[bot]', type: 'Bot' },
+    head_commit: { message: 'outbox: add entry', added: ['outbox/1.json'], modified: [], removed: [] },
+    commits: [{ added: ['outbox/1.json'], modified: [], removed: [] }],
+    ...o,
+  });
+  const wfCall = spy => spy.mock.calls.find(([i]) => new URL(i.url ?? i).pathname.endsWith('/dispatches') && /actions\/workflows/.test(String(i.url ?? i)));
+  const mockRelay = () => vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const req = new Request(input, init);
+    const { pathname } = new URL(req.url);
+    if (pathname.endsWith('/access_tokens')) return new Response(JSON.stringify({ token: 't' }), { status: 201 });
+    if (pathname.endsWith('/installation')) return new Response(JSON.stringify({ id: 7 }), { status: 200 });
+    if (pathname.endsWith('/dispatches')) return new Response(null, { status: 204 });
+    throw new Error(`Unexpected fetch: ${req.method} ${pathname}`);
+  });
+
+  it('dispatches the specage workflow with repo/sha/project', async () => {
+    const spy = mockRelay();
+    const res = await send(outbox());
+    expect(res.status).toBe(200);
+    const call = wfCall(spy);
+    expect(String(call[0].url ?? call[0])).toBe(`https://api.github.com/repos/${SPEC.repos.specage}/actions/workflows/outbox.yml/dispatches`);
+    expect(JSON.parse(call[1].body)).toEqual({ ref: 'main', inputs: { repo: DATA_REPO, sha: SHA, project: 'specage' } });
+  });
+
+  it('ignores fired-marking pushes and other authors', async () => {
+    const spy = mockRelay();
+    await send(outbox({ head_commit: { message: 'outbox: fired 1', added: ['outbox/1.json'] } }));
+    await send(outbox({ sender: { login: 'someone', type: 'User' } }));
+    expect(wfCall(spy)).toBeUndefined();
+  });
+});

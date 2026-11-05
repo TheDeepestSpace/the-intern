@@ -8,6 +8,7 @@ import {
   route,
   resolveAgent,
   eventFromWebhook,
+  matchRelays,
   eventFromTelegram,
   eventFromSystem,
   systemActors,
@@ -431,6 +432,8 @@ async function handlePush(payload, env) {
 
   const commitEvent = eventFromWebhook(getSpecOrNull(env), 'push', payload);
   if (commitEvent) {
+    const relays = matchRelays(getSpecOrNull(env), commitEvent);
+    if (relays.length) return handleRelays(commitEvent, relays, payload, env);
     const routed = routeEvent(env, commitEvent, 'push');
     if (routed.hit) return handleCommitTrigger(commitEvent, routed, payload, env);
     // A broken spec (500) always wins; a policy miss only matters off the
@@ -585,6 +588,40 @@ async function handleCommitTrigger(event, { hit, resolved }, payload, env) {
     }
     await env.CI_FAILURE_DEDUP.put(dedupKey, '1', { expirationTtl: 60 * 60 * 24 * 14 });
     await countRun(env, limit);
+    return new Response('ok', { status: 200 });
+  } catch (err) {
+    return new Response(`internal error: ${err.message}`, { status: 500 });
+  }
+}
+
+// agentic.yaml `relays`: fires workflow_dispatch on a workflow in another repo
+// (inputs: repo, sha, project). Pure relay; per-entry logic and idempotence
+// live in that workflow. Deduped per (relay, repo, sha) in KV.
+async function handleRelays(event, relays, payload, env) {
+  try {
+    for (const relay of relays) {
+      const dedupKey = `relay:${relay.name}:${event.repo.toLowerCase()}@${event.sha}`;
+      if (await env.CI_FAILURE_DEDUP.get(dedupKey)) continue;
+      const appJwt = mintAppJwt(env.APP_ID, normalizeKey(getPrivateKey(env)));
+      const install = await getInstallationIdForRepo(appJwt, relay.workflow.repo);
+      if (!install) return new Response(`app not installed on ${relay.workflow.repo}`, { status: 502 });
+      const token = await getInstallationToken(env, install);
+      const res = await fetch(
+        `https://api.github.com/repos/${relay.workflow.repo}/actions/workflows/${relay.workflow.file}/dispatches`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/vnd.github+json',
+            'User-Agent': 'the-intern-bot-relay',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ ref: relay.workflow.ref, inputs: relay.inputs }),
+        }
+      );
+      if (!res.ok) return new Response(`relay dispatch failed: ${await res.text()}`, { status: 502 });
+      await env.CI_FAILURE_DEDUP.put(dedupKey, '1', { expirationTtl: 60 * 60 * 24 * 14 });
+    }
     return new Response('ok', { status: 200 });
   } catch (err) {
     return new Response(`internal error: ${err.message}`, { status: 500 });
