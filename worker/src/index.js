@@ -433,9 +433,15 @@ async function handlePush(payload, env) {
   const commitEvent = eventFromWebhook(getSpecOrNull(env), 'push', payload);
   if (commitEvent) {
     const relays = matchRelays(getSpecOrNull(env), commitEvent);
-    if (relays.length) return handleRelays(commitEvent, relays, payload, env);
+    // Relays are side-effect dispatches; they don't suppress an independently
+    // matching commit trigger on the same push.
+    const relayRes = relays.length ? await handleRelays(commitEvent, relays, payload, env) : null;
     const routed = routeEvent(env, commitEvent, 'push');
-    if (routed.hit) return handleCommitTrigger(commitEvent, routed, payload, env);
+    if (routed.hit) {
+      const res = await handleCommitTrigger(commitEvent, routed, payload, env);
+      return relayRes && relayRes.status >= 400 && res.status < 400 ? relayRes : res;
+    }
+    if (relayRes) return relayRes;
     // A broken spec (500) always wins; a policy miss only matters off the
     // default branch, where nothing else could handle the push.
     if (!onDefaultBranch || routed.response.status !== 200) return routed.response;
@@ -596,11 +602,11 @@ async function handleCommitTrigger(event, { hit, resolved }, payload, env) {
 
 // agentic.yaml `relays`: fires workflow_dispatch on a workflow in another repo
 // (inputs: repo, sha, project). Pure relay; per-entry logic and idempotence
-// live in that workflow. Deduped per (relay, repo, sha) in KV.
+// live in that workflow. Deduped per (relay, repo, branch, sha) in KV.
 async function handleRelays(event, relays, payload, env) {
   try {
     for (const relay of relays) {
-      const dedupKey = `relay:${relay.name}:${event.repo.toLowerCase()}@${event.sha}`;
+      const dedupKey = `relay:${relay.name}:${event.repo.toLowerCase()}:${event.branch}@${event.sha}`;
       if (await env.CI_FAILURE_DEDUP.get(dedupKey)) continue;
       const appJwt = mintAppJwt(env.APP_ID, normalizeKey(getPrivateKey(env)));
       const install = await getInstallationIdForRepo(appJwt, relay.workflow.repo);

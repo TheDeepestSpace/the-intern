@@ -847,8 +847,14 @@ function matchRelays(spec, event) {
     if (!authorList(r.author).includes(lc(event.author))) continue;
     const bm = branchPattern(r.branch).re.exec(event.branch || '');
     if (!bm) continue;
-    if (r.ignore_message_prefix && String(event.message || '').startsWith(r.ignore_message_prefix)) continue;
-    if (!(event.paths || []).some(p => r.paths.some(g => globToRegExp(g).test(p)))) continue;
+    const pathHit = p => r.paths.some(g => globToRegExp(g).test(p));
+    const skip = m => Boolean(r.ignore_message_prefix) && String(m || '').startsWith(r.ignore_message_prefix);
+    // Per-commit when available: a push that also adds an unfired entry must
+    // still dispatch even if its last commit only marks entries fired.
+    const hit = Array.isArray(event.commits) && event.commits.length
+      ? event.commits.some(c => !skip(c.message) && (c.paths || []).some(pathHit))
+      : !skip(event.message) && (event.paths || []).some(pathHit);
+    if (!hit) continue;
     out.push({
       name,
       workflow: { repo: toRepo(spec, r.workflow.repo), file: r.workflow.file, ref: r.workflow.ref },
@@ -1247,6 +1253,10 @@ function eventFromWebhook(spec, eventType, payload) {
       deleted: Boolean(payload.deleted) || !sha || /^0+$/.test(sha),
       message: payload.head_commit?.message || '',
       paths: [...paths],
+      commits: (payload.commits || []).map(c => ({
+        message: c.message || '',
+        paths: ['added', 'modified', 'removed'].flatMap(k => c[k] || []),
+      })),
     };
   }
   let on;

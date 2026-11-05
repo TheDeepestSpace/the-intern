@@ -324,7 +324,7 @@ describe('cutover behaviours (issue #273)', () => {
     expect(eventFromWebhook(spec, 'push', {
       ref: 'refs/heads/specages/p/spec', after: 'abc', sender: { login: 's' }, repository: { full_name: 'A/d' },
       head_commit: { message: 'm' }, commits: [{ added: ['x'], modified: ['y'] }, { removed: ['x'] }],
-    })).toEqual({ kind: 'commit', repo: 'A/d', author: 's', branch: 'specages/p/spec', sha: 'abc', deleted: false, message: 'm', paths: ['x', 'y'] });
+    })).toEqual({ kind: 'commit', repo: 'A/d', author: 's', branch: 'specages/p/spec', sha: 'abc', deleted: false, message: 'm', paths: ['x', 'y'], commits: [{ message: '', paths: ['x', 'y'] }, { message: '', paths: ['x'] }] });
     expect(eventFromWebhook(spec, 'push', { ref: 'refs/tags/v1' })).toBeNull();
     expect(eventFromWebhook(spec, 'push', { ref: 'refs/heads/b', after: '0'.repeat(40), deleted: true }).deleted).toBe(true);
     expect(eventFromWebhook(spec, 'star', {})).toBeNull();

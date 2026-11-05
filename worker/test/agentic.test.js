@@ -405,8 +405,20 @@ describe('relay: outbox push -> specage workflow_dispatch', () => {
 
   it('ignores fired-marking pushes and other authors', async () => {
     const spy = mockRelay();
-    await send(outbox({ head_commit: { message: 'outbox: fired 1', added: ['outbox/1.json'] } }));
+    await send(outbox({ head_commit: { message: 'outbox: fired 1' }, commits: [{ message: 'outbox: fired 1', modified: ['outbox/1.json'] }] }));
     await send(outbox({ sender: { login: 'someone', type: 'User' } }));
     expect(wfCall(spy)).toBeUndefined();
+  });
+
+  it('still dispatches when a fired-marking commit follows a new entry', async () => {
+    const spy = mockRelay();
+    await send(outbox({
+      head_commit: { message: 'outbox: fired 1' },
+      commits: [
+        { message: 'outbox: add entry', added: ['outbox/2.json'] },
+        { message: 'outbox: fired 1', modified: ['outbox/1.json'] },
+      ],
+    }));
+    expect(wfCall(spy)).toBeDefined();
   });
 });
