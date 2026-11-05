@@ -177,7 +177,7 @@ agents:
     access:
       repos:
         - { name: $trigger.commit.matcher.project, scope: read/write }
-        - { name: specage_data, scope: read }
+        - { name: specage_data, scope: read/write }
     prompt_file: { repo: specage, path: protocol/PROTOCOL.md }
     actions:
       - name: dispatch agent to implement issue
