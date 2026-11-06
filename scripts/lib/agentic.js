@@ -837,31 +837,48 @@ function validateRelays(spec, errors) {
   }
 }
 
-// Push event -> [{ name, repo, workflow, inputs }] for every relay it matches.
-// inputs: repo (pushed repo), sha, project (branch capture, '' when none).
-function matchRelays(spec, event) {
-  if (!event || event.kind !== 'commit' || event.deleted) return [];
-  const out = [];
-  for (const [name, r] of Object.entries(spec.relays || {})) {
-    if (lc(event.repo) !== lc(toRepo(spec, r.repo))) continue;
-    if (!authorList(r.author).includes(lc(event.author))) continue;
+// Evaluates every relay against a push event and says why each did or did not
+// match: [{ name, relay, match, reason, bm }]. Reasons: deleted, not_commit,
+// repo_mismatch, branch_mismatch, ignored_message, no_path_match,
+// sender_mismatch (checked last: the push is otherwise a hit), matched.
+function explainRelays(spec, event) {
+  const rows = Object.entries((spec && spec.relays) || {});
+  const nope = reason => rows.map(([name]) => ({ name, match: false, reason }));
+  if (!event || event.kind !== 'commit') return nope('not_commit');
+  if (event.deleted) return nope('deleted');
+  return rows.map(([name, r]) => {
+    const no = reason => ({ name, match: false, reason, expected: undefined });
+    if (lc(event.repo) !== lc(toRepo(spec, r.repo))) return { ...no('repo_mismatch'), expected: toRepo(spec, r.repo) };
     const bm = branchPattern(r.branch).re.exec(event.branch || '');
-    if (!bm) continue;
+    if (!bm) return { ...no('branch_mismatch'), expected: r.branch };
     const pathHit = p => r.paths.some(g => globToRegExp(g).test(p));
     const skip = m => Boolean(r.ignore_message_prefix) && String(m || '').startsWith(r.ignore_message_prefix);
     // Per-commit when available: a push that also adds an unfired entry must
     // still dispatch even if its last commit only marks entries fired.
-    const hit = Array.isArray(event.commits) && event.commits.length
-      ? event.commits.some(c => !skip(c.message) && (c.paths || []).some(pathHit))
-      : !skip(event.message) && (event.paths || []).some(pathHit);
-    if (!hit) continue;
-    out.push({
+    const commits = Array.isArray(event.commits) && event.commits.length
+      ? event.commits
+      : [{ message: event.message, paths: event.paths }];
+    const live = commits.filter(c => !skip(c.message));
+    if (!live.length) return { ...no('ignored_message'), expected: r.ignore_message_prefix };
+    if (!live.some(c => (c.paths || []).some(pathHit))) return { ...no('no_path_match'), expected: r.paths };
+    if (!authorList(r.author).includes(lc(event.author))) return { ...no('sender_mismatch'), expected: authorList(r.author) };
+    return {
       name,
-      workflow: { repo: toRepo(spec, r.workflow.repo), file: r.workflow.file, ref: r.workflow.ref },
-      inputs: { repo: event.repo, sha: event.sha, project: (bm.groups || {}).project || '' },
-    });
-  }
-  return out;
+      match: true,
+      reason: 'matched',
+      relay: {
+        name,
+        workflow: { repo: toRepo(spec, r.workflow.repo), file: r.workflow.file, ref: r.workflow.ref },
+        inputs: { repo: event.repo, sha: event.sha, project: (bm.groups || {}).project || '' },
+      },
+    };
+  });
+}
+
+// Push event -> [{ name, repo, workflow, inputs }] for every relay it matches.
+// inputs: repo (pushed repo), sha, project (branch capture, '' when none).
+function matchRelays(spec, event) {
+  return explainRelays(spec, event).filter(x => x.match).map(x => x.relay);
 }
 
 const toRepo = (spec, ref) => spec.repos[ref] || ref;
@@ -1366,6 +1383,6 @@ function eventFromTelegram(message) {
 }
 
 module.exports = {
-  loadSpecObject, matchRelays, matchAgent, route, resolveAgent, resolveAction, explain, accessAllows, branchPattern,
+  loadSpecObject, matchRelays, explainRelays, matchAgent, route, resolveAgent, resolveAction, explain, accessAllows, branchPattern,
   parseDuration, eventFromWebhook, eventFromTelegram, eventFromSystem, eventFromDispatch, normalizeDispatch, systemActors, botLogin, ALL_REPOS, JOBS,
 };

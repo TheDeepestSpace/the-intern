@@ -399,7 +399,7 @@ describe('relay: outbox push -> specage workflow_dispatch', () => {
     const res = await send(outbox());
     expect(res.status).toBe(200);
     const call = wfCall(spy);
-    expect(String(call[0].url ?? call[0])).toBe(`https://api.github.com/repos/${SPEC.repos.specage}/actions/workflows/outbox.yml/dispatches`);
+    expect(String(call[0].url ?? call[0])).toBe(`https://api.github.com/repos/${SPEC.repos.specage}/actions/workflows/fire-outbox.yml/dispatches`);
     expect(JSON.parse(call[1].body)).toEqual({ ref: 'main', inputs: { repo: DATA_REPO, sha: SHA, project: 'specage' } });
   });
 
@@ -420,5 +420,68 @@ describe('relay: outbox push -> specage workflow_dispatch', () => {
       ],
     }));
     expect(wfCall(spy)).toBeDefined();
+  });
+
+  describe('diagnostics log (data repo, never console)', () => {
+    const logFlow = ({ putStatus = 200, dispatchStatus = 204 } = {}) => {
+      const puts = [];
+      const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        const req = new Request(input, init);
+        const { pathname } = new URL(req.url);
+        if (pathname.endsWith('/access_tokens')) return new Response(JSON.stringify({ token: 'SECRET-TOKEN' }), { status: 201 });
+        if (pathname.endsWith('/installation')) return new Response(JSON.stringify({ id: 7 }), { status: 200 });
+        if (pathname.endsWith('/dispatches')) return new Response(dispatchStatus === 204 ? null : 'nope', { status: dispatchStatus });
+        if (pathname.includes('/contents/relay-logs/')) {
+          if (req.method === 'GET') return new Response('{}', { status: 404 });
+          puts.push({ pathname, body: JSON.parse(await req.text()) });
+          return new Response('{}', { status: putStatus });
+        }
+        throw new Error(`Unexpected fetch: ${req.method} ${pathname}`);
+      });
+      return { spy, puts };
+    };
+    const lines = puts => Buffer.from(puts[0].body.content, 'base64').toString().trim().split('\n').map(l => JSON.parse(l));
+    const sendLogged = (payload) => worker.fetch(githubRequest({ eventType: 'push', body: payload, headers: { 'X-GitHub-Delivery': 'del-1' } }), baseGithubEnv());
+
+    it('records a dispatched match with delivery id, repo, ref, sender, status', async () => {
+      const { puts } = logFlow();
+      const log = vi.spyOn(console, 'log');
+      const err = vi.spyOn(console, 'error');
+      await sendLogged(outbox());
+      const [rec] = lines(puts);
+      expect(puts[0].pathname).toMatch(/\/contents\/relay-logs\/\d{4}-\d{2}-\d{2}\.jsonl$/);
+      expect(rec).toMatchObject({ delivery: 'del-1', repo: DATA_REPO, ref: 'refs/heads/specages/specage/trail', sender: 'the-intern-bot[bot]', match: true, reason: 'matched', outcome: 'dispatched', status: 204 });
+      expect(JSON.stringify(rec)).not.toContain('SECRET-TOKEN');
+      expect(log).not.toHaveBeenCalled();
+      expect(err).not.toHaveBeenCalled();
+    });
+
+    it('records the skip reason for a wrong sender', async () => {
+      const { puts } = logFlow();
+      await sendLogged(outbox({ sender: { login: 'someone', type: 'User' } }));
+      expect(lines(puts)[0]).toMatchObject({ sender: 'someone', match: false, reason: 'sender_mismatch' });
+    });
+
+    it('records dispatch HTTP status and error body', async () => {
+      const { puts } = logFlow({ dispatchStatus: 403 });
+      const res = await sendLogged(outbox());
+      expect(res.status).toBe(502);
+      expect(lines(puts)[0]).toMatchObject({ outcome: 'dispatch_failed', status: 403, error: 'nope' });
+    });
+
+    it('never fails the relay when the log write fails', async () => {
+      const { spy } = logFlow({ putStatus: 500 });
+      expect((await sendLogged(outbox())).status).toBe(200);
+      expect(wfCall(spy)).toBeDefined();
+    });
+
+    it('does not log pushes that only touch relay-logs/ (no feedback loop)', async () => {
+      const { puts } = logFlow();
+      await sendLogged(outbox({
+        head_commit: { message: 'relay-logs: append', added: ['relay-logs/x.jsonl'] },
+        commits: [{ message: 'relay-logs: append', added: ['relay-logs/x.jsonl'] }],
+      }));
+      expect(puts).toHaveLength(0);
+    });
   });
 });
