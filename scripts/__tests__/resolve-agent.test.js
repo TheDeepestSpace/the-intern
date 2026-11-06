@@ -210,7 +210,7 @@ describe('commit trigger (agent_commit)', () => {
       agent: 'specage_planner', target_repo: DATA, issue_number: '', installation_id: '42', event_type: 'agent_commit',
       prompt_repo: SPECAGE, prompt_ref: '', prompt_path: 'protocol/PROTOCOL.md', actions_count: 1,
     });
-    expect(JSON.parse(outputs.access)).toEqual([{ repo: SPECAGE, scope: 'read/write' }, { repo: DATA, scope: 'read' }]);
+    expect(JSON.parse(outputs.access)).toEqual([{ repo: SPECAGE, scope: 'read/write' }, { repo: DATA, scope: 'read/write' }]);
     expect(text).toBe(`Commit abc123 was pushed to branch specages/specage/spec of ${DATA} by specage-app[bot].\nBranch captures: project=specage.\n\nCommit message:\nspec: add node`);
     expect(agent.match.values.matcher).toEqual({ project: 'specage' });
   });

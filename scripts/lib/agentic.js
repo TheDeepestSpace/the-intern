@@ -31,7 +31,7 @@ const AGENT_KEYS = ['trigger', 'access', 'prompt', 'prompt_file', 'prompt_append
   'effort', 'timeout', 'limits', 'actions', 'permissions', 'secrets', 'network', 'tools',
   'request', 'job', 'concurrency', 'settings'];
 const DEFAULT_KEYS = ['backend', 'model', 'effort', 'timeout', 'limits'];
-const TOP_KEYS = ['version', 'bot', 'defaults', 'repos', 'allowed_owners', 'prompt_repos', 'snippets', 'dispatch', 'agents'];
+const TOP_KEYS = ['version', 'bot', 'defaults', 'repos', 'allowed_owners', 'prompt_repos', 'snippets', 'dispatch', 'relays', 'agents'];
 const REPO_RE = /^[\w.-]+\/[\w.-]+$/;
 const VAR_RE = /\$([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*)/gi;
 const ONLY_VAR_RE = /^\$([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*)$/i;
@@ -773,6 +773,7 @@ function loadSpecObject(raw) {
     prompt_repos: raw.prompt_repos || [],
     snippets: raw.snippets || {},
     dispatch: raw.dispatch || {},
+    relays: raw.relays || {},
     agents: raw.agents || {},
   };
   if (typeof spec.bot !== 'string' || !/^[\w-]+$/.test(spec.bot)) errors.push('bot: must be a GitHub login');
@@ -795,6 +796,7 @@ function loadSpecObject(raw) {
   else for (const r of spec.prompt_repos) {
     if (!(r in spec.repos) && !REPO_RE.test(r)) errors.push(`prompt_repos: undefined repo alias '${r}'`);
   }
+  validateRelays(spec, errors);
   if (!isObj(spec.agents) || !Object.keys(spec.agents).length) {
     errors.push('agents: at least one agent required');
     return { spec: null, errors };
@@ -803,6 +805,63 @@ function loadSpecObject(raw) {
   for (const [name, agent] of Object.entries(spec.agents)) validateAgent(name, agent, spec, errors);
   if (!errors.length) checkAmbiguity(spec, errors);
   return { spec: errors.length ? null : spec, errors };
+}
+
+// Relays: a push to a data repo that touches given paths fires a
+// workflow_dispatch on a workflow in another repo (logic lives there; the
+// worker only relays). `author` doubles as loop avoidance, and
+// `ignore_message_prefix` skips bookkeeping pushes (e.g. marking entries fired).
+const RELAY_KEYS = ['repo', 'branch', 'paths', 'author', 'ignore_message_prefix', 'workflow'];
+function validateRelays(spec, errors) {
+  if (!isObj(spec.relays)) { errors.push('relays: must be a map'); spec.relays = {}; return; }
+  const repoOk = r => typeof r === 'string' && (r in spec.repos || REPO_RE.test(r));
+  for (const [name, r] of Object.entries(spec.relays)) {
+    const w = `relays.${name}`;
+    if (!isObj(r)) { errors.push(`${w}: must be a map`); continue; }
+    unknownKeys(r, RELAY_KEYS, w, errors);
+    if (!repoOk(r.repo)) errors.push(`${w}.repo: undefined repo alias`);
+    if (typeof r.branch !== 'string' || !r.branch) errors.push(`${w}.branch: required string`);
+    if (!Array.isArray(r.paths) || !r.paths.length || !r.paths.every(p => typeof p === 'string')) errors.push(`${w}.paths: non-empty list required`);
+    if (!r.author || !(typeof r.author === 'string' || (Array.isArray(r.author) && r.author.length))) errors.push(`${w}.author: required (also the loop-avoidance guard)`);
+    if (r.ignore_message_prefix !== undefined && typeof r.ignore_message_prefix !== 'string') errors.push(`${w}.ignore_message_prefix: must be a string`);
+    const wf = r.workflow;
+    if (!isObj(wf)) { errors.push(`${w}.workflow: { repo, file, ref } required`); continue; }
+    unknownKeys(wf, ['repo', 'file', 'ref'], `${w}.workflow`, errors);
+    if (!repoOk(wf.repo)) errors.push(`${w}.workflow.repo: undefined repo alias`);
+    else if (!(wf.repo in spec.repos) && !(spec.allowed_owners || []).includes(wf.repo.split('/')[0])) {
+      // aliases are pre-approved; a literal repo must be of an allowed owner
+      if (spec.allowed_owners.length) errors.push(`${w}.workflow.repo: owner not allowed`);
+    }
+    if (typeof wf.file !== 'string' || !/^[\w.-]+\.ya?ml$/.test(wf.file)) errors.push(`${w}.workflow.file: workflow file name like outbox.yml`);
+    if (typeof wf.ref !== 'string' || !wf.ref) errors.push(`${w}.workflow.ref: required`);
+  }
+}
+
+// Push event -> [{ name, repo, workflow, inputs }] for every relay it matches.
+// inputs: repo (pushed repo), sha, project (branch capture, '' when none).
+function matchRelays(spec, event) {
+  if (!event || event.kind !== 'commit' || event.deleted) return [];
+  const out = [];
+  for (const [name, r] of Object.entries(spec.relays || {})) {
+    if (lc(event.repo) !== lc(toRepo(spec, r.repo))) continue;
+    if (!authorList(r.author).includes(lc(event.author))) continue;
+    const bm = branchPattern(r.branch).re.exec(event.branch || '');
+    if (!bm) continue;
+    const pathHit = p => r.paths.some(g => globToRegExp(g).test(p));
+    const skip = m => Boolean(r.ignore_message_prefix) && String(m || '').startsWith(r.ignore_message_prefix);
+    // Per-commit when available: a push that also adds an unfired entry must
+    // still dispatch even if its last commit only marks entries fired.
+    const hit = Array.isArray(event.commits) && event.commits.length
+      ? event.commits.some(c => !skip(c.message) && (c.paths || []).some(pathHit))
+      : !skip(event.message) && (event.paths || []).some(pathHit);
+    if (!hit) continue;
+    out.push({
+      name,
+      workflow: { repo: toRepo(spec, r.workflow.repo), file: r.workflow.file, ref: r.workflow.ref },
+      inputs: { repo: event.repo, sha: event.sha, project: (bm.groups || {}).project || '' },
+    });
+  }
+  return out;
 }
 
 const toRepo = (spec, ref) => spec.repos[ref] || ref;
@@ -1194,6 +1253,10 @@ function eventFromWebhook(spec, eventType, payload) {
       deleted: Boolean(payload.deleted) || !sha || /^0+$/.test(sha),
       message: payload.head_commit?.message || '',
       paths: [...paths],
+      commits: (payload.commits || []).map(c => ({
+        message: c.message || '',
+        paths: ['added', 'modified', 'removed'].flatMap(k => c[k] || []),
+      })),
     };
   }
   let on;
@@ -1303,6 +1366,6 @@ function eventFromTelegram(message) {
 }
 
 module.exports = {
-  loadSpecObject, matchAgent, route, resolveAgent, resolveAction, explain, accessAllows, branchPattern,
+  loadSpecObject, matchRelays, matchAgent, route, resolveAgent, resolveAction, explain, accessAllows, branchPattern,
   parseDuration, eventFromWebhook, eventFromTelegram, eventFromSystem, eventFromDispatch, normalizeDispatch, systemActors, botLogin, ALL_REPOS, JOBS,
 };

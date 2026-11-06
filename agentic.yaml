@@ -43,6 +43,20 @@ dispatch:
       prompts:                                  # `repo:path@ref` sources; refs are always pinned (sha recorded)
         - { repo: specage, paths: ['prompts/*.md'], refs: ['main', 'v*'] }
       inline_prompt: false
+# Relays: a push to a data repo touching `paths` fires workflow_dispatch on a
+# workflow elsewhere (inputs: repo, sha, project = the branch's @project
+# capture); all per-entry logic lives in that workflow. `author` is the
+# loop-avoidance guard (the bot that writes the outbox); pushes whose commit
+# message starts with `ignore_message_prefix` (marking entries fired) are
+# skipped. The app needs actions:write on the workflow's repo.
+relays:
+  specage_outbox:
+    repo: specage_data
+    branch: specages/@project/*
+    paths: ['outbox/**']
+    author: the-intern-bot[bot]
+    ignore_message_prefix: 'outbox: fired'
+    workflow: { repo: specage, file: outbox.yml, ref: main }
 agents:
   # Default agent: any `@the-intern-bot ...` mention on an issue, PR or inline
   # review thread (verb '*'). A reply on a thread the bot itself opened counts

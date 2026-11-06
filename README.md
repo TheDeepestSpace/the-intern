@@ -145,6 +145,10 @@ receivers must re-read GitHub state. Details live in the PR and the run.
 `specage=true` and the comment-time specage data grant were removed in favour
 of this (callers pass `access` instead). Comment dispatch is unchanged.
 
+### Relays: data-repo pushes -> a workflow elsewhere
+
+Top-level `relays:` maps a push (repo, `branch` pattern with `@project` capture, `paths` globs, trusted `author`) to a `workflow_dispatch` on a workflow in another repo, with inputs `repo`, `sha`, `project`. The worker only relays (deduped per relay+repo+sha); all per-entry logic lives in that workflow. Loop avoidance: `author` plus `ignore_message_prefix` for pushes that only mark entries fired. The app needs `actions: write` on the workflow's repo.
+
 ### Deploying a change
 
 1. Edit `agentic.yaml`, get the CODEOWNERS review, merge.
