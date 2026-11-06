@@ -94,7 +94,34 @@ function buildTable(models) {
   return [header, ...rows].join('\n');
 }
 
-function buildSection(models, timestamp) {
+// Codex model IDs usable via `model=` on backend=codex triggers (see
+// build-model-flag.js's buildCodexModelFlag), hand-maintained rather than
+// fetched live like the Claude table above. Investigated for issue #218:
+// dispatcher.yml's codex auth is a personal-account OAuth login
+// (CODEX_AUTH_JSON / ~/.codex/auth.json restored by rotate-codex-auth.js) —
+// there is no OPENAI_API_KEY secret, so the OpenAI platform's `GET
+// /v1/models` (which expects an API key, not an OAuth/ChatGPT-account
+// token) isn't reachable from this job. The bundled `codex` CLI (checked at
+// the Dockerfile's pinned v0.146.0) also has no `codex models` or
+// equivalent listing subcommand — `codex --help`, `codex exec --help`,
+// `codex doctor --help`, and `codex features list` were all checked and
+// none expose a model catalog over that auth. Short of scraping an
+// undocumented ChatGPT-backend endpoint (too fragile to build a nightly job
+// on), a live listing isn't feasible today — update this array by hand
+// instead when codex-usable models change, and keep the first entry in
+// sync with dispatcher.yml's hardcoded default (currently `gpt-5.6-sol`).
+const CODEX_MODELS = [
+  { id: 'gpt-5.6-sol', display_name: 'GPT-5.6 Sol (default)' },
+  { id: 'gpt-5.6-astra', display_name: 'GPT-5.6 Astra' },
+];
+
+function buildCodexTable(models) {
+  const header = '| Model | ID (use with `model=`) |\n|---|---|';
+  const rows = models.map((m) => `| ${m.display_name || m.id} | \`${m.id}\` |`);
+  return [header, ...rows].join('\n');
+}
+
+function buildSection(models, timestamp, codexModels = CODEX_MODELS) {
   return [
     SECTION_START,
     `<!-- Last updated: ${timestamp} -->`,
@@ -102,6 +129,14 @@ function buildSection(models, timestamp) {
     '## Current Claude Models',
     '',
     buildTable(models),
+    '',
+    '## Codex Models',
+    '',
+    '_Hand-maintained, not fetched live — see the comment above `CODEX_MODELS` in',
+    '`scripts/update-model-list.js` for why (codex auth here is OAuth-only, no',
+    '`OPENAI_API_KEY`, and the `codex` CLI exposes no model-listing subcommand)._',
+    '',
+    buildCodexTable(codexModels),
     '',
     SECTION_END,
   ].join('\n');
@@ -309,6 +344,8 @@ if (require.main === module) {
 module.exports = {
   formatTokenCount,
   buildTable,
+  CODEX_MODELS,
+  buildCodexTable,
   buildSection,
   upsertReadme,
   fetchModels,
