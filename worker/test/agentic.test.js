@@ -16,6 +16,9 @@ afterEach(() => {
 // agentic.yaml (the data repo alias + the `specage` project alias).
 const SHA = 'abc1234def5678abc1234def5678abc1234def56';
 const DATA_REPO = SPEC.repos.specage_data;
+// Relay diagnostics (best-effort writes to the-intern-data) may fetch; assert
+// only that no dispatch happened.
+const expectNoAgentWork = spy => expect(spy.mock.calls.some(([i]) => /\/dispatches$/.test(new URL(i.url ?? i).pathname))).toBe(false);
 
 function push(overrides = {}) {
   return {
@@ -72,7 +75,7 @@ describe('commit trigger: specage spec push -> specage_planner', () => {
       installation_id: '42',
     });
     // The data repo's own config is no longer read by the worker.
-    expect(spy.mock.calls.some(([i]) => new URL(i.url ?? i).pathname.includes('/contents/'))).toBe(false);
+    expect(spy.mock.calls.some(([i]) => { const u = new URL(i.url ?? i).pathname; return u.includes('/contents/') && !u.includes('/contents/relay-logs/'); })).toBe(false);
   });
 
   it('dedupes the same commit', async () => {
@@ -90,14 +93,14 @@ describe('commit trigger: specage spec push -> specage_planner', () => {
     const spy = vi.spyOn(globalThis, 'fetch');
     const res = await send(push({ sender }));
     expect(await res.text()).toBe('ignored: no agent trigger matches this push');
-    expect(spy).not.toHaveBeenCalled();
+    expectNoAgentWork(spy);
   });
 
   it('ignores a data repo that is not the declared alias', async () => {
     const spy = vi.spyOn(globalThis, 'fetch');
     const res = await send(push({ repository: { full_name: 'evil/specage-data', default_branch: 'main' } }));
     expect(await res.text()).toBe('ignored: no agent trigger matches this push');
-    expect(spy).not.toHaveBeenCalled();
+    expectNoAgentWork(spy);
   });
 
   it('denies a project capture that is not a declared repo alias (default-deny)', async () => {
@@ -105,14 +108,14 @@ describe('commit trigger: specage spec push -> specage_planner', () => {
     const res = await send(push({ ref: 'refs/heads/specages/unknown/spec' }));
     expect(res.status).toBe(200);
     expect(await res.text()).toMatch(/^ignored: access: /);
-    expect(spy).not.toHaveBeenCalled();
+    expectNoAgentWork(spy);
   });
 
   it('does not treat the trail branch as a trigger', async () => {
     const spy = vi.spyOn(globalThis, 'fetch');
     const res = await send(push({ ref: 'refs/heads/specages/specage/trail' }));
     expect(await res.text()).toBe('ignored: no agent trigger matches this push');
-    expect(spy).not.toHaveBeenCalled();
+    expectNoAgentWork(spy);
   });
 
   it('ignores branch deletion', async () => {
@@ -157,7 +160,7 @@ describe('commit trigger: review-branch push -> specage_reviewer', () => {
   ])('ignores review pushes from %s', async (_n, sender) => {
     const spy = vi.spyOn(globalThis, 'fetch');
     expect(await (await send(reviewPush({ sender }))).text()).toBe('ignored: no agent trigger matches this push');
-    expect(spy).not.toHaveBeenCalled();
+    expectNoAgentWork(spy);
   });
 
   it('enforces the agent max_runs_per_hour limit', async () => {
@@ -210,7 +213,7 @@ describe('comment trigger: @the-intern-bot mention -> default', () => {
     const spy = vi.spyOn(globalThis, 'fetch');
     const res = await sendComment(comment({ repository: { full_name: 'evil/repo' } }));
     expect(await res.text()).toMatch(/^ignored: access: owner of 'evil\/repo' is not allowlisted/);
-    expect(spy).not.toHaveBeenCalled();
+    expectNoAgentWork(spy);
   });
 });
 
@@ -237,7 +240,7 @@ describe('fail closed', () => {
     const res = await send(push(), baseGithubEnv({ AGENTIC_SPEC: broken }));
     expect(res.status).toBe(500);
     expect(await res.text()).toMatch(/agentic spec unavailable/);
-    expect(spy).not.toHaveBeenCalled();
+    expectNoAgentWork(spy);
   });
 
   it('answers 500 and dispatches nothing when the spec is invalid (comment)', async () => {
@@ -250,7 +253,7 @@ describe('fail closed', () => {
       baseGithubEnv({ AGENTIC_SPEC: broken })
     );
     expect(res.status).toBe(500);
-    expect(spy).not.toHaveBeenCalled();
+    expectNoAgentWork(spy);
   });
 
   it('answers 500 and dispatches nothing when the spec is invalid (telegram)', async () => {
@@ -260,7 +263,7 @@ describe('fail closed', () => {
       baseTelegramEnv({ AGENTIC_SPEC: broken })
     );
     expect(res.status).toBe(500);
-    expect(spy).not.toHaveBeenCalled();
+    expectNoAgentWork(spy);
   });
 });
 
@@ -399,7 +402,7 @@ describe('relay: outbox push -> specage workflow_dispatch', () => {
     const res = await send(outbox());
     expect(res.status).toBe(200);
     const call = wfCall(spy);
-    expect(String(call[0].url ?? call[0])).toBe(`https://api.github.com/repos/${SPEC.repos.specage}/actions/workflows/outbox.yml/dispatches`);
+    expect(String(call[0].url ?? call[0])).toBe(`https://api.github.com/repos/${SPEC.repos.specage}/actions/workflows/fire-outbox.yml/dispatches`);
     expect(JSON.parse(call[1].body)).toEqual({ ref: 'main', inputs: { repo: DATA_REPO, sha: SHA, project: 'specage' } });
   });
 
@@ -420,5 +423,76 @@ describe('relay: outbox push -> specage workflow_dispatch', () => {
       ],
     }));
     expect(wfCall(spy)).toBeDefined();
+  });
+
+  describe('diagnostics log (data repo, never console)', () => {
+    const logFlow = ({ putStatus = 200, dispatchStatus = 204 } = {}) => {
+      const puts = [];
+      const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        const req = new Request(input, init);
+        const { pathname } = new URL(req.url);
+        if (pathname.endsWith('/access_tokens')) return new Response(JSON.stringify({ token: 'SECRET-TOKEN' }), { status: 201 });
+        if (pathname.endsWith('/installation')) return new Response(JSON.stringify({ id: 7 }), { status: 200 });
+        if (pathname.endsWith('/dispatches')) return new Response(dispatchStatus === 204 ? null : 'nope', { status: dispatchStatus });
+        if (pathname.includes('/contents/relay-logs/')) {
+          if (req.method === 'GET') return new Response('{}', { status: 404 });
+          puts.push({ pathname, body: JSON.parse(await req.text()) });
+          return new Response('{}', { status: putStatus });
+        }
+        throw new Error(`Unexpected fetch: ${req.method} ${pathname}`);
+      });
+      return { spy, puts };
+    };
+    const lines = puts => Buffer.from(puts[0].body.content, 'base64').toString().trim().split('\n').map(l => JSON.parse(l));
+    const sendLogged = (payload) => worker.fetch(githubRequest({ eventType: 'push', body: payload, headers: { 'X-GitHub-Delivery': 'del-1' } }), baseGithubEnv());
+
+    it('records a dispatched match with delivery id, repo, ref, sender, status', async () => {
+      const { puts } = logFlow();
+      const log = vi.spyOn(console, 'log');
+      const err = vi.spyOn(console, 'error');
+      await sendLogged(outbox());
+      const [rec] = lines(puts);
+      expect(puts[0].pathname).toMatch(/\/contents\/relay-logs\/\d{4}-\d{2}-\d{2}\.jsonl$/);
+      expect(rec).toMatchObject({ delivery: 'del-1', repo: DATA_REPO, ref: 'refs/heads/specages/specage/trail', sender: 'the-intern-bot[bot]', match: true, reason: 'matched', outcome: 'dispatched', status: 204 });
+      expect(JSON.stringify(rec)).not.toContain('SECRET-TOKEN');
+      expect(log).not.toHaveBeenCalled();
+      expect(err).not.toHaveBeenCalled();
+    });
+
+    it('writes to the-intern-data, not the pushed repo, and records other skip reasons', async () => {
+      const { puts, spy } = logFlow();
+      await sendLogged({ ...outbox(), repository: { full_name: 'Other/repo', default_branch: 'main' } });
+      expect(puts[0].pathname).toContain('/repos/TheDeepestSpace/the-intern-data/contents/relay-logs/');
+      expect(spy.mock.calls.some(c => String(c[0]).includes('Other/repo/contents'))).toBe(false);
+      expect(lines(puts)[0]).toMatchObject({ repo: 'Other/repo', match: false, reason: 'repo_mismatch' });
+    });
+
+    it('records the skip reason for a wrong sender', async () => {
+      const { puts } = logFlow();
+      await sendLogged(outbox({ sender: { login: 'someone', type: 'User' } }));
+      expect(lines(puts)[0]).toMatchObject({ sender: 'someone', match: false, reason: 'sender_mismatch' });
+    });
+
+    it('records dispatch HTTP status and error body', async () => {
+      const { puts } = logFlow({ dispatchStatus: 403 });
+      const res = await sendLogged(outbox());
+      expect(res.status).toBe(502);
+      expect(lines(puts)[0]).toMatchObject({ outcome: 'dispatch_failed', status: 403, error: 'nope' });
+    });
+
+    it('never fails the relay when the log write fails', async () => {
+      const { spy } = logFlow({ putStatus: 500 });
+      expect((await sendLogged(outbox())).status).toBe(200);
+      expect(wfCall(spy)).toBeDefined();
+    });
+
+    it('does not log pushes that only touch relay-logs/ (no feedback loop)', async () => {
+      const { puts } = logFlow();
+      await sendLogged(outbox({
+        head_commit: { message: 'relay-logs: append', added: ['relay-logs/x.jsonl'] },
+        commits: [{ message: 'relay-logs: append', added: ['relay-logs/x.jsonl'] }],
+      }));
+      expect(puts).toHaveLength(0);
+    });
   });
 });

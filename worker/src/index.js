@@ -9,6 +9,7 @@ import {
   resolveAgent,
   eventFromWebhook,
   matchRelays,
+  explainRelays,
   eventFromTelegram,
   eventFromSystem,
   systemActors,
@@ -142,7 +143,7 @@ async function handleGitHub(request, env) {
 
   // Likewise, a push has no comment author.
   if (eventType === 'push') {
-    return handlePush(payload, env);
+    return handlePush(payload, env, request.headers.get('X-GitHub-Delivery') || '');
   }
 
   // Likewise, a review by a reviewer some `review` trigger names (CodeRabbit)
@@ -423,7 +424,7 @@ async function handleCheckSuite(payload, env) {
 // per push (unlike handleCheckSuite's push+pull_request double check-suite),
 // and a PR that's still dirty on the next push just re-dispatches, which is
 // the intended retry-until-fixed behavior.
-async function handlePush(payload, env) {
+async function handlePush(payload, env, deliveryId = '') {
   // agentic.yaml commit triggers (e.g. the specage spec/review branches) come
   // first; a push that matches one never reaches the default-branch logic.
   const defaultBranch = payload.repository?.default_branch;
@@ -433,9 +434,12 @@ async function handlePush(payload, env) {
   const commitEvent = eventFromWebhook(getSpecOrNull(env), 'push', payload);
   if (commitEvent) {
     const relays = matchRelays(getSpecOrNull(env), commitEvent);
+    const relayLog = [];
+    const relayReport = explainRelays(getSpecOrNull(env), commitEvent);
     // Relays are side-effect dispatches; they don't suppress an independently
     // matching commit trigger on the same push.
-    const relayRes = relays.length ? await handleRelays(commitEvent, relays, payload, env) : null;
+    const relayRes = relays.length ? await handleRelays(commitEvent, relays, payload, env, relayLog) : null;
+    await logRelayDecisions(env, commitEvent, payload, deliveryId, relayReport, relayLog);
     const routed = routeEvent(env, commitEvent, 'push');
     if (routed.hit) {
       const res = await handleCommitTrigger(commitEvent, routed, payload, env);
@@ -603,14 +607,17 @@ async function handleCommitTrigger(event, { hit, resolved }, payload, env) {
 // agentic.yaml `relays`: fires workflow_dispatch on a workflow in another repo
 // (inputs: repo, sha, project). Pure relay; per-entry logic and idempotence
 // live in that workflow. Deduped per (relay, repo, branch, sha) in KV.
-async function handleRelays(event, relays, payload, env) {
+async function handleRelays(event, relays, payload, env, log = []) {
   try {
     for (const relay of relays) {
       const dedupKey = `relay:${relay.name}:${event.repo.toLowerCase()}:${event.branch}@${event.sha}`;
-      if (await env.CI_FAILURE_DEDUP.get(dedupKey)) continue;
+      if (await env.CI_FAILURE_DEDUP.get(dedupKey)) { log.push({ relay: relay.name, outcome: 'deduped' }); continue; }
       const appJwt = mintAppJwt(env.APP_ID, normalizeKey(getPrivateKey(env)));
       const install = await getInstallationIdForRepo(appJwt, relay.workflow.repo);
-      if (!install) return new Response(`app not installed on ${relay.workflow.repo}`, { status: 502 });
+      if (!install) {
+        log.push({ relay: relay.name, outcome: 'no_install', workflow_repo: relay.workflow.repo });
+        return new Response(`app not installed on ${relay.workflow.repo}`, { status: 502 });
+      }
       const token = await getInstallationToken(env, install);
       const res = await fetch(
         `https://api.github.com/repos/${relay.workflow.repo}/actions/workflows/${relay.workflow.file}/dispatches`,
@@ -625,12 +632,87 @@ async function handleRelays(event, relays, payload, env) {
           body: JSON.stringify({ ref: relay.workflow.ref, inputs: relay.inputs }),
         }
       );
-      if (!res.ok) return new Response(`relay dispatch failed: ${await res.text()}`, { status: 502 });
+      if (!res.ok) {
+        const errBody = await res.text();
+        log.push({ relay: relay.name, outcome: 'dispatch_failed', status: res.status, error: errBody.slice(0, 500) });
+        return new Response(`relay dispatch failed: ${errBody}`, { status: 502 });
+      }
+      log.push({ relay: relay.name, outcome: 'dispatched', status: res.status });
       await env.CI_FAILURE_DEDUP.put(dedupKey, '1', { expirationTtl: 60 * 60 * 24 * 14 });
     }
     return new Response('ok', { status: 200 });
   } catch (err) {
+    log.push({ outcome: 'error', error: String(err.message).slice(0, 500) });
     return new Response(`internal error: ${err.message}`, { status: 500 });
+  }
+}
+
+// Relay diagnostics go to the (private) data repo as JSONL under
+// relay-logs/YYYY-MM-DD.jsonl — never to console/Actions logs, which are
+// public. Best-effort: any failure here is swallowed and never affects the
+// relay. Records hold match facts only (no tokens, no payload bodies).
+async function logRelayDecisions(env, event, payload, deliveryId, report, log) {
+  try {
+    if (!report.length) return;
+    // Every per-relay decision (match or skip reason) for commit pushes.
+    const rows = report.filter(r => r.reason !== 'not_commit' && r.reason !== 'deleted');
+    if (!rows.length) return;
+    // A log write is itself a push to the data repo; don't log those or the
+    // writes would feed back into themselves.
+    if (event.paths.length && event.paths.every(p => p.startsWith('relay-logs/'))) return;
+    const ts = new Date().toISOString();
+    const records = rows.map(r => {
+      const rec = {
+        ts,
+        delivery: deliveryId,
+        repo: event.repo,
+        ref: payload.ref || '',
+        sha: event.sha,
+        sender: event.author,
+        relay: r.name,
+        match: r.match,
+        reason: r.reason,
+      };
+      if (r.expected !== undefined) rec.expected = r.expected;
+      if (r.name && log.length) Object.assign(rec, ...log.filter(l => l.relay === r.name || !l.relay).map(({ relay, ...rest }) => rest));
+      return JSON.stringify(rec);
+    });
+    const appJwt = mintAppJwt(env.APP_ID, normalizeKey(getPrivateKey(env)));
+    // Always the private data repo (never the pushed repo); each record keeps
+    // the source repo in `repo`.
+    const dataRepo = `${env.AGENT_INFRA_OWNER || 'TheDeepestSpace'}/${env.DATA_REPO_NAME || 'the-intern-data'}`;
+    const install = await getInstallationIdForRepo(appJwt, dataRepo);
+    if (!install) return;
+    const token = await getInstallationToken(env, install);
+    const path = `relay-logs/${ts.slice(0, 10)}.jsonl`;
+    const url = `https://api.github.com/repos/${dataRepo}/contents/${path}`;
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'the-intern-bot-relay',
+      'Content-Type': 'application/json',
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let sha;
+      let prior = '';
+      const cur = await fetch(url, { headers });
+      if (cur.ok) {
+        const j = await cur.json();
+        sha = j.sha;
+        prior = Buffer.from(j.content || '', 'base64').toString('utf8');
+      } else if (cur.status !== 404) {
+        return;
+      }
+      const content = Buffer.from(prior + records.join('\n') + '\n').toString('base64');
+      const put = await fetch(url, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ message: 'relay-logs: append', content, ...(sha ? { sha } : {}) }),
+      });
+      if (put.ok || (put.status !== 409 && put.status !== 422)) return;
+    }
+  } catch {
+    // best-effort by design
   }
 }
 
