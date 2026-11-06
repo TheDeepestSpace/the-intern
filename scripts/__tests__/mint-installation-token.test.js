@@ -276,6 +276,27 @@ describe('mint-installation-token', () => {
       expect(token).toBe('ghs_mintretriedtoken');
     });
 
+    it('retries token minting on a transient 500 failure and succeeds', async () => {
+      const client = agent.get('https://api.github.com');
+      client
+        .intercept({ method: 'POST', path: '/app/installations/999/access_tokens' })
+        .reply(500, 'Internal Server Error')
+        .times(2);
+      client
+        .intercept({ method: 'POST', path: '/app/installations/999/access_tokens' })
+        .reply(201, { token: 'ghs_retriedtoken' });
+
+      const token = await getInstallationToken({
+        appId: '123',
+        privateKey: TEST_PRIVATE_KEY_PEM,
+        installationId: '999',
+        retries: 3,
+        retryDelayMs: 0,
+      });
+
+      expect(token).toBe('ghs_retriedtoken');
+    });
+
     it('scopes the access-token request body to the target repo and requested permissions', async () => {
       const client = agent.get('https://api.github.com');
       client
