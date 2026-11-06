@@ -654,8 +654,8 @@ async function handleRelays(event, relays, payload, env, log = []) {
 async function logRelayDecisions(env, event, payload, deliveryId, report, log) {
   try {
     if (!report.length) return;
-    // Only pushes that would have fired but for the sender, or that did.
-    const rows = report.filter(r => r.reason === 'matched' || r.reason === 'sender_mismatch');
+    // Every per-relay decision (match or skip reason) for commit pushes.
+    const rows = report.filter(r => r.reason !== 'not_commit' && r.reason !== 'deleted');
     if (!rows.length) return;
     // A log write is itself a push to the data repo; don't log those or the
     // writes would feed back into themselves.
@@ -678,11 +678,14 @@ async function logRelayDecisions(env, event, payload, deliveryId, report, log) {
       return JSON.stringify(rec);
     });
     const appJwt = mintAppJwt(env.APP_ID, normalizeKey(getPrivateKey(env)));
-    const install = await getInstallationIdForRepo(appJwt, event.repo);
+    // Always the private data repo (never the pushed repo); each record keeps
+    // the source repo in `repo`.
+    const dataRepo = `${env.AGENT_INFRA_OWNER || 'TheDeepestSpace'}/${env.DATA_REPO_NAME || 'the-intern-data'}`;
+    const install = await getInstallationIdForRepo(appJwt, dataRepo);
     if (!install) return;
     const token = await getInstallationToken(env, install);
     const path = `relay-logs/${ts.slice(0, 10)}.jsonl`;
-    const url = `https://api.github.com/repos/${event.repo}/contents/${path}`;
+    const url = `https://api.github.com/repos/${dataRepo}/contents/${path}`;
     const headers = {
       Authorization: `Bearer ${token}`,
       Accept: 'application/vnd.github+json',
