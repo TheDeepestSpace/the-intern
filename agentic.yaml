@@ -56,7 +56,7 @@ relays:
     paths: ['outbox/**']
     author: the-intern-bot[bot]
     ignore_message_prefix: 'outbox: fired'
-    workflow: { repo: specage, file: outbox.yml, ref: main }
+    workflow: { repo: specage, file: fire-outbox.yml, ref: main }
 agents:
   # Default agent: any `@the-intern-bot ...` mention on an issue, PR or inline
   # review thread (verb '*'). A reply on a thread the bot itself opened counts
