@@ -47,6 +47,14 @@ describe('detectUsageLimit', () => {
     expect(result.retryAfter).toBe('2026-08-10T09:00:00.000Z');
   });
 
+  it('matches Codex\'s literal usage-limit message (run 34002720228)', () => {
+    const message =
+      "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 2:00 AM.";
+    const result = detectUsageLimit(message);
+    expect(result).not.toBeNull();
+    expect(result.matchedText.toLowerCase()).toBe("you've hit your usage limit");
+  });
+
   it('does not match a plain rate_limit_error (already retried by the SDK)', () => {
     expect(detectUsageLimit('API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}')).toBeNull();
   });
@@ -88,6 +96,17 @@ describe('detectUsageLimit', () => {
     // calendar date directly is timezone-dependent (breaks at local offsets
     // where 15:00 has already passed for this `now`).
     expect(ms - now).toBeLessThan(24 * 60 * 60 * 1000);
+  });
+
+  it('parses Codex\'s "try again at 2:00 AM" clock-time reset (run 34002720228)', () => {
+    const message =
+      "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 2:00 AM.";
+    const now = new Date('2026-08-03T20:30:00Z').getTime();
+    const ms = parseRetryAfterMs(message, now);
+    const resolved = new Date(ms);
+    expect(resolved.getHours()).toBe(2);
+    expect(resolved.getMinutes()).toBe(0);
+    expect(ms).toBeGreaterThan(now);
   });
 
   it('parses explicit retry-after seconds', () => {
