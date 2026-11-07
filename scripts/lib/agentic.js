@@ -752,7 +752,7 @@ function checkAmbiguity(spec, errors) {
     const kind = Object.keys(agent.trigger)[0];
     const def = agent.trigger[kind] || {};
     let key = null;
-    if (kind === 'comment') key = `comment:${(def.verb || name).toLowerCase()}:${(def.on || COMMENT_ON).slice().sort()}`;
+    if (kind === 'comment') key = `comment:${(def.verb || name).toLowerCase()}:${(def.on || COMMENT_ON).slice().sort()}:${def.head_branch ?? ''}`;
     else if (kind === 'commit') key = `commit:${spec.repos[def.repo] || def.repo}:${def.branch}`.toLowerCase();
     else if (kind === 'schedule') key = `schedule:${def.cron}`;
     else if (SYSTEM_FIELDS[kind]) key = `${kind}:${lc(spec.repos[def.repo] || def.repo || '*')}`;
@@ -1389,11 +1389,15 @@ function eventFromSystem(type, raw) {
 // The agent (if any) whose comment trigger routes by PR head branch for this
 // event, with its attempt cap — lets the worker know it must fetch the head
 // ref and count attempts. Routing stays authoritative.
+function headBranchMatches(glob, ref) {
+  return globToRegExp(glob).test(ref);
+}
+
 function headBranchRoutes(spec) {
   const out = [];
   for (const [name, agent] of Object.entries(spec.agents || {})) {
     const t = agent?.trigger?.comment;
-    if (t && t.head_branch !== undefined) out.push({ name, max_attempts: t.max_attempts || DEFAULT_MAX_ATTEMPTS });
+    if (t && t.head_branch !== undefined) out.push({ name, glob: t.head_branch, max_attempts: t.max_attempts || DEFAULT_MAX_ATTEMPTS });
   }
   return out;
 }
@@ -1422,5 +1426,5 @@ function eventFromTelegram(message) {
 
 module.exports = {
   loadSpecObject, matchRelays, explainRelays, matchAgent, route, resolveAgent, resolveAction, explain, accessAllows, branchPattern,
-  parseDuration, eventFromWebhook, eventFromTelegram, eventFromSystem, eventFromDispatch, normalizeDispatch, systemActors, headBranchRoutes, botLogin, ALL_REPOS, JOBS,
+  parseDuration, eventFromWebhook, eventFromTelegram, eventFromSystem, eventFromDispatch, normalizeDispatch, systemActors, headBranchRoutes, headBranchMatches, botLogin, ALL_REPOS, JOBS,
 };

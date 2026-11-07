@@ -14,6 +14,7 @@ import {
   eventFromSystem,
   systemActors,
   headBranchRoutes,
+  headBranchMatches,
   parseDuration,
 } from './agentic.generated.js';
 
@@ -195,7 +196,9 @@ async function handleGitHub(request, env) {
   const headRoutes = headBranchRoutes(getSpecOrNull(env));
   // A bodyless `changes_requested` review is the explicit signal a head-branch
   // route listens for, so it is not an "inline-only" review to skip.
-  const changesRequested = headRoutes.length > 0 && payload.review?.state === 'changes_requested';
+  const reviewHeadRef = payload.pull_request?.head?.ref || '';
+  const changesRequested = payload.review?.state === 'changes_requested' &&
+    headRoutes.some(r => reviewHeadRef && headBranchMatches(r.glob, reviewHeadRef));
   if (eventType === 'pull_request_review' && !changesRequested && (typeof reviewBody !== 'string' || reviewBody.trim() === '')) {
     return new Response('ignored: review has no top-level body (inline-only review)', { status: 200 });
   }
