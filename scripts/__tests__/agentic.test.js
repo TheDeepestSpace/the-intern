@@ -203,7 +203,7 @@ describe('trigger matching and resolution', () => {
   it('parses comment verb and declared params; default otherwise', () => {
     const ev = body => ({ kind: 'comment', repo: 'TheDeepestSpace/the-intern', author: 'u', on: 'issue', issue_number: 7, body });
     const r = explain(spec, ev('@the-intern-bot backend=codex model=gpt-x fix it'));
-    expect(r).toMatchObject({ matched: true, agent: 'default', backend: 'codex', model: 'gpt-x', effort: 'default', timeout_seconds: 3600 });
+    expect(r).toMatchObject({ matched: true, agent: 'default', backend: 'codex', model: 'gpt-x', effort: 'default', timeout_seconds: 21600 });
     expect(r.access).toEqual([{ repo: 'TheDeepestSpace/the-intern', scope: 'read/write' }]);
     expect(r.prompt).toMatch(/^You are @the-intern-bot working on repository TheDeepestSpace\/the-intern, issue\/PR #7\.\nYou have access to the GitHub CLI/);
     expect(explain(spec, ev('@the-intern-bot')).backend).toBe('claude');
@@ -286,7 +286,7 @@ describe('cutover behaviours (issue #273)', () => {
 
   it('takes backend/model/effort from anywhere in a telegram message and strips them', () => {
     const r = explain(spec, { kind: 'telegram', chat_id: 1, message_id: 2, body: 'please model=opus do it effort=high' });
-    expect(r).toMatchObject({ backend: 'claude', model: 'opus', effort: 'high', timeout_seconds: 2700, text: 'please do it' });
+    expect(r).toMatchObject({ backend: 'claude', model: 'opus', effort: 'high', timeout_seconds: 21600, text: 'please do it' });
   });
 
   it('resolves prompt files and validates prompt_file.ref vars', () => {
