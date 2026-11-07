@@ -13,6 +13,8 @@ import {
   eventFromTelegram,
   eventFromSystem,
   systemActors,
+  headBranchRoutes,
+  headBranchMatches,
   parseDuration,
 } from './agentic.generated.js';
 
@@ -191,7 +193,13 @@ async function handleGitHub(request, env) {
   // that has both a mentioning body and a mentioning inline comment — that
   // still double-fires — but avoids adding a KV dependency for the common case.
   const reviewBody = payload.review?.body;
-  if (eventType === 'pull_request_review' && (typeof reviewBody !== 'string' || reviewBody.trim() === '')) {
+  const headRoutes = headBranchRoutes(getSpecOrNull(env));
+  // A bodyless `changes_requested` review is the explicit signal a head-branch
+  // route listens for, so it is not an "inline-only" review to skip.
+  const reviewHeadRef = payload.pull_request?.head?.ref || '';
+  const changesRequested = payload.review?.state === 'changes_requested' &&
+    headRoutes.some(r => reviewHeadRef && headBranchMatches(r.glob, reviewHeadRef));
+  if (eventType === 'pull_request_review' && !changesRequested && (typeof reviewBody !== 'string' || reviewBody.trim() === '')) {
     return new Response('ignored: review has no top-level body (inline-only review)', { status: 200 });
   }
   if (eventType === 'pull_request_review_comment' && !payload.comment?.pull_request_review_id) {
@@ -204,24 +212,43 @@ async function handleGitHub(request, env) {
   // wrote it, or every status update would re-trigger a dispatch (see
   // eventFromWebhook). The agent is re-resolved by dispatcher.yml from the
   // same payload and file, so only the name is forwarded here.
-  const routed = routeEvent(env, eventFromWebhook(getSpecOrNull(env), eventType, payload), 'comment');
-  if (routed.response) return routed.response;
-  const { hit, resolved } = routed;
-
   const installationId = payload.installation?.id;
   if (!installationId) {
     return new Response('missing installation id', { status: 400 });
   }
 
   try {
+    // issue_comment payloads don't carry the PR's head branch; a head-branch
+    // route needs it, so fetch it (only for PR comments, only when such a
+    // route exists). A failed lookup leaves it empty: head routes then don't
+    // match and the event falls back to default routing.
+    let headRef = '';
+    let token;
+    if (headRoutes.length > 0 && eventType === 'issue_comment' && payload.issue?.pull_request) {
+      token = await getInstallationToken(env, installationId);
+      headRef = await fetchPrHeadRef(payload.repository?.full_name, payload.issue.number, token);
+    }
+
+    const routed = routeEvent(env, eventFromWebhook(getSpecOrNull(env), eventType, payload, { head_ref: headRef }), 'comment');
+    if (routed.response) return routed.response;
+    const { hit, resolved } = routed;
+
+    // Attempt cap for head-branch routes: bot comments/reviews keep
+    // re-triggering, so cap dispatches per (agent, PR) regardless of author.
+    const headRoute = headRoutes.find(r => r.name === hit.name);
+    const attempts = headRoute ? await attemptState(env, hit.name, payload, headRoute.max_attempts) : null;
+    if (attempts?.exceeded) {
+      return new Response(`ignored: attempt cap (${attempts.max}) for agent ${hit.name} on this PR reached`, { status: 200 });
+    }
+
     const limit = await rateLimitKey(env, resolved);
     if (limit.exceeded) {
       return new Response(`ignored: rate limit for agent ${hit.name} reached`, { status: 200 });
     }
 
-    const token = await getInstallationToken(env, installationId);
+    token = token || await getInstallationToken(env, installationId);
 
-    const dispatchRes = await dispatchRepoEvent(env, token, eventType, payload, { agent: hit.name });
+    const dispatchRes = await dispatchRepoEvent(env, token, eventType, payload, { agent: hit.name, ...(headRef ? { head_ref: headRef } : {}) });
 
     if (!dispatchRes.ok) {
       const errorText = await dispatchRes.text();
@@ -229,10 +256,39 @@ async function handleGitHub(request, env) {
     }
 
     await countRun(env, limit);
+    if (attempts) await countAttempt(env, attempts);
     return new Response('ok', { status: 200 });
   } catch (err) {
     return new Response(`internal error: ${err.message}`, { status: 500 });
   }
+}
+
+async function fetchPrHeadRef(fullName, number, token) {
+  if (!fullName || !number) return '';
+  try {
+    const res = await fetch(`https://api.github.com/repos/${fullName}/pulls/${number}`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'the-intern-bot-relay' },
+    });
+    if (!res.ok) return '';
+    return (await res.json()).head?.ref || '';
+  } catch {
+    return '';
+  }
+}
+
+// Dispatches per (head-branch agent, PR), counted in KV after a successful
+// dispatch; skipped when no KV binding is configured (tests).
+async function attemptState(env, agent, payload, max) {
+  if (!env.CI_FAILURE_DEDUP) return { key: null, exceeded: false, max };
+  const number = payload.issue?.number ?? payload.pull_request?.number;
+  const key = `attempts:${agent}:${payload.repository?.full_name}#${number}`.toLowerCase();
+  const count = Number(await env.CI_FAILURE_DEDUP.get(key)) || 0;
+  return { key, exceeded: count >= max, count, max };
+}
+
+async function countAttempt(env, state) {
+  if (!state.key) return;
+  await env.CI_FAILURE_DEDUP.put(state.key, String(state.count + 1), { expirationTtl: 14 * 86400 });
 }
 
 // eventFromWebhook needs the bot login from the spec; a broken spec is

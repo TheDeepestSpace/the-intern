@@ -36,6 +36,8 @@ const REPO_RE = /^[\w.-]+\/[\w.-]+$/;
 const VAR_RE = /\$([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*)/gi;
 const ONLY_VAR_RE = /^\$([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*)$/i;
 // Backend keyword accepted right after a catch-all mention (`@bot codex ...`).
+// Default cap on dispatches per PR for a head-branch route.
+const DEFAULT_MAX_ATTEMPTS = 5;
 const BACKEND_KEYWORDS = ['claude', 'codex', 'agy'];
 
 const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -238,8 +240,14 @@ function validateTrigger(name, trigger, spec, errors) {
   };
   switch (kind) {
     case 'comment':
-      unknownKeys(def, ['verb', 'allowed_authors', 'on', 'params', 'repo'], w, errors);
+      unknownKeys(def, ['verb', 'allowed_authors', 'on', 'params', 'repo', 'head_branch', 'max_attempts'], w, errors);
       strList('allowed_authors');
+      if (def.head_branch !== undefined && (typeof def.head_branch !== 'string' || !def.head_branch.trim())) {
+        errors.push(`${w}.head_branch: must be a non-empty glob string (PR head branch)`);
+      }
+      if (def.max_attempts !== undefined && (def.head_branch === undefined || !Number.isInteger(def.max_attempts) || def.max_attempts < 1)) {
+        errors.push(`${w}.max_attempts: positive integer, only with head_branch`);
+      }
       repoRef('repo');
       if (def.verb !== undefined && def.verb !== '*' && !/^[a-z][\w-]*$/i.test(def.verb)) errors.push(`${w}.verb: invalid`);
       if (def.on !== undefined && !(Array.isArray(def.on) && def.on.every(o => COMMENT_ON.includes(o)))) {
@@ -744,7 +752,7 @@ function checkAmbiguity(spec, errors) {
     const kind = Object.keys(agent.trigger)[0];
     const def = agent.trigger[kind] || {};
     let key = null;
-    if (kind === 'comment') key = `comment:${(def.verb || name).toLowerCase()}:${(def.on || COMMENT_ON).slice().sort()}`;
+    if (kind === 'comment') key = `comment:${(def.verb || name).toLowerCase()}:${(def.on || COMMENT_ON).slice().sort()}:${def.head_branch ?? ''}`;
     else if (kind === 'commit') key = `commit:${spec.repos[def.repo] || def.repo}:${def.branch}`.toLowerCase();
     else if (kind === 'schedule') key = `schedule:${def.cron}`;
     else if (SYSTEM_FIELDS[kind]) key = `${kind}:${lc(spec.repos[def.repo] || def.repo || '*')}`;
@@ -932,6 +940,15 @@ function matchAgent(spec, name, event) {
 
   if (kind === 'comment') {
     if (def.on && !def.on.includes(event.on)) return null;
+    // Head-branch route: only PR events whose head branch matches the glob.
+    // The loop guard is the event type, not the author: an explicit mention or
+    // a `changes_requested` review fires it; implicit triggers (thread
+    // replies, bot status comments) never do. An issue comment carries no
+    // head ref in the payload; the worker fetches it (event.head_ref).
+    const headRoute = def.head_branch !== undefined;
+    if (headRoute) {
+      if (event.on === 'issue' || !event.head_ref || !globToRegExp(def.head_branch).test(event.head_ref)) return null;
+    }
     const verb = def.verb || name;
     const bot = `@${esc(spec.bot)}(?:\\[bot\\])?`;
     const body = event.body || '';
@@ -942,7 +959,8 @@ function matchAgent(spec, name, event) {
       // Catch-all: any mention (anywhere in the body), optionally followed by
       // a backend keyword, like the pre-yaml mention gate.
       const m = new RegExp(`(?:^|\\s)${bot}(?![\\w-])(?:\\s+(${BACKEND_KEYWORDS.join('|')})(?![\\w-]))?`, 'i').exec(body);
-      if (!m && !event.implicit) return null;
+      const changesRequested = headRoute && event.review_state === 'changes_requested';
+      if (!m && !changesRequested && (headRoute || !event.implicit)) return null;
       if (m && m[1] && 'backend' in declared) params.backend = m[1].toLowerCase();
       // Every mention (and a backend keyword right after it) is stripped from
       // the request text, as parse-trigger.js always did.
@@ -1226,6 +1244,12 @@ function route(spec, event) {
     const m = matchAgent(spec, name, event);
     if (m) hits.push({ name, match: m });
   }
+  // A head-branch route is more specific than the catch-all: on its branches
+  // it wins, everywhere else the default agent still matches.
+  if (hits.length > 1) {
+    const routed = hits.filter(h => spec.agents[h.name].trigger.comment?.head_branch !== undefined);
+    if (routed.length === 1) return routed[0];
+  }
   if (hits.length > 1) throw new Error(`ambiguous: ${hits.map(h => h.name).join(', ')} all match`);
   return hits[0] || null;
 }
@@ -1251,7 +1275,7 @@ function explain(spec, event) {
 // forwards verbatim to dispatcher.yml) into a trigger event, or null when the
 // event type carries no agent trigger. Shared by the worker and
 // scripts/resolve-agent.js so both sides route identically.
-function eventFromWebhook(spec, eventType, payload) {
+function eventFromWebhook(spec, eventType, payload, { head_ref } = {}) {
   const repo = payload.repository?.full_name || '';
   if (eventType === 'push') {
     const ref = payload.ref || '';
@@ -1318,6 +1342,8 @@ function eventFromWebhook(spec, eventType, payload) {
     body: typeof body === 'string' ? body : '',
     thread_author: thread_author || '',
     implicit,
+    head_ref: payload.pull_request?.head?.ref || head_ref || '',
+    review_state: eventType === 'pull_request_review' ? lc(payload.review?.state) : '',
     ...(comment_id !== undefined ? { comment_id } : {}),
   };
 }
@@ -1360,6 +1386,22 @@ function eventFromSystem(type, raw) {
   return event;
 }
 
+// The agent (if any) whose comment trigger routes by PR head branch for this
+// event, with its attempt cap — lets the worker know it must fetch the head
+// ref and count attempts. Routing stays authoritative.
+function headBranchMatches(glob, ref) {
+  return globToRegExp(glob).test(ref);
+}
+
+function headBranchRoutes(spec) {
+  const out = [];
+  for (const [name, agent] of Object.entries(spec.agents || {})) {
+    const t = agent?.trigger?.comment;
+    if (t && t.head_branch !== undefined) out.push({ name, glob: t.head_branch, max_attempts: t.max_attempts || DEFAULT_MAX_ATTEMPTS });
+  }
+  return out;
+}
+
 // Lower-cased logins named by any `field` list (`pr_authors`, `reviewers`) of
 // the agents with a `kind` trigger — lets the worker skip work for PRs/reviews
 // no agent could take before it makes API calls. Routing stays authoritative.
@@ -1384,5 +1426,5 @@ function eventFromTelegram(message) {
 
 module.exports = {
   loadSpecObject, matchRelays, explainRelays, matchAgent, route, resolveAgent, resolveAction, explain, accessAllows, branchPattern,
-  parseDuration, eventFromWebhook, eventFromTelegram, eventFromSystem, eventFromDispatch, normalizeDispatch, systemActors, botLogin, ALL_REPOS, JOBS,
+  parseDuration, eventFromWebhook, eventFromTelegram, eventFromSystem, eventFromDispatch, normalizeDispatch, systemActors, headBranchRoutes, headBranchMatches, botLogin, ALL_REPOS, JOBS,
 };

@@ -21,6 +21,7 @@ node scripts/validate-agentic.js --explain event.json # dry-run: which agent, ac
 | Kind | Fires on | Runner |
 | --- | --- | --- |
 | `comment` | `@the-intern-bot …` on an issue, PR or inline review thread (`verb: '*'` = any mention). A reply on a thread the bot opened and a manual `workflow_dispatch` count as implicit mentions. | `dispatcher.yml` |
+| `comment` + `head_branch` | Same as `comment`, restricted to PRs whose head branch matches the glob (e.g. `head_branch: specage/*`); wins over the catch-all, other branches fall back to it. Fires only on an explicit `@mention` or a `changes_requested` review (thread replies and bot status comments never do, regardless of author), and at most `max_attempts` (default 5) times per PR (KV counter). The worker fetches the head ref for `issue_comment` events (not in the payload) and forwards it as `head_ref`. Needs the bot in `ALLOWED_USERS` if its own reviews should fire it. | `dispatcher.yml` |
 | `commit` | A push to `repo` on a `branch` pattern (`@name` captures one segment) by a trusted `author` (also the loop guard). | `specage.yml` (`agent_commit` dispatch) |
 | `dispatch` | `workflow_dispatch` of `dispatcher.yml` with a `dispatch` JSON input from an allowlisted caller (see [dispatch_agent](#dispatch_agent-generic-caller-dispatch)). | `dispatcher.yml` |
 | `manual` | `workflow_dispatch` of `dispatcher.yml` with `agent` + `parameters` (JSON, typed) — what a `dispatch_agent` action fires. | `dispatcher.yml` |
