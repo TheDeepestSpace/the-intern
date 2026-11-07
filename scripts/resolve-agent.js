@@ -78,7 +78,7 @@ function buildEvent(spec, env) {
 
   if (COMMENT_EVENTS.includes(eventType)) {
     const payload = cp.raw || cp;
-    const event = eventFromWebhook(spec, eventType, payload);
+    const event = eventFromWebhook(spec, eventType, payload, { head_ref: cp.head_ref });
     if (!event) throw new Error(`could not normalize ${eventType} payload`);
     const shape = parseTrigger(env);
     return { event, expectedAgent: cp.agent || null, shape };

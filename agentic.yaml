@@ -88,6 +88,15 @@ agents:
     model: $trigger.comment.param.model | default
     effort: $trigger.comment.param.effort | default
 
+  # Head-branch route example (not enabled): PRs from `specage/*` branches get
+  # their own prompt; every other PR keeps using `default`. Fires on an
+  # explicit mention or a changes_requested review, capped per PR.
+  #   specage_pr:
+  #     trigger:
+  #       comment: { verb: '*', on: [pr, review_thread], head_branch: 'specage/*', max_attempts: 5, params: { backend: string, model: string, effort: string } }
+  #     access: { repos: [{ name: $trigger.comment.repo, scope: read/write }] }
+  #     prompt_file: { repo: specage, path: protocol/PROTOCOL.md }
+
   # System-synthesized requests. The worker turns a GitHub event into one of
   # these triggers (never a human comment, so no mention is needed); the agent
   # gets the same preamble as `default` followed by `request` as "New request:".
