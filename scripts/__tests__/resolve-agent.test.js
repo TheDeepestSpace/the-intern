@@ -60,7 +60,7 @@ describe('comment trigger (issue_comment)', () => {
     }));
     expect(outputs).toMatchObject({
       agent: 'default', target_repo: INTERN, issue_number: '7', installation_id: '4242', backend: 'codex',
-      backend_explicit: 'true', model: 'gpt-x', effort: 'default', timeout_minutes: 60, event_type: 'issue_comment',
+      backend_explicit: 'true', model: 'gpt-x', effort: 'default', timeout_minutes: 360, event_type: 'issue_comment',
       comment_id: '', prompt_repo: '', actions_count: 0,
     });
     expect(JSON.parse(outputs.access)).toEqual([{ repo: INTERN, scope: 'read/write' }]);
@@ -229,9 +229,9 @@ describe('commit trigger (agent_commit)', () => {
 });
 
 describe('telegram trigger (telegram_message)', () => {
-  it('resolves the telegram agent: unscoped access, 45m timeout, params from anywhere in the text', () => {
+  it('resolves the telegram agent: unscoped access, 360m timeout, params from anywhere in the text', () => {
     const { outputs, text } = run('repository_dispatch', dispatch('telegram_message', { agent: 'telegram', text: 'backend=codex fix the parser bug model=sol', chat_id: 777, message_id: 101 }));
-    expect(outputs).toMatchObject({ agent: 'telegram', target_repo: '', issue_number: '', backend: 'codex', model: 'sol', timeout_minutes: 45, prompt_repo: INTERN, prompt_path: 'instructions/telegram.md' });
+    expect(outputs).toMatchObject({ agent: 'telegram', target_repo: '', issue_number: '', backend: 'codex', model: 'sol', timeout_minutes: 360, prompt_repo: INTERN, prompt_path: 'instructions/telegram.md' });
     expect(JSON.parse(outputs.access)).toEqual([{ repo: '*', scope: 'read/write' }]);
     expect(text).toBe('fix the parser bug');
   });

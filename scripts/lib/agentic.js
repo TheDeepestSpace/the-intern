@@ -1146,7 +1146,7 @@ function resolveAgent(spec, name, match) {
     backend: dispatch?.backend || resolveSetting(pick('backend', 'claude'), ctx),
     model: dispatch?.model || resolveSetting(pick('model', 'default'), ctx),
     effort: dispatch?.effort || resolveSetting(pick('effort', 'default'), ctx),
-    timeout_seconds: parseDuration(pick('timeout', '60m')),
+    timeout_seconds: parseDuration(pick('timeout', '360m')),
     limits: { max_runs_per_hour: (agent.limits || d.limits || {}).max_runs_per_hour ?? null },
     access,
     permissions: agent.permissions || {},

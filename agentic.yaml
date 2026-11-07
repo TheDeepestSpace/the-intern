@@ -11,7 +11,7 @@ defaults:
   backend: claude
   model: default
   effort: default
-  timeout: 60m
+  timeout: 360m   # GitHub job max
   limits: { max_runs_per_hour: 20 }   # enforced per agent by the worker (KV counter)
 # Aliases. A branch capture used as a repo ($trigger.commit.matcher.project) is
 # looked up here, so onboarding a project means adding its alias (default-deny).
@@ -176,7 +176,7 @@ agents:
     backend: $trigger.telegram.param.backend | claude
     model: $trigger.telegram.param.model | default
     effort: $trigger.telegram.param.effort | default
-    timeout: 45m
+    timeout: 360m
 
   # Spec push by the specage app: runs the dispatch protocol against the
   # project named by the branch (the capture must be a `repos:` alias). The

@@ -190,7 +190,7 @@ function main(env = process.env) {
     backend_explicit: 'backend' in resolved.params ? 'true' : 'false',
     model: resolved.model,
     effort: resolved.effort,
-    timeout_minutes: Math.max(1, Math.ceil(resolved.timeout_seconds / 60)),
+    timeout_minutes: Math.min(360, Math.max(1, Math.ceil(resolved.timeout_seconds / 60))),
     event_type: agentJson.event_type,
     comment_id: agentJson.comment_id,
     callback_repo: resolved.dispatch?.callback?.repo || '',
