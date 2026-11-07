@@ -496,3 +496,76 @@ describe('relay: outbox push -> specage workflow_dispatch', () => {
     });
   });
 });
+
+describe('comment trigger: head_branch route (worker)', () => {
+  const REPO = 'TheDeepestSpace/the-intern';
+  const envWith = (extra = {}) => {
+    const spec = structuredClone(SPEC);
+    spec.agents.branch_agent = {
+      ...structuredClone(spec.agents.default),
+      trigger: { comment: { verb: '*', on: ['pr', 'review_thread'], head_branch: 'specage/*', max_attempts: 2, params: { backend: 'string', model: 'string', effort: 'string' } } },
+    };
+    return baseGithubEnv({ AGENTIC_SPEC: JSON.stringify(spec), ...extra });
+  };
+  const prComment = (body = '@the-intern-bot go') => ({
+    installation: { id: 42 }, repository: { full_name: REPO },
+    comment: { user: { login: 'alice' }, body }, issue: { number: 5, user: { login: 'alice' }, pull_request: {} },
+  });
+  const mockFlow = headRef => vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const req = new Request(input, init);
+    const { pathname } = new URL(req.url);
+    if (/\/access_tokens$/.test(pathname)) return new Response(JSON.stringify({ token: 't' }), { status: 201 });
+    if (req.method === 'GET' && /\/pulls\/5$/.test(pathname)) return new Response(JSON.stringify({ head: { ref: headRef } }), { status: 200 });
+    if (pathname.endsWith('/dispatches')) return new Response(null, { status: 204 });
+    throw new Error(`Unexpected fetch: ${req.method} ${pathname}`);
+  });
+  const body = spy => {
+    const c = spy.mock.calls.find(([i]) => new URL(i.url ?? i).pathname.endsWith('/dispatches'));
+    return c ? JSON.parse(c[1].body) : null;
+  };
+  const send = (b, env, type = 'issue_comment') => worker.fetch(githubRequest({ eventType: type, body: b }), env);
+
+  it('fetches the PR head ref for an issue comment and routes on a glob match', async () => {
+    const spy = mockFlow('specage/feat');
+    const res = await send(prComment(), envWith());
+    expect(await res.text()).toBe('ok');
+    expect(body(spy).client_payload).toMatchObject({ agent: 'branch_agent', head_ref: 'specage/feat' });
+  });
+
+  it('falls back to default on other branches', async () => {
+    const spy = mockFlow('feature/x');
+    await send(prComment(), envWith());
+    expect(body(spy).client_payload.agent).toBe('default');
+  });
+
+  it('a bodyless changes_requested review fires the route without a mention', async () => {
+    const spy = mockFlow('unused');
+    const res = await send({
+      installation: { id: 42 }, repository: { full_name: REPO },
+      review: { user: { login: 'the-intern-bot[bot]' }, body: '', state: 'changes_requested' },
+      pull_request: { number: 5, user: { login: 'the-intern-bot[bot]' }, head: { ref: 'specage/feat' } },
+    }, envWith(), 'pull_request_review');
+    expect(await res.text()).toBe('ok');
+    expect(body(spy).client_payload.agent).toBe('branch_agent');
+  });
+
+  it('a non-mentioning approved review does nothing', async () => {
+    const spy = mockFlow('unused');
+    const res = await send({
+      installation: { id: 42 }, repository: { full_name: REPO },
+      review: { user: { login: 'alice' }, body: 'nice', state: 'approved' },
+      pull_request: { number: 5, user: { login: 'alice' }, head: { ref: 'specage/feat' } },
+    }, envWith(), 'pull_request_review');
+    expect(await res.text()).toMatch(/^ignored/);
+    expect(body(spy)).toBeNull();
+  });
+
+  it('stops after max_attempts dispatches per PR', async () => {
+    const spy = mockFlow('specage/feat');
+    const env = envWith();
+    expect(await (await send(prComment(), env)).text()).toBe('ok');
+    expect(await (await send(prComment(), env)).text()).toBe('ok');
+    expect(await (await send(prComment(), env)).text()).toMatch(/attempt cap \(2\)/);
+    expect(spy.mock.calls.filter(([i]) => new URL(i.url ?? i).pathname.endsWith('/dispatches'))).toHaveLength(2);
+  });
+});

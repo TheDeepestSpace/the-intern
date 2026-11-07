@@ -339,3 +339,58 @@ describe('relays', () => {
     expect(loadSpecObject(raw).errors.join()).toMatch(/relays\.r\.author|relays\.r\.workflow/);
   });
 });
+
+describe('comment trigger: head_branch route', () => {
+  const AGENTS = `
+  default:
+    trigger: { comment: { verb: '*', on: [issue, pr, review_thread] } }
+    access: { repos: [{ name: $trigger.comment.repo, scope: read/write }] }
+    prompt: hi $repo
+  routed:
+    trigger: { comment: { verb: '*', on: [pr, review_thread], head_branch: 'specage/*', max_attempts: 3 } }
+    access: { repos: [{ name: $trigger.comment.repo, scope: read/write }] }
+    prompt: routed $repo
+`;
+  const spec = () => load(AGENTS);
+  const ev = (o = {}) => ({ kind: 'comment', repo: 'Acme/proj', author: 'alice', on: 'pr', issue_number: 3, body: '@bot go', implicit: false, head_ref: 'specage/x', review_state: '', ...o });
+  const spec2 = () => { const r = spec(); expect(r.errors).toEqual([]); return { ...r.spec, bot: 'bot' }; };
+
+  it('glob match picks the routed agent over the catch-all', () => {
+    expect(route(spec2(), ev()).name).toBe('routed');
+  });
+  it('other branches (and issues) fall back to default', () => {
+    expect(route(spec2(), ev({ head_ref: 'feature/x' })).name).toBe('default');
+    expect(route(spec2(), ev({ head_ref: '' })).name).toBe('default');
+    expect(route(spec2(), ev({ on: 'issue', head_ref: '' })).name).toBe('default');
+  });
+  it('glob does not cross slashes', () => {
+    expect(route(spec2(), ev({ head_ref: 'specage/a/b' })).name).toBe('default');
+  });
+  it('implicit thread replies do not fire the routed agent; changes_requested does', () => {
+    const s = spec2();
+    expect(route(s, ev({ body: 'status update', implicit: true })).name).toBe('default');
+    expect(route(s, ev({ body: '', implicit: false, review_state: 'changes_requested' })).name).toBe('routed');
+    expect(route(s, ev({ body: 'lgtm', review_state: 'approved' }))).toBeNull();
+  });
+  it('validates head_branch / max_attempts', () => {
+    expect(errs(`
+  a:
+    trigger: { comment: { verb: '*', max_attempts: 2 } }
+    access: { repos: [{ name: $trigger.comment.repo, scope: read }] }
+    prompt: x
+`).join('\n')).toMatch(/max_attempts/);
+    expect(errs(`
+  a:
+    trigger: { comment: { verb: '*', head_branch: 5 } }
+    access: { repos: [{ name: $trigger.comment.repo, scope: read }] }
+    prompt: x
+`).join('\n')).toMatch(/head_branch/);
+  });
+  it('eventFromWebhook takes the head ref from the payload or the worker-fetched one', () => {
+    const s = spec2();
+    const review = { action: 'submitted', review: { user: { login: 'a' }, body: '', state: 'CHANGES_REQUESTED' }, pull_request: { number: 3, user: { login: 'b' }, head: { ref: 'specage/y' } }, repository: { full_name: 'Acme/proj' } };
+    expect(eventFromWebhook(s, 'pull_request_review', review)).toMatchObject({ head_ref: 'specage/y', review_state: 'changes_requested' });
+    const ic = { comment: { user: { login: 'a' }, body: 'x' }, issue: { number: 3, pull_request: {} }, repository: { full_name: 'Acme/proj' } };
+    expect(eventFromWebhook(s, 'issue_comment', ic, { head_ref: 'specage/z' }).head_ref).toBe('specage/z');
+  });
+});
