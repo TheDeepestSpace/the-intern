@@ -56,6 +56,9 @@ export function createFakeKvNamespace() {
     async put(key, value) {
       store.set(key, value);
     },
+    async delete(key) {
+      store.delete(key);
+    },
   };
 }
 
@@ -110,6 +113,7 @@ function githubApiFetchHandler({
   pullRequestBaseSha,
   checkRunsByRef,
   checkRunsThrowRefs = [],
+  commitsBySha,
 } = {}) {
   return async (input, init) => {
     const request = new Request(input, init);
@@ -122,6 +126,11 @@ function githubApiFetchHandler({
       checkRunsThrowRefs.includes(decodeURIComponent(url.pathname.split('/').slice(-2, -1)[0]))
     ) {
       throw new TypeError('network error');
+    }
+
+    if (commitsBySha !== undefined && request.method === 'GET' && url.pathname.match(/^\/repos\/[^/]+\/[^/]+\/commits\/[^/]+$/)) {
+      const commit = commitsBySha[url.pathname.split('/').pop()];
+      return commit ? new Response(JSON.stringify(commit), { status: 200 }) : new Response('not found', { status: 404 });
     }
 
     if (
@@ -207,6 +216,7 @@ export function mockCheckSuiteDispatchFlow({
   dispatchOk = true,
   checkRunsByRef = { 'sha-abc123': [], 'base-sha': [] },
   checkRunsThrowRefs = [],
+  commitsBySha = {},
 } = {}) {
   return vi
     .spyOn(globalThis, 'fetch')
@@ -217,6 +227,7 @@ export function mockCheckSuiteDispatchFlow({
         dispatchOk,
         checkRunsByRef,
         checkRunsThrowRefs,
+        commitsBySha,
       })
     );
 }

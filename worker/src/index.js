@@ -349,13 +349,23 @@ async function handleCheckSuite(payload, env) {
   const checkSuite = payload.check_suite;
   const pullRequests = checkSuite?.pull_requests || [];
 
+  // A PR-less suite on the default branch (a push after a merge) goes to the
+  // `branches: [default]` ci_failure route instead.
+  const onDefaultBranch = pullRequests.length === 0 && payload.action === 'completed' &&
+    !!checkSuite?.head_branch && checkSuite.head_branch === payload.repository?.default_branch;
+  if (onDefaultBranch && checkSuite.conclusion === 'success') {
+    // A green default branch ends the consecutive-failure streak.
+    if (env.CI_FAILURE_DEDUP) await env.CI_FAILURE_DEDUP.delete(mainStreakKey(payload.repository?.full_name));
+    return new Response('ignored: check_suite not a relevant failure', { status: 200 });
+  }
   if (
     payload.action !== 'completed' ||
     !['failure', 'timed_out'].includes(checkSuite?.conclusion) ||
-    pullRequests.length === 0
+    (pullRequests.length === 0 && !onDefaultBranch)
   ) {
     return new Response('ignored: check_suite not a relevant failure', { status: 200 });
   }
+  if (onDefaultBranch) return handleDefaultBranchFailure(payload, env);
 
   const installationId = payload.installation?.id;
   if (!installationId) {
@@ -467,6 +477,89 @@ async function handleCheckSuite(payload, env) {
       return new Response('ignored: rate limit for the ci_failure agent reached', { status: 200 });
     }
     return new Response('ignored: no bot-authored pull requests', { status: 200 });
+  } catch (err) {
+    return new Response(`internal error: ${err.message}`, { status: 500 });
+  }
+}
+
+const DEFAULT_MAX_CONSECUTIVE = 3;
+const mainStreakKey = fullName => `ci_main_streak:${fullName}`.toLowerCase();
+
+async function fetchCommit(owner, repo, sha, token) {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits/${sha}`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'the-intern-bot-relay' },
+    });
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+// A check suite failed on the default branch with no PR (e.g. right after a
+// bot PR merged). Routed to a `ci_failure` agent with `branches: [default]`;
+// the commit's author/committer must be in its `pr_authors`. Guards: dedup per
+// (repo, sha), skip_preexisting against the previous commit, the per-hour rate
+// limit, and `max_consecutive` auto-fix dispatches on main without a green
+// run in between (reset by a successful default-branch suite).
+async function handleDefaultBranchFailure(payload, env) {
+  const checkSuite = payload.check_suite;
+  const installationId = payload.installation?.id;
+  if (!installationId) return new Response('missing installation id', { status: 400 });
+  const owner = payload.repository?.owner?.login;
+  const repo = payload.repository?.name;
+  const fullName = payload.repository?.full_name;
+  const sha = checkSuite.head_sha;
+
+  try {
+    const token = await getInstallationToken(env, installationId);
+    const commit = await fetchCommit(owner, repo, sha, token);
+    const raw = {
+      repository: payload.repository,
+      check_suite: checkSuite,
+      commit: { author_login: commit?.author?.login || '', committer_login: commit?.committer?.login || '' },
+      installation: payload.installation,
+    };
+    const routed = routeEvent(env, eventFromSystem('ci_failure', raw), 'default-branch check suite');
+    if (routed.response) return routed.response;
+    const { hit, resolved } = routed;
+    const trigger = routed.spec.agents[hit.name].trigger.ci_failure;
+
+    const dedupTtl = trigger.dedup ? parseDuration(trigger.dedup) : 0;
+    const dedupKey = `ci_failure:${owner}/${repo}@${sha}`;
+    if (dedupTtl && await env.CI_FAILURE_DEDUP.get(dedupKey)) {
+      return new Response('ignored: ci_failure already dispatched for this commit', { status: 200 });
+    }
+
+    if (trigger.skip_preexisting) {
+      const headFailures = await getFailingCheckNames(owner, repo, sha, token);
+      const parent = commit?.parents?.[0]?.sha;
+      if (headFailures && headFailures.size > 0 && parent) {
+        const baseFailures = await getFailingCheckNames(owner, repo, parent, token);
+        if (baseFailures && [...headFailures].every(name => baseFailures.has(name))) {
+          return new Response('ignored: all failures pre-existing on previous commit', { status: 200 });
+        }
+      }
+    }
+
+    const max = trigger.max_consecutive || DEFAULT_MAX_CONSECUTIVE;
+    const streakKey = mainStreakKey(fullName);
+    const streak = env.CI_FAILURE_DEDUP ? Number(await env.CI_FAILURE_DEDUP.get(streakKey)) || 0 : 0;
+    if (streak >= max) {
+      return new Response(`ignored: ${max} consecutive auto-fix attempts on the default branch reached`, { status: 200 });
+    }
+
+    const limit = await rateLimitKey(env, resolved);
+    if (limit.exceeded) return new Response(`ignored: rate limit for agent ${hit.name} reached`, { status: 200 });
+
+    const dispatchRes = await dispatchRepoEvent(env, token, 'ci_failure', raw, { agent: hit.name });
+    if (!dispatchRes.ok) {
+      return new Response(`dispatch failed: ${await dispatchRes.text()}`, { status: 502 });
+    }
+    if (dedupTtl) await env.CI_FAILURE_DEDUP.put(dedupKey, '1', { expirationTtl: dedupTtl });
+    if (env.CI_FAILURE_DEDUP) await env.CI_FAILURE_DEDUP.put(streakKey, String(streak + 1), { expirationTtl: 7 * 86400 });
+    await countRun(env, limit);
+    return new Response('ok', { status: 200 });
   } catch (err) {
     return new Response(`internal error: ${err.message}`, { status: 500 });
   }

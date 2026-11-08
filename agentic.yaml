@@ -121,6 +121,28 @@ agents:
     request: |-
       CI is failing on this PR (conclusion: $trigger.ci_failure.conclusion). Check suite: $trigger.ci_failure.html_url. This check suite ran against commit `$trigger.ci_failure.head_sha`. Before investigating, compare that commit to the PR's current head (e.g. `gh pr view $issue_number --json headRefOid`). If the PR's head has already moved past `$trigger.ci_failure.head_sha`, this failure is stale - a newer commit supersedes it, so stop immediately without commenting or pushing anything. Otherwise, investigate the failing checks and push a fix.
 
+  # A check suite failed on the default branch with no PR (e.g. right after a
+  # merge): fix it in a new PR, or rerun if transient. `branches: [default]`
+  # makes this the PR-less route (PR events keep using ci_fixer); the gate is
+  # the failing commit's author/committer in `pr_authors`. `dedup` is per
+  # (repo, sha), `skip_preexisting` compares with the previous commit, and
+  # `max_consecutive` caps auto-fix dispatches until the branch goes green.
+  main_ci_fixer:
+    trigger:
+      ci_failure:
+        repo: calculator
+        branches: [default]
+        pr_authors: ["the-intern-bot[bot]"]
+        skip_preexisting: true
+        dedup: 14d
+        max_consecutive: 3
+    access:
+      repos:
+        - { name: $trigger.ci_failure.repo, scope: read/write }
+    prompt: *headless_prompt
+    request: |-
+      CI failed on the default branch `$trigger.ci_failure.head_branch` at commit `$trigger.ci_failure.head_sha` (conclusion: $trigger.ci_failure.conclusion; commit author: $trigger.ci_failure.commit_author). Check suite: $trigger.ci_failure.html_url. There is no PR: investigate the failed run logs (`gh run list --commit $trigger.ci_failure.head_sha`). If the failure is transient (e.g. a CI image that did not exist yet), rerun the failed jobs; otherwise open a PR against the default branch with the fix. Do not push to the default branch directly.
+
   # A push to a PR's base branch left a bot PR unmergeable (also sent by the
   # nightly crawl's conflict sweep).
   conflict_fixer:

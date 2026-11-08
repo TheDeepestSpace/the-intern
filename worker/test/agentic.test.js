@@ -339,6 +339,79 @@ describe('system triggers: ci_failure / merge_conflict / review', () => {
     expect(dispatches(spy)).toHaveLength(1);
   });
 
+  describe('ci_failure on the default branch (no PR)', () => {
+    const CALC = 'TheDeepestSpace/calculator';
+    const suite = (over = {}) => ({
+      action: 'completed', installation: { id: 42 },
+      repository: { full_name: CALC, owner: { login: 'TheDeepestSpace' }, name: 'calculator', default_branch: 'main' },
+      check_suite: { head_sha: 'sha-abc123', head_branch: 'main', conclusion: 'failure', html_url: 'https://github.com/x/checks', pull_requests: [], ...over },
+    });
+    const commits = (login = 'the-intern-bot[bot]') => ({
+      'sha-abc123': { author: { login }, committer: { login: 'web-flow' }, parents: [{ sha: 'parent-sha' }] },
+    });
+    const send = (env, body = suite()) => worker.fetch(githubRequest({ eventType: 'check_suite', body }), env).then(r => r.text());
+
+    it('dispatches main_ci_fixer for a bot-authored commit', async () => {
+      const spy = mockCheckSuiteDispatchFlow({ commitsBySha: commits() });
+      expect(await send(baseGithubEnv())).toBe('ok');
+      expect(dispatches(spy)[0]).toMatchObject({ event_type: 'ci_failure', client_payload: { agent: 'main_ci_fixer' } });
+    });
+
+    it('ignores non-default branches, successes and non-allowlisted authors', async () => {
+      const spy = mockCheckSuiteDispatchFlow({ commitsBySha: commits() });
+      expect(await send(baseGithubEnv(), suite({ head_branch: 'feature' }))).toBe('ignored: check_suite not a relevant failure');
+      expect(await send(baseGithubEnv(), suite({ conclusion: 'success' }))).toBe('ignored: check_suite not a relevant failure');
+      spy.mockRestore();
+      const spy2 = mockCheckSuiteDispatchFlow({ commitsBySha: commits('stranger') });
+      expect(await send(baseGithubEnv())).toMatch(/^ignored: no agent trigger matches/);
+      expect(dispatches(spy2)).toHaveLength(0);
+    });
+
+    it('does not route PR-less failures in repos the route is not scoped to', async () => {
+      const spy = mockCheckSuiteDispatchFlow({ commitsBySha: commits() });
+      const body = suite();
+      body.repository = { ...body.repository, full_name: REPO, name: 'the-intern' };
+      expect(await send(baseGithubEnv(), body)).toMatch(/^ignored: no agent trigger matches/);
+      expect(dispatches(spy)).toHaveLength(0);
+    });
+
+    it('dedups per (repo, sha)', async () => {
+      const env = baseGithubEnv();
+      const spy = mockCheckSuiteDispatchFlow({ commitsBySha: commits() });
+      expect(await send(env)).toBe('ok');
+      expect(await send(env)).toBe('ignored: ci_failure already dispatched for this commit');
+      expect(dispatches(spy)).toHaveLength(1);
+    });
+
+    it('skips when the previous commit already fails the same checks', async () => {
+      const spy = mockCheckSuiteDispatchFlow({ commitsBySha: commits(), checkRunsByRef: { 'sha-abc123': failing, 'parent-sha': failing } });
+      expect(await send(baseGithubEnv())).toBe('ignored: all failures pre-existing on previous commit');
+      expect(dispatches(spy)).toHaveLength(0);
+    });
+
+    it('caps consecutive attempts and resets on a green run', async () => {
+      const env = baseGithubEnv({ AGENTIC_SPEC: JSON.stringify(Object.assign(structuredClone(SPEC), {})) });
+      env.AGENTIC_SPEC = JSON.stringify((() => { const sp = structuredClone(SPEC); sp.agents.main_ci_fixer.trigger.ci_failure.max_consecutive = 2; return sp; })());
+      const spy = mockCheckSuiteDispatchFlow({ commitsBySha: { ...commits(), 'sha-2': commits()['sha-abc123'], 'sha-3': commits()['sha-abc123'], 'sha-4': commits()['sha-abc123'] } });
+      const at = sha => send(env, suite({ head_sha: sha }));
+      expect(await at('sha-abc123')).toBe('ok');
+      expect(await at('sha-2')).toBe('ok');
+      expect(await at('sha-3')).toMatch(/consecutive auto-fix attempts/);
+      expect(await send(env, suite({ conclusion: 'success' }))).toBe('ignored: check_suite not a relevant failure');
+      expect(await at('sha-4')).toBe('ok');
+      expect(dispatches(spy)).toHaveLength(3);
+    });
+
+    it('is capped by max_runs_per_hour', async () => {
+      const sp = structuredClone(SPEC);
+      sp.agents.main_ci_fixer.limits = { max_runs_per_hour: 1 };
+      const env = baseGithubEnv({ AGENTIC_SPEC: JSON.stringify(sp) });
+      mockCheckSuiteDispatchFlow({ commitsBySha: { ...commits(), 'sha-2': commits()['sha-abc123'] } });
+      expect(await send(env)).toBe('ok');
+      expect(await send(env, suite({ head_sha: 'sha-2' }))).toBe('ignored: rate limit for agent main_ci_fixer reached');
+    });
+  });
+
   it('merge_conflict names the conflict_fixer agent and follows pr_authors', async () => {
     const payload = { ref: 'refs/heads/main', installation: { id: 42 },
       repository: { full_name: REPO, owner: { login: 'TheDeepestSpace' }, name: 'the-intern', default_branch: 'main' } };

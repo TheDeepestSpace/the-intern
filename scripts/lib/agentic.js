@@ -12,7 +12,7 @@ const TRIGGER_KINDS = ['comment', 'commit', 'pull_request', 'issue', 'schedule',
 // the agent receives. Fields are the structural facts of the event only —
 // never third-party free text (review bodies, titles).
 const SYSTEM_FIELDS = {
-  ci_failure: ['pr_author', 'conclusion', 'head_sha', 'html_url'],
+  ci_failure: ['pr_author', 'conclusion', 'head_sha', 'head_branch', 'commit_author', 'html_url'],
   merge_conflict: ['pr_author', 'base_ref', 'mergeable_state'],
   review: ['pr_author', 'reviewer', 'html_url'],
 };
@@ -279,7 +279,7 @@ function validateTrigger(name, trigger, spec, errors) {
     case 'ci_failure':
     case 'merge_conflict':
     case 'review': {
-      unknownKeys(def, ['repo', 'pr_authors', ...(kind === 'ci_failure' ? ['skip_preexisting', 'dedup'] : []),
+      unknownKeys(def, ['repo', 'pr_authors', ...(kind === 'ci_failure' ? ['skip_preexisting', 'dedup', 'branches', 'max_consecutive'] : []),
         ...(kind === 'review' ? ['reviewers', 'actions'] : [])], w, errors);
       repoRef('repo');
       // The PR-author allowlist is the gate (the bot fixing only its own PRs),
@@ -290,6 +290,12 @@ function validateTrigger(name, trigger, spec, errors) {
         if (!Array.isArray(def.reviewers) || !def.reviewers.length) errors.push(`${w}.reviewers: non-empty list required`);
         strList('reviewers');
         strList('actions');
+      }
+      if (def.branches !== undefined && !(Array.isArray(def.branches) && def.branches.length === 1 && def.branches[0] === 'default')) {
+        errors.push(`${w}.branches: must be [default] (PR-less failures on the default branch)`);
+      }
+      if (def.max_consecutive !== undefined && (def.branches === undefined || !Number.isInteger(def.max_consecutive) || def.max_consecutive < 1)) {
+        errors.push(`${w}.max_consecutive: positive integer, only with branches`);
       }
       if (def.skip_preexisting !== undefined && typeof def.skip_preexisting !== 'boolean') errors.push(`${w}.skip_preexisting: must be a boolean`);
       if (def.dedup !== undefined) {
@@ -755,7 +761,7 @@ function checkAmbiguity(spec, errors) {
     if (kind === 'comment') key = `comment:${(def.verb || name).toLowerCase()}:${(def.on || COMMENT_ON).slice().sort()}:${def.head_branch ?? ''}`;
     else if (kind === 'commit') key = `commit:${spec.repos[def.repo] || def.repo}:${def.branch}`.toLowerCase();
     else if (kind === 'schedule') key = `schedule:${def.cron}`;
-    else if (SYSTEM_FIELDS[kind]) key = `${kind}:${lc(spec.repos[def.repo] || def.repo || '*')}`;
+    else if (SYSTEM_FIELDS[kind]) key = `${kind}:${lc(spec.repos[def.repo] || def.repo || '*')}:${def.branches ? 'branches' : 'pr'}`;
     else if (kind === 'telegram') key = 'telegram';
     else if (kind === 'dispatch') key = 'dispatch';
     if (key === null) continue;
@@ -1021,7 +1027,16 @@ function matchAgent(spec, name, event) {
   if (SYSTEM_FIELDS[kind]) {
     // Structural gates only: who authored the PR (and, for a review, who
     // reviewed it) decides whether the system may act on it.
-    if (!(def.pr_authors || []).map(lc).includes(lc(event.pr_author))) return null;
+    if (kind === 'ci_failure' && def.branches) {
+      // Default-branch route: only PR-less failures on the repo's default
+      // branch, gated by the commit's author/committer (same allowlist
+      // semantics as pr_authors). PR events never match a branches route.
+      if (event.number != null || !event.head_branch || event.head_branch !== event.default_branch) return null;
+      const allowed = (def.pr_authors || []).map(lc);
+      if (!(event.commit_actors || []).some(a => allowed.includes(lc(a)))) return null;
+    } else if (kind === 'ci_failure' && event.number == null) {
+      return null;
+    } else if (!(def.pr_authors || []).map(lc).includes(lc(event.pr_author))) return null;
     const values = { repo: event.repo, author: event.author || '', number: event.number };
     if (kind === 'ci_failure' && !['failure', 'timed_out'].includes(event.conclusion)) return null;
     if (kind === 'merge_conflict' && event.mergeable_state !== 'dirty') return null;
@@ -1030,6 +1045,7 @@ function matchAgent(spec, name, event) {
       if (!(def.actions || ['submitted']).includes(event.action)) return null;
     }
     for (const f of SYSTEM_FIELDS[kind]) values[f] = event[f] ?? '';
+    if (kind === 'ci_failure') values.commit_author = (event.commit_actors || [])[0] || '';
     return { kind, values };
   }
   if (kind === 'dispatch') {
@@ -1369,6 +1385,9 @@ function eventFromSystem(type, raw) {
     Object.assign(event, {
       conclusion: raw.check_suite?.conclusion || '',
       head_sha: raw.check_suite?.head_sha || '',
+      head_branch: raw.check_suite?.head_branch || '',
+      default_branch: raw.repository?.default_branch || '',
+      commit_actors: [raw.commit?.author_login, raw.commit?.committer_login].filter(Boolean),
       html_url: raw.check_suite?.html_url || '',
     });
   } else if (kind === 'merge_conflict') {
