@@ -22,10 +22,12 @@ ARG JQ_VERSION=1.7.1
 ARG JQ_BINARY_HASH_X64="5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5  jq-linux-amd64"
 ARG JQ_BINARY_HASH_ARM64="4dd2d8a0661df0b22f1bb9a1f9830f06b6f3b8f7d91211a1ef5d7c4f06a8b4a5  jq-linux-arm64"
 
-# Check npm, not node: distro `nodejs` packages (e.g. Ubuntu apt) ship node
+# Require both node and npm: distro `nodejs` packages (e.g. Ubuntu apt) ship node
 # without npm, and the claude/codex installs below need npm. /usr/local/bin
 # precedes /usr/bin on PATH, so the tarball node+npm wins over the distro node.
-RUN if ! command -v npm >/dev/null 2>&1; then \
+ENV PATH="/usr/local/bin:${PATH}"
+
+RUN if ! { command -v node && command -v npm; } >/dev/null 2>&1; then \
       ARCH="$(uname -m)"; \
       case "$ARCH" in \
         x86_64) NODE_ARCH="x64"; NODE_HASH="${NODE_TARBALL_HASH_X64}" ;; \
@@ -34,9 +36,9 @@ RUN if ! command -v npm >/dev/null 2>&1; then \
       esac; \
       NODE_TARBALL="node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"; \
       cd /tmp && \
-      curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}"; \
-      echo "${NODE_HASH}" | sha256sum -c; \
-      tar -xJf "${NODE_TARBALL}" -C /usr/local --strip-components=1 --no-same-owner; \
+      curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" && \
+      echo "${NODE_HASH}" | sha256sum -c && \
+      tar -xJf "${NODE_TARBALL}" -C /usr/local --strip-components=1 --no-same-owner && \
       rm -f "${NODE_TARBALL}"; \
     fi
 
