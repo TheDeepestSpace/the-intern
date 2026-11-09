@@ -40,6 +40,15 @@ describe('dispatch_agent allowlist', () => {
     expect(r.dispatch).toMatchObject({ pr: 40, issue: null, attempt: 2 });
   });
 
+  it('accepts read on the dispatch target repo ($target), rejects it on an unrelated repo', () => {
+    const calc = 'TheDeepestSpace/calculator';
+    const r = go({ repo: calc, access: [{ repo: calc, scope: 'read' }] });
+    expect(r).toMatchObject({ matched: true, repo: calc });
+    expect(go({ repo: calc, access: [{ repo: calc, scope: 'read/write' }] })).toMatchObject({ matched: false, reason: expect.stringMatching(/not allowed/) });
+    expect(go({ repo: calc, access: [{ repo: 'TheDeepestSpace/the-intern', scope: 'read' }] })).toMatchObject({ matched: false, reason: expect.stringMatching(/not allowed/) });
+    expect(go({ repo: undefined, issue: undefined, access: [{ repo: calc, scope: 'read' }] })).toMatchObject({ matched: false, reason: expect.stringMatching(/not allowed/) });
+  });
+
   it.each([
     ['an unknown caller', {}, 'someone-else', /not in dispatch.callers/],
     ['the bot itself (loop avoidance)', {}, 'the-intern-bot[bot]', /loop avoidance/],

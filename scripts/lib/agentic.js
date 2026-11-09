@@ -556,6 +556,8 @@ const REPO_PATTERN_RE = /^[\w.-]+\/(?:[\w.-]+|\*)$/;
 const WORKFLOW_RE = /^[\w.-]+\.ya?ml$/;
 const PROMPT_SOURCE_RE = /^([\w.-]+\/[\w.-]+):([^@\s]+)@(\S+)$/;
 const MAX_DISPATCH_ACCESS = 10;
+// In a caller's `access`, stands for the dispatch's own (already `repos`-checked) target repo.
+const TARGET_PLACEHOLDER = '$target';
 const MAX_DISPATCH_PROMPT = 60000;
 const MAX_DISPATCH_CONTEXT = 8000;
 const DEFAULT_MAX_ATTEMPTS_CAP = 5;
@@ -585,7 +587,7 @@ function validateDispatch(spec, errors) {
       const w = `${where}.access[${i}]`;
       if (!isObj(a)) { errors.push(`${w}: must be a map`); continue; }
       unknownKeys(a, ['repo', 'scope'], w, errors);
-      repoPattern(a.repo, `${w}.repo`);
+      if (a.repo !== TARGET_PLACEHOLDER) repoPattern(a.repo, `${w}.repo`);
       if (!SCOPES.includes(a.scope)) errors.push(`${w}.scope: must be one of ${SCOPES.join('|')}`);
     }
     for (const [i, cb] of (c.callbacks === undefined ? [] : Array.isArray(c.callbacks) ? c.callbacks : [null]).entries()) {
@@ -688,7 +690,7 @@ function normalizeDispatch(spec, event) {
     if (!Array.isArray(req.access) || req.access.length > MAX_DISPATCH_ACCESS) return fail(`access must be a list of at most ${MAX_DISPATCH_ACCESS} {repo, scope}`);
     for (const a of req.access) {
       if (!isObj(a) || typeof a.repo !== 'string' || !REPO_RE.test(a.repo) || !SCOPES.includes(a.scope)) return fail(`malformed access entry ${JSON.stringify(a)}`);
-      const ok = (c.access || []).some(g => repoPatternMatches(spec, g.repo, a.repo) && (a.scope === 'read' || g.scope === 'read/write'));
+      const ok = (c.access || []).some(g => (g.repo === TARGET_PLACEHOLDER ? !!repo && lc(repo) === lc(a.repo) : repoPatternMatches(spec, g.repo, a.repo)) && (a.scope === 'read' || g.scope === 'read/write'));
       if (!ok) return fail(`access ${a.scope} to '${a.repo}' is not allowed for caller '${caller}'`);
       extra.push({ repo: a.repo, scope: a.scope });
     }

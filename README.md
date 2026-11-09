@@ -119,7 +119,7 @@ with one input, `dispatch`, a JSON object:
 **Allowlist** (`dispatch.callers` in `agentic.yaml`, reviewed via CODEOWNERS):
 keyed by the GitHub login that fires the dispatch (`github.actor`, not
 caller-controlled). Per caller: `repos` (targets; alias, `owner/repo` or
-`owner/*`), `access` (extra grants and max scope), `callbacks`
+`owner/*`), `access` (extra grants and max scope; `repo: $target` = the dispatch's own target repo only), `callbacks`
 (`{repo, workflow}`), `prompts` (`{repo, paths, refs}` globs) and
 `inline_prompt`. Anything else is rejected before a run starts (the
 `detect-image` job fails and Telegram is pinged; no callback is sent for a
