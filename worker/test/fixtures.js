@@ -108,6 +108,7 @@ function githubApiFetchHandler({
   dispatchOk = true,
   pullRequestAuthor,
   pullRequestBaseSha,
+  pullRequestHeadRef,
   checkRunsByRef,
   checkRunsThrowRefs = [],
 } = {}) {
@@ -142,6 +143,7 @@ function githubApiFetchHandler({
         JSON.stringify({
           number,
           user: { login: pullRequestAuthor },
+          ...(pullRequestHeadRef !== undefined ? { head: { ref: pullRequestHeadRef } } : {}),
           base: pullRequestBaseSha !== undefined ? { sha: pullRequestBaseSha } : undefined,
         }),
         { status: 200 }
@@ -204,6 +206,7 @@ export function mockInstallationLookupAndDispatchFlow({ installationId = 999, di
 export function mockCheckSuiteDispatchFlow({
   pullRequestAuthor = 'the-intern-bot[bot]',
   pullRequestBaseSha = 'base-sha',
+  pullRequestHeadRef,
   dispatchOk = true,
   checkRunsByRef = { 'sha-abc123': [], 'base-sha': [] },
   checkRunsThrowRefs = [],
@@ -214,6 +217,7 @@ export function mockCheckSuiteDispatchFlow({
       githubApiFetchHandler({
         pullRequestAuthor,
         pullRequestBaseSha,
+        pullRequestHeadRef,
         dispatchOk,
         checkRunsByRef,
         checkRunsThrowRefs,

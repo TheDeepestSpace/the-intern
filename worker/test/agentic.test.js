@@ -298,6 +298,52 @@ describe('system triggers: ci_failure / merge_conflict / review', () => {
     expect(dispatches(spy)[0]).toMatchObject({ event_type: 'ci_failure', client_payload: { agent: 'ci_fixer' } });
   });
 
+  it('ci_failure on a specage/* head branch routes to ci_fixer_specage', async () => {
+    const spy = mockCheckSuiteDispatchFlow({ pullRequestHeadRef: 'specage/brace-highlight-autoclose' });
+    const body = { ...checkSuite(), check_suite: { ...checkSuite().check_suite, pull_requests: [{ number: 7 }] } };
+    expect(await (await worker.fetch(githubRequest({ eventType: 'check_suite', body }), baseGithubEnv())).text()).toBe('ok');
+    expect(dispatches(spy)[0]).toMatchObject({ event_type: 'ci_failure', client_payload: { agent: 'ci_fixer_specage' } });
+  });
+
+  it('ci_failure on other branches still routes to ci_fixer', async () => {
+    const spy = mockCheckSuiteDispatchFlow({ pullRequestHeadRef: 'fix/thing' });
+    const body = { ...checkSuite(), check_suite: { ...checkSuite().check_suite, pull_requests: [{ number: 7 }] } };
+    expect(await (await worker.fetch(githubRequest({ eventType: 'check_suite', body }), baseGithubEnv())).text()).toBe('ok');
+    expect(dispatches(spy)[0]).toMatchObject({ client_payload: { agent: 'ci_fixer' } });
+  });
+
+  it('a push-run suite with empty pull_requests resolves PRs via the head commit', async () => {
+    const base = mockCheckSuiteDispatchFlow({ pullRequestHeadRef: 'specage/x' });
+    const handler = base.getMockImplementation();
+    base.mockImplementation(async (input, init) => {
+      const url = new URL(new Request(input, init).url);
+      if (url.pathname.endsWith('/installation')) return new Response('{}', { status: 404 });
+      if (url.pathname.endsWith('/commits/sha-abc123/pulls')) {
+        return new Response(JSON.stringify([{ number: 7, state: 'open' }, { number: 9, state: 'closed' }]), { status: 200 });
+      }
+      return handler(input, init);
+    });
+    const body = { ...checkSuite(), check_suite: { ...checkSuite().check_suite, pull_requests: [] } };
+    expect(await (await worker.fetch(githubRequest({ eventType: 'check_suite', body }), baseGithubEnv())).text()).toBe('ok');
+    const sent = dispatches(base);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ client_payload: { agent: 'ci_fixer_specage' } });
+  });
+
+  it('a suite with no PRs anywhere is ignored with a distinct reason', async () => {
+    const base = mockCheckSuiteDispatchFlow();
+    const handler = base.getMockImplementation();
+    base.mockImplementation(async (input, init) => {
+      const url = new URL(new Request(input, init).url);
+      if (url.pathname.endsWith('/installation')) return new Response('{}', { status: 404 });
+      if (url.pathname.endsWith('/pulls') && url.pathname.includes('/commits/')) return new Response('[]', { status: 200 });
+      return handler(input, init);
+    });
+    const body = { ...checkSuite(), check_suite: { ...checkSuite().check_suite, pull_requests: [] } };
+    expect(await (await worker.fetch(githubRequest({ eventType: 'check_suite', body }), baseGithubEnv())).text())
+      .toBe('ignored: check_suite has no pull requests');
+  });
+
   it('ci_failure follows pr_authors from agentic.yaml, not a hardcoded bot login', async () => {
     const env = specWith(a => { a.ci_fixer.trigger.ci_failure.pr_authors = ['someone-else']; });
     const spy = mockCheckSuiteDispatchFlow();
