@@ -382,6 +382,7 @@ async function logCheckSuiteDecision(env, payload, deliveryId, res) {
 // Push-triggered suites often arrive with an empty `pull_requests` (GitHub
 // only fills it for same-repo head refs it could resolve at creation), so
 // fall back to the open PRs for the suite's head commit.
+/** Lists open PRs containing the commit; throws on a non-OK API response. */
 async function findPullRequestsForSuite(owner, repo, sha, token) {
   const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits/${sha}/pulls`, {
     headers: {
@@ -390,7 +391,7 @@ async function findPullRequestsForSuite(owner, repo, sha, token) {
       'User-Agent': 'the-intern-bot-relay',
     },
   });
-  if (!res.ok) return [];
+  if (!res.ok) throw new Error(`commit pulls lookup failed (${res.status})`);
   const prs = await res.json();
   return (Array.isArray(prs) ? prs : []).filter(p => p.state === 'open').map(p => ({ number: p.number }));
 }
