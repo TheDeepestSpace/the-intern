@@ -140,7 +140,7 @@ async function handleGitHub(request, env) {
   // check_suite has no comment author, so it bypasses the ALLOWED_USERS /
   // mention gating below entirely and is handled as its own flow.
   if (eventType === 'check_suite') {
-    return handleCheckSuite(payload, env);
+    return handleCheckSuite(payload, env, request.headers.get('X-GitHub-Delivery') || '');
   }
 
   // Likewise, a push has no comment author.
@@ -345,14 +345,64 @@ async function getFailingCheckNames(owner, repo, ref, token) {
 // CVE) rather than something this PR's diff introduced — skip the dispatch
 // so multiple bot PRs don't independently "fix" the same base-branch issue
 // (see #109). Fails open (dispatches) when the check-runs lookup errors.
-async function handleCheckSuite(payload, env) {
+async function handleCheckSuite(payload, env, deliveryId = '') {
   const checkSuite = payload.check_suite;
-  const pullRequests = checkSuite?.pull_requests || [];
+  const res = await processCheckSuite(payload, env);
+  // Diagnostics for every failed suite (the reason a suite was or wasn't
+  // dispatched). Facts only; best-effort; irrelevant suites are not logged.
+  if (payload.action === 'completed' && ['failure', 'timed_out'].includes(checkSuite?.conclusion)) {
+    await logCheckSuiteDecision(env, payload, deliveryId, res);
+  }
+  return res;
+}
+
+async function logCheckSuiteDecision(env, payload, deliveryId, res) {
+  try {
+    const cs = payload.check_suite || {};
+    const ts = new Date().toISOString();
+    const rec = {
+      ts,
+      delivery: deliveryId,
+      event: 'check_suite',
+      repo: payload.repository?.full_name || '',
+      branch: cs.head_branch || '',
+      sha: cs.head_sha || '',
+      suite: cs.id ?? null,
+      conclusion: cs.conclusion || '',
+      payload_prs: (cs.pull_requests || []).length,
+      status: res.status,
+      reason: (await res.clone().text()).slice(0, 300),
+    };
+    await appendRelayLog(env, ts, [JSON.stringify(rec)]);
+  } catch {
+    // best-effort by design
+  }
+}
+
+// Push-triggered suites often arrive with an empty `pull_requests` (GitHub
+// only fills it for same-repo head refs it could resolve at creation), so
+// fall back to the open PRs for the suite's head commit.
+/** Lists open PRs containing the commit; throws on a non-OK API response. */
+async function findPullRequestsForSuite(owner, repo, sha, token) {
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits/${sha}/pulls`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'the-intern-bot-relay',
+    },
+  });
+  if (!res.ok) throw new Error(`commit pulls lookup failed (${res.status})`);
+  const prs = await res.json();
+  return (Array.isArray(prs) ? prs : []).filter(p => p.state === 'open').map(p => ({ number: p.number }));
+}
+
+async function processCheckSuite(payload, env) {
+  const checkSuite = payload.check_suite;
+  let pullRequests = checkSuite?.pull_requests || [];
 
   if (
     payload.action !== 'completed' ||
-    !['failure', 'timed_out'].includes(checkSuite?.conclusion) ||
-    pullRequests.length === 0
+    !['failure', 'timed_out'].includes(checkSuite?.conclusion)
   ) {
     return new Response('ignored: check_suite not a relevant failure', { status: 200 });
   }
@@ -375,6 +425,13 @@ async function handleCheckSuite(payload, env) {
 
   try {
     const token = await getInstallationToken(env, installationId);
+
+    if (pullRequests.length === 0) {
+      pullRequests = await findPullRequestsForSuite(sourceOwner, sourceRepo, sha, token);
+      if (pullRequests.length === 0) {
+        return new Response('ignored: check_suite has no pull requests', { status: 200 });
+      }
+    }
 
     let dispatched = 0;
     let deduped = 0;
@@ -733,6 +790,15 @@ async function logRelayDecisions(env, event, payload, deliveryId, report, log) {
       if (r.name && log.length) Object.assign(rec, ...log.filter(l => l.relay === r.name || !l.relay).map(({ relay, ...rest }) => rest));
       return JSON.stringify(rec);
     });
+    await appendRelayLog(env, ts, records);
+  } catch {
+    // best-effort by design
+  }
+}
+
+// Appends JSONL records to the data repo's relay-logs/<day>.jsonl. Throws on
+// failure; callers wrap it (logging is best-effort).
+async function appendRelayLog(env, ts, records) {
     const appJwt = mintAppJwt(env.APP_ID, normalizeKey(getPrivateKey(env)));
     // Always the private data repo (never the pushed repo); each record keeps
     // the source repo in `repo`.
@@ -767,9 +833,6 @@ async function logRelayDecisions(env, event, payload, deliveryId, report, log) {
       });
       if (put.ok || (put.status !== 409 && put.status !== 422)) return;
     }
-  } catch {
-    // best-effort by design
-  }
 }
 
 function normalizeKey(key) {

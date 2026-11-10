@@ -340,6 +340,31 @@ describe('relays', () => {
   });
 });
 
+describe('ci_failure trigger: head_branch route', () => {
+  const AGENTS = `
+  plain:
+    trigger: { ci_failure: { pr_authors: [bot], dedup: 14d } }
+    access: { repos: [{ name: $trigger.ci_failure.repo, scope: read/write }] }
+    prompt: hi
+    request: fix
+  routed:
+    trigger: { ci_failure: { pr_authors: [bot], dedup: 14d, head_branch: 'specage/*' } }
+    access: { repos: [{ name: $trigger.ci_failure.repo, scope: read/write }] }
+    prompt: hi
+    request: fix
+`;
+  const ev = (o = {}) => ({ kind: 'ci_failure', repo: 'Acme/proj', author: '', number: 3, pr_author: 'bot', conclusion: 'failure', head_sha: 'abc', html_url: '', head_ref: 'specage/x', ...o });
+  const s = () => { const r = load(AGENTS); expect(r.errors).toEqual([]); return { ...r.spec, bot: 'bot' }; };
+  it('routes specage/* to the routed agent, everything else to plain', () => {
+    expect(route(s(), ev()).name).toBe('routed');
+    expect(route(s(), ev({ head_ref: 'feature/x' })).name).toBe('plain');
+    expect(route(s(), ev({ head_ref: '' })).name).toBe('plain');
+  });
+  it('rejects head_branch on non-ci_failure system triggers', () => {
+    expect(errs(`  a:\n    trigger: {merge_conflict: {pr_authors: [x], head_branch: 'a/*'}}\n    prompt: hi\n    request: hi\n`).join()).toMatch(/head_branch/);
+  });
+});
+
 describe('comment trigger: head_branch route', () => {
   const AGENTS = `
   default:
