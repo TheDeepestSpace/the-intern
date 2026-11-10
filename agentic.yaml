@@ -143,6 +143,24 @@ agents:
     request: |-
       CI failed on the default branch `$trigger.ci_failure.head_branch` at commit `$trigger.ci_failure.head_sha` (conclusion: $trigger.ci_failure.conclusion; commit author: $trigger.ci_failure.commit_author). Check suite: $trigger.ci_failure.html_url. There is no PR: investigate the failed run logs (`gh run list --commit $trigger.ci_failure.head_sha`). If the failure is transient (e.g. a CI image that did not exist yet), rerun the failed jobs; otherwise open a PR against the default branch with the fix. Do not push to the default branch directly.
 
+  # Same, for PRs from `specage/*` branches: wins over `ci_fixer` there. The
+  # agent also gets the specage data repo (read/write) so its fix, trace and
+  # review commits work; project/data_repo come from `.specage/config.yaml`.
+  ci_fixer_specage:
+    trigger:
+      ci_failure:
+        pr_authors: ["the-intern-bot[bot]"]
+        head_branch: 'specage/*'
+        skip_preexisting: true
+        dedup: 14d
+    access:
+      repos:
+        - { name: $trigger.ci_failure.repo, scope: read/write }
+        - { name: specage_data, scope: read/write }
+    prompt: *headless_prompt
+    request: |-
+      CI is failing on this specage PR (conclusion: $trigger.ci_failure.conclusion). Check suite: $trigger.ci_failure.html_url. This check suite ran against commit `$trigger.ci_failure.head_sha`. Before investigating, compare that commit to the PR's current head (e.g. `gh pr view $issue_number --json headRefOid`). If the PR's head has already moved past `$trigger.ci_failure.head_sha`, this failure is stale - a newer commit supersedes it, so stop immediately without commenting or pushing anything. Otherwise, read `.specage/config.yaml` (data_repo, project) for the specage context, investigate the failing checks and push a fix, then follow the specage protocol for trace/review commits.
+
   # A push to a PR's base branch left a bot PR unmergeable (also sent by the
   # nightly crawl's conflict sweep).
   conflict_fixer:

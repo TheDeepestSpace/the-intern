@@ -279,7 +279,7 @@ function validateTrigger(name, trigger, spec, errors) {
     case 'ci_failure':
     case 'merge_conflict':
     case 'review': {
-      unknownKeys(def, ['repo', 'pr_authors', ...(kind === 'ci_failure' ? ['skip_preexisting', 'dedup', 'branches', 'max_consecutive'] : []),
+      unknownKeys(def, ['repo', 'pr_authors', ...(kind === 'ci_failure' ? ['skip_preexisting', 'dedup', 'branches', 'max_consecutive', 'head_branch'] : []),
         ...(kind === 'review' ? ['reviewers', 'actions'] : [])], w, errors);
       repoRef('repo');
       // The PR-author allowlist is the gate (the bot fixing only its own PRs),
@@ -296,6 +296,9 @@ function validateTrigger(name, trigger, spec, errors) {
       }
       if (def.max_consecutive !== undefined && (def.branches === undefined || !Number.isInteger(def.max_consecutive) || def.max_consecutive < 1)) {
         errors.push(`${w}.max_consecutive: positive integer, only with branches`);
+      }
+      if (def.head_branch !== undefined && (kind !== 'ci_failure' || typeof def.head_branch !== 'string' || !def.head_branch.trim())) {
+        errors.push(`${w}.head_branch: must be a non-empty glob string (PR head branch)`);
       }
       if (def.skip_preexisting !== undefined && typeof def.skip_preexisting !== 'boolean') errors.push(`${w}.skip_preexisting: must be a boolean`);
       if (def.dedup !== undefined) {
@@ -761,7 +764,7 @@ function checkAmbiguity(spec, errors) {
     if (kind === 'comment') key = `comment:${(def.verb || name).toLowerCase()}:${(def.on || COMMENT_ON).slice().sort()}:${def.head_branch ?? ''}`;
     else if (kind === 'commit') key = `commit:${spec.repos[def.repo] || def.repo}:${def.branch}`.toLowerCase();
     else if (kind === 'schedule') key = `schedule:${def.cron}`;
-    else if (SYSTEM_FIELDS[kind]) key = `${kind}:${lc(spec.repos[def.repo] || def.repo || '*')}:${def.branches ? 'branches' : 'pr'}`;
+    else if (SYSTEM_FIELDS[kind]) key = `${kind}:${lc(spec.repos[def.repo] || def.repo || '*')}:${def.branches ? 'branches' : 'pr'}:${def.head_branch ?? ''}`;
     else if (kind === 'telegram') key = 'telegram';
     else if (kind === 'dispatch') key = 'dispatch';
     if (key === null) continue;
@@ -1039,6 +1042,7 @@ function matchAgent(spec, name, event) {
     } else if (!(def.pr_authors || []).map(lc).includes(lc(event.pr_author))) return null;
     const values = { repo: event.repo, author: event.author || '', number: event.number };
     if (kind === 'ci_failure' && !['failure', 'timed_out'].includes(event.conclusion)) return null;
+    if (kind === 'ci_failure' && def.head_branch !== undefined && (!event.head_ref || !globToRegExp(def.head_branch).test(event.head_ref))) return null;
     if (kind === 'merge_conflict' && event.mergeable_state !== 'dirty') return null;
     if (kind === 'review') {
       if (!(def.reviewers || []).map(lc).includes(lc(event.reviewer))) return null;
@@ -1263,7 +1267,10 @@ function route(spec, event) {
   // A head-branch route is more specific than the catch-all: on its branches
   // it wins, everywhere else the default agent still matches.
   if (hits.length > 1) {
-    const routed = hits.filter(h => spec.agents[h.name].trigger.comment?.head_branch !== undefined);
+    const routed = hits.filter(h => {
+      const t = spec.agents[h.name].trigger;
+      return (t.comment ?? t.ci_failure)?.head_branch !== undefined;
+    });
     if (routed.length === 1) return routed[0];
   }
   if (hits.length > 1) throw new Error(`ambiguous: ${hits.map(h => h.name).join(', ')} all match`);
@@ -1383,6 +1390,7 @@ function eventFromSystem(type, raw) {
   };
   if (kind === 'ci_failure') {
     Object.assign(event, {
+      head_ref: pr.head?.ref || '',
       conclusion: raw.check_suite?.conclusion || '',
       head_sha: raw.check_suite?.head_sha || '',
       head_branch: raw.check_suite?.head_branch || '',
