@@ -38,6 +38,7 @@ dispatch:
       access:                                   # extra repos it may grant the agent (up to this scope)
         - { repo: specage_data, scope: read/write }
         - { repo: specage, scope: read }
+        - { repo: $target, scope: read }        # the dispatch's own target repo (e.g. calculator), never a wildcard
       callbacks:
         - { repo: specage, workflow: callback.yml }
       prompts:                                  # `repo:path@ref` sources; refs are always pinned (sha recorded)
