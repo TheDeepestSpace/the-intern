@@ -249,7 +249,7 @@ agents:
         author: the-intern-bot[bot]
     access:
       repos:
-        - { name: $trigger.commit.matcher.project, scope: read }
+        - { name: $trigger.commit.matcher.project, scope: read/write }
         - { name: specage_data, scope: read }
     prompt_file: { repo: specage, path: protocol/PROTOCOL.md }
 

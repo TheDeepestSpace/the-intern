@@ -215,10 +215,10 @@ describe('commit trigger (agent_commit)', () => {
     expect(agent.match.values.matcher).toEqual({ project: 'specage' });
   });
 
-  it('resolves the reviewer (read-only scope) from a review-branch push by the bot', () => {
+  it('resolves the reviewer (project read/write, data read) from a review-branch push by the bot', () => {
     const { outputs } = run('repository_dispatch', push({ agent: 'specage_reviewer', branch: 'specages/specage/review', author: 'the-intern-bot[bot]', message: `review ${SPECAGE}#12` }));
     expect(outputs.agent).toBe('specage_reviewer');
-    expect(JSON.parse(outputs.access)).toEqual([{ repo: SPECAGE, scope: 'read' }, { repo: DATA, scope: 'read' }]);
+    expect(JSON.parse(outputs.access)).toEqual([{ repo: SPECAGE, scope: 'read/write' }, { repo: DATA, scope: 'read' }]);
   });
 
   it('fails closed on an undeclared project, a wrong author, or a worker/workflow agent mismatch', () => {
