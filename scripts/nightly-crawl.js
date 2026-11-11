@@ -296,6 +296,17 @@ async function plan(env = process.env, deps = {}) {
             const sha = detail.head?.sha;
             const inputs = sha ? await fetchCiInputs(token, repo, sha, d) : null;
             if (!inputs || store.classifyCiFailures(inputs).failing.length === 0) continue;
+            const failing = store.classifyCiFailures(inputs).failing;
+            // Same safeguard as the worker's skip_preexisting: ignore failures that also fail on the base.
+            const baseRef = detail.base?.ref;
+            if (baseRef) {
+              const baseInputs = await fetchCiInputs(token, repo, baseRef, d).catch(() => null);
+              const baseFailing = baseInputs ? new Set(store.classifyCiFailures(baseInputs).failing) : null;
+              if (baseFailing && failing.every((n) => baseFailing.has(n))) {
+                console.log(`${key}: CI failing but skipped — preexisting on ${baseRef}`);
+                continue;
+              }
+            }
             const commit = await ghJson(token, `/repos/${repo}/commits/${sha}`, {}, d.fetchImpl);
             const ciDecision = store.shouldDispatchBotCiFix({
               key, state, headSha: sha, headDate: commit?.commit?.committer?.date, now,

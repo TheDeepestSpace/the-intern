@@ -210,6 +210,16 @@ describe('plan', () => {
       expect(second.gh.called('POST /repos/TheDeepestSpace/the-intern/dispatches')).toHaveLength(0);
     });
 
+    it('skips when every failing check also fails on the base branch', async () => {
+      const gh = fakeGitHub({
+        ...routes(new Date(NOW - 2 * DAY).toISOString()),
+        [`GET /repos/acme/widgets/commits/${botPr.base.ref}/check-runs?per_page=100`]: { body: { check_runs: [{ name: 'test', status: 'completed', conclusion: 'failure' }] } },
+        [`GET /repos/acme/widgets/commits/${botPr.base.ref}/status`]: { body: { total_count: 0, state: 'pending', statuses: [] } },
+      });
+      await plan(baseEnv, { fetchImpl: gh.fetchImpl, mintToken: async () => 't', enumerateRepos: async () => repos, now: () => NOW, ...memoryStore() });
+      expect(gh.called('POST /repos/TheDeepestSpace/the-intern/dispatches')).toHaveLength(0);
+    });
+
     it('leaves a freshly-pushed red head to the worker', async () => {
       const { gh } = await go(new Date(NOW - 3600000).toISOString());
       expect(gh.called('POST /repos/TheDeepestSpace/the-intern/dispatches')).toHaveLength(0);
