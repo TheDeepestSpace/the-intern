@@ -360,8 +360,8 @@ describe('ci_failure trigger: head_branch route', () => {
     expect(route(s(), ev({ head_ref: 'feature/x' })).name).toBe('plain');
     expect(route(s(), ev({ head_ref: '' })).name).toBe('plain');
   });
-  it('rejects head_branch on non-ci_failure system triggers', () => {
-    expect(errs(`  a:\n    trigger: {merge_conflict: {pr_authors: [x], head_branch: 'a/*'}}\n    prompt: hi\n    request: hi\n`).join()).toMatch(/head_branch/);
+  it('rejects head_branch on review triggers (allowed on ci_failure and merge_conflict)', () => {
+    expect(errs(`  a:\n    trigger: {review: {pr_authors: [x], reviewers: [y], head_branch: 'a/*'}}\n    prompt: hi\n    request: hi\n`).join()).toMatch(/head_branch/);
   });
 });
 

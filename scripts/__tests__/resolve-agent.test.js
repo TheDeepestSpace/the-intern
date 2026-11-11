@@ -142,6 +142,18 @@ describe('comment trigger (review comment, system events, workflow_dispatch)', (
     expect(text).toBe('A push to main left this PR unmergeable (mergeable_state: dirty). Merge or rebase the latest default branch into this PR\'s branch, resolve the conflicts, and push the fix.');
   });
 
+  it('routes merge_conflict on a specage/* head branch to conflict_fixer_specage', () => {
+    const { outputs, text } = run('repository_dispatch', dispatch('merge_conflict', {
+      raw: {
+        installation: { id: 1 }, repository: { full_name: INTERN },
+        pull_request: { number: 4, user: { login: BOT }, head: { ref: 'specage/foo' } },
+        merge_conflict: { mergeable_state: 'dirty', base_ref: 'main' },
+      },
+    }));
+    expect(outputs).toMatchObject({ agent: 'conflict_fixer_specage', issue_number: '4', event_type: 'merge_conflict' });
+    expect(text).toMatch(/specage PR unmergeable.*\.specage\/config\.yaml.*`Spec:` trailers/);
+  });
+
   it('routes coderabbit_review to review_responder', () => {
     const { outputs, text } = run('repository_dispatch', dispatch('coderabbit_review', {
       raw: {

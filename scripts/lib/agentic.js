@@ -279,7 +279,8 @@ function validateTrigger(name, trigger, spec, errors) {
     case 'ci_failure':
     case 'merge_conflict':
     case 'review': {
-      unknownKeys(def, ['repo', 'pr_authors', ...(kind === 'ci_failure' ? ['skip_preexisting', 'dedup', 'branches', 'max_consecutive', 'head_branch'] : []),
+      unknownKeys(def, ['repo', 'pr_authors', ...(kind === 'ci_failure' ? ['skip_preexisting', 'dedup', 'branches', 'max_consecutive'] : []),
+        ...(kind === 'ci_failure' || kind === 'merge_conflict' ? ['head_branch'] : []),
         ...(kind === 'review' ? ['reviewers', 'actions'] : [])], w, errors);
       repoRef('repo');
       // The PR-author allowlist is the gate (the bot fixing only its own PRs),
@@ -297,7 +298,7 @@ function validateTrigger(name, trigger, spec, errors) {
       if (def.max_consecutive !== undefined && (def.branches === undefined || !Number.isInteger(def.max_consecutive) || def.max_consecutive < 1)) {
         errors.push(`${w}.max_consecutive: positive integer, only with branches`);
       }
-      if (def.head_branch !== undefined && (kind !== 'ci_failure' || typeof def.head_branch !== 'string' || !def.head_branch.trim())) {
+      if (def.head_branch !== undefined && (!['ci_failure', 'merge_conflict'].includes(kind) || typeof def.head_branch !== 'string' || !def.head_branch.trim())) {
         errors.push(`${w}.head_branch: must be a non-empty glob string (PR head branch)`);
       }
       if (def.skip_preexisting !== undefined && typeof def.skip_preexisting !== 'boolean') errors.push(`${w}.skip_preexisting: must be a boolean`);
@@ -1044,7 +1045,7 @@ function matchAgent(spec, name, event) {
     } else if (!(def.pr_authors || []).map(lc).includes(lc(event.pr_author))) return null;
     const values = { repo: event.repo, author: event.author || '', number: event.number };
     if (kind === 'ci_failure' && !['failure', 'timed_out'].includes(event.conclusion)) return null;
-    if (kind === 'ci_failure' && def.head_branch !== undefined && (!event.head_ref || !globToRegExp(def.head_branch).test(event.head_ref))) return null;
+    if ((kind === 'ci_failure' || kind === 'merge_conflict') && def.head_branch !== undefined && (!event.head_ref || !globToRegExp(def.head_branch).test(event.head_ref))) return null;
     if (kind === 'merge_conflict' && event.mergeable_state !== 'dirty') return null;
     if (kind === 'review') {
       if (!(def.reviewers || []).map(lc).includes(lc(event.reviewer))) return null;
@@ -1271,7 +1272,7 @@ function route(spec, event) {
   if (hits.length > 1) {
     const routed = hits.filter(h => {
       const t = spec.agents[h.name].trigger;
-      return (t.comment ?? t.ci_failure)?.head_branch !== undefined;
+      return (t.comment ?? t.ci_failure ?? t.merge_conflict)?.head_branch !== undefined;
     });
     if (routed.length === 1) return routed[0];
   }
@@ -1402,6 +1403,7 @@ function eventFromSystem(type, raw) {
     });
   } else if (kind === 'merge_conflict') {
     Object.assign(event, {
+      head_ref: pr.head?.ref || '',
       base_ref: raw.merge_conflict?.base_ref || '',
       mergeable_state: raw.merge_conflict?.mergeable_state || '',
     });
