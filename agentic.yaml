@@ -175,6 +175,22 @@ agents:
     request: |-
       A push to $trigger.merge_conflict.base_ref left this PR unmergeable (mergeable_state: $trigger.merge_conflict.mergeable_state). Merge or rebase the latest default branch into this PR's branch, resolve the conflicts, and push the fix.
 
+  # Same, for PRs from `specage/*` branches: wins over `conflict_fixer` there.
+  # Gets the specage data repo (read/write) like ci_fixer_specage. No separate
+  # attempt cap: like conflict_fixer it fires once per push/crawl sweep.
+  conflict_fixer_specage:
+    trigger:
+      merge_conflict:
+        pr_authors: ["the-intern-bot[bot]"]
+        head_branch: 'specage/*'
+    access:
+      repos:
+        - { name: $trigger.merge_conflict.repo, scope: read/write }
+        - { name: specage_data, scope: read/write }
+    prompt: *headless_prompt
+    request: |-
+      A push to $trigger.merge_conflict.base_ref left this specage PR unmergeable (mergeable_state: $trigger.merge_conflict.mergeable_state). Read `.specage/config.yaml` (data_repo, project) for the specage context, then merge or rebase the latest default branch into this PR's branch, resolve the conflicts, and push the fix. Follow the specage protocol for trace/review commits, keeping the `Spec:` trailers.
+
   # CodeRabbit submitted a review on a bot PR.
   review_responder:
     trigger:
