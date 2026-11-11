@@ -240,10 +240,12 @@ async function plan(env = process.env, deps = {}) {
     openKeys: [],
     conflicts: [],
     dependabot: [],
+    rebases: [],
     ciFailures: [],
     reviews: [],
   };
   const dispatchedKeys = [];
+  const actionMutations = [];
   const since = new Date(now - store.CONFLICT_DEDUPE_MS).toISOString();
 
   for (const { repo, installationId, defaultBranch } of repos) {
@@ -305,11 +307,10 @@ async function plan(env = process.env, deps = {}) {
             needsReview: store.needsReview(state.dependabot[key], diffHash),
           };
           planOut.dependabot.push(candidate);
-          const ciFix = await requestCiFailureFix(token, repo, pr.number, detail.head?.sha, dryRun, d);
-          if (ciFix.requested) {
-            planOut.ciFailures.push({ key, url: detail.html_url, dispatched: !dryRun });
-            console.log(`${key}: CI failing${dryRun ? ' (dry run, not commented)' : ', asked the bot to investigate'}.`);
-          }
+          const maint = await maintainDependabotPr({ token, repo, detail, key, state, dryRun, now }, d);
+          actionMutations.push(...maint.mutations);
+          if (maint.rebase) planOut.rebases.push(maint.rebase);
+          if (maint.ciFix) planOut.ciFailures.push(maint.ciFix);
           console.log(`${key}: dependabot ${candidate.classification} update (${parsed.package}) — ${candidate.needsReview ? 'needs review' : 'verdict cached'}.`);
         }
       } catch (err) {
@@ -326,10 +327,11 @@ async function plan(env = process.env, deps = {}) {
     console.log(`${needing.length - planOut.reviews.length} review(s) deferred to a later run (MAX_REVIEWS=${maxReviews}).`);
   }
 
-  if (dispatchedKeys.length > 0) {
+  if (dispatchedKeys.length > 0 || actionMutations.length > 0) {
     await (deps.updateState || updateState)((current) => {
       let next = current;
       for (const key of dispatchedKeys) next = store.markConflictDispatched(next, key, now);
+      for (const m of actionMutations) next = m(next);
       return { state: next };
     });
   }
@@ -338,7 +340,7 @@ async function plan(env = process.env, deps = {}) {
   fs.writeFileSync(planFile, `${JSON.stringify(planOut, null, 2)}\n`);
   appendOutput(env, 'has_reviews', planOut.reviews.length > 0 ? 'true' : 'false');
   appendOutput(env, 'matrix', JSON.stringify({ include: planOut.reviews }));
-  console.log(`Plan: ${planOut.conflicts.length} conflicting bot PR(s), ${planOut.dependabot.length} dependabot PR(s), ${planOut.reviews.length} review(s) to run.`);
+  console.log(`Plan: ${planOut.conflicts.length} conflicting bot PR(s), ${planOut.dependabot.length} dependabot PR(s) (${planOut.rebases.length} rebase, ${planOut.ciFailures.length} CI-fix), ${planOut.reviews.length} review(s) to run.`);
   return planOut;
 }
 
@@ -474,15 +476,48 @@ async function fetchCi(token, repo, sha, deps) {
   return store.isCiGreen(await fetchCiInputs(token, repo, sha, deps));
 }
 
-// Asks the bot to look into a Dependabot PR whose CI failed. Once per PR:
-// skipped if an earlier crawl comment (marker) is already there.
-async function requestCiFailureFix(token, repo, number, sha, dryRun, deps) {
+// Dependabot maintenance for one PR: ask Dependabot to rebase when the PR is
+// behind/conflicting, otherwise dispatch the bot when CI has a definite
+// failure on the head. Returns the actions taken plus state mutations; the
+// caller persists them. Rerunnable/infra failures are left alone.
+async function maintainDependabotPr({ token, repo, detail, key, state, dryRun, now }, deps) {
+  const out = { rebase: null, ciFix: null, mutations: [] };
+  const action = state.depActions?.[key] || {};
+  if (store.needsRebase(detail)) {
+    const decision = store.shouldRequestRebase({ action, now });
+    if (!decision.request) {
+      console.log(`${key}: needs rebase but skipped — ${decision.reason}`);
+      return out;
+    }
+    if (!dryRun) {
+      await postComment(token, repo, detail.number, store.REBASE_COMMENT, deps);
+      out.mutations.push((s) => store.markRebaseRequested(s, key, now));
+    }
+    out.rebase = { key, url: detail.html_url, requested: !dryRun, reason: detail.mergeable_state || 'conflicting' };
+    console.log(`${key}: ${detail.mergeable_state || 'conflicting'}, ${dryRun ? 'would comment' : 'commented'} "${store.REBASE_COMMENT}".`);
+    return out;
+  }
+  if (action.rebaseAttempts || action.lastRebaseAt) out.mutations.push((s) => store.clearRebaseState(s, key));
+
+  const sha = detail.head?.sha;
   const inputs = await fetchCiInputs(token, repo, sha, deps);
-  if (!store.isCiFailing(inputs)) return { requested: false, reason: 'CI not failing' };
-  const comments = await ghPaginate(token, `/repos/${repo}/issues/${number}/comments?per_page=100`, deps.fetchImpl);
-  if (store.hasCiFailureRequest(comments)) return { requested: false, reason: 'already requested' };
-  if (!dryRun) await postComment(token, repo, number, store.ciFailureComment(), deps);
-  return { requested: true, reason: null };
+  const { failing, rerunnable } = store.classifyCiFailures(inputs);
+  if (failing.length === 0) {
+    if (rerunnable.length > 0) console.log(`${key}: only rerunnable/infra failures (${rerunnable.join(', ')}); not dispatching.`);
+    return out;
+  }
+  const decision = store.shouldDispatchCiFix({ action, headSha: sha });
+  if (!decision.dispatch) {
+    console.log(`${key}: CI failing but skipped — ${decision.reason}`);
+    return out;
+  }
+  if (!dryRun) {
+    await postComment(token, repo, detail.number, store.ciFailureComment({ checks: failing, sha }), deps);
+    out.mutations.push((s) => store.markCiFixDispatched(s, key, sha, now));
+  }
+  out.ciFix = { key, url: detail.html_url, dispatched: !dryRun, checks: failing };
+  console.log(`${key}: CI failing (${failing.join(', ')}), ${dryRun ? 'would ask' : 'asked'} the bot to fix.`);
+  return out;
 }
 
 async function act(env = process.env, deps = {}) {
@@ -502,6 +537,8 @@ async function act(env = process.env, deps = {}) {
     pending: [],
     errors: [],
     conflicts: planOut.conflicts.filter((c) => c.dispatched),
+    rebases: (planOut.rebases || []).filter((r) => r.requested),
+    ciFixes: (planOut.ciFailures || []).filter((c) => c.dispatched),
   };
   const mutations = [];
   const mergeMethods = new Map();

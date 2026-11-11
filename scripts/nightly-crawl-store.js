@@ -18,6 +18,11 @@ const CONFIRMATION_DELAY_MS = 2 * DAY_MS;
 // A conflict-fix dispatch for the same PR is not repeated within this window.
 const CONFLICT_DEDUPE_MS = DAY_MS;
 const STATE_VERSION = 1;
+// Dependabot maintenance nudges (rebase request / CI-fix dispatch): at most
+// this many per PR, and a rebase request is not repeated within the window.
+const MAX_REBASE_ATTEMPTS = 3;
+const MAX_CI_FIX_ATTEMPTS = 3;
+const REBASE_DEDUPE_MS = DAY_MS;
 
 // Marker embedded in every comment the crawl posts, so a later run can tell
 // its own comments apart from the agent's / humans' without parsing prose.
@@ -28,7 +33,7 @@ function prKey(repo, number) {
 }
 
 function emptyState() {
-  return { version: STATE_VERSION, conflicts: {}, dependabot: {} };
+  return { version: STATE_VERSION, conflicts: {}, dependabot: {}, depActions: {} };
 }
 
 // Never falls back to an empty state on malformed input: the caller would
@@ -48,6 +53,7 @@ function parseState(raw) {
     version: STATE_VERSION,
     conflicts: parsed.conflicts && typeof parsed.conflicts === 'object' ? parsed.conflicts : {},
     dependabot: parsed.dependabot && typeof parsed.dependabot === 'object' ? parsed.dependabot : {},
+    depActions: parsed.depActions && typeof parsed.depActions === 'object' ? parsed.depActions : {},
   };
 }
 
@@ -235,14 +241,90 @@ function isCiFailing({ checkRuns = [], combinedStatus = null } = {}) {
 
 const CI_FAILURE_MARKER = '<!-- the-intern-nightly-crawl:ci-failure -->';
 
-function ciFailureComment() {
-  return `${CI_FAILURE_MARKER}\n@the-intern-bot CI is failing on this Dependabot PR. Please investigate and resolve if possible.`;
+// Conclusions that say "the run didn't give a verdict" (infra, timeout,
+// cancelled, needs approval) rather than "the code is broken": a rerun is the
+// remedy, so they never dispatch the agent.
+const RERUNNABLE_CONCLUSIONS = new Set(['timed_out', 'cancelled', 'startup_failure', 'stale', 'action_required']);
+
+// Splits the head commit's failures into `failing` (a definite failure an
+// agent could fix) and `rerunnable` (infra/flaky-looking). Legacy commit
+// statuses in failure/error state count as failing.
+function classifyCiFailures({ checkRuns = [], combinedStatus = null } = {}) {
+  const done = checkRuns.filter((c) => c.status === 'completed');
+  const failing = done.filter((c) => c.conclusion === 'failure').map((c) => c.name);
+  const rerunnable = done.filter((c) => RERUNNABLE_CONCLUSIONS.has(c.conclusion)).map((c) => c.name);
+  if (combinedStatus?.total_count > 0) {
+    for (const st of combinedStatus.statuses || []) {
+      if (st.state === 'failure' || st.state === 'error') failing.push(st.context);
+    }
+    if ((combinedStatus.state === 'failure' || combinedStatus.state === 'error') && !(combinedStatus.statuses || []).length) {
+      failing.push('commit status');
+    }
+  }
+  return { failing, rerunnable };
 }
 
-// Asked at most once per PR, ever: any earlier comment carrying the marker
-// means the investigation was already requested.
+function ciFailureComment({ checks = [], sha = '' } = {}) {
+  const names = checks.length ? ` Failing check${checks.length === 1 ? '' : 's'}: ${checks.map((c) => `\`${c}\``).join(', ')}.` : '';
+  const at = sha ? ` (head ${sha.slice(0, 7)})` : '';
+  return `${CI_FAILURE_MARKER}\n@the-intern-bot CI is failing on this Dependabot PR${at}.${names} Please investigate the failure and push a fix to this branch if it is caused by the dependency update.`;
+}
+
+// Kept for callers that only want to know whether the crawl ever asked.
 function hasCiFailureRequest(comments = []) {
   return comments.some((c) => (c.body || '').includes(CI_FAILURE_MARKER));
+}
+
+// PR needs Dependabot to rebase it: behind base or conflicting.
+function needsRebase(pr) {
+  return pr.mergeable_state === 'behind' || isConflicting(pr);
+}
+
+const REBASE_COMMENT = '@dependabot rebase';
+
+// `action` is the PR's depActions record: { rebaseAttempts, lastRebaseAt }.
+function shouldRequestRebase({ action = {}, now = Date.now() }) {
+  const attempts = action.rebaseAttempts || 0;
+  if (attempts >= MAX_REBASE_ATTEMPTS) return { request: false, reason: `rebase attempt cap reached (${attempts})` };
+  if (action.lastRebaseAt && now - Date.parse(action.lastRebaseAt) < REBASE_DEDUPE_MS) {
+    return { request: false, reason: `rebase already requested at ${action.lastRebaseAt}` };
+  }
+  return { request: true, reason: null };
+}
+
+// Once per head SHA, at most MAX_CI_FIX_ATTEMPTS in total per PR. `action`
+// holds { ciFixAttempts, ciFixShas: [...] }.
+function shouldDispatchCiFix({ action = {}, headSha }) {
+  if ((action.ciFixShas || []).includes(headSha)) return { dispatch: false, reason: `already dispatched for ${headSha}` };
+  if ((action.ciFixAttempts || 0) >= MAX_CI_FIX_ATTEMPTS) return { dispatch: false, reason: `CI-fix attempt cap reached (${action.ciFixAttempts})` };
+  return { dispatch: true, reason: null };
+}
+
+function patchAction(state, key, fn) {
+  const existing = state.depActions?.[key] || {};
+  return { ...state, depActions: { ...state.depActions, [key]: fn(existing) } };
+}
+
+function markRebaseRequested(state, key, now = Date.now()) {
+  return patchAction(state, key, (a) => ({ ...a, rebaseAttempts: (a.rebaseAttempts || 0) + 1, lastRebaseAt: new Date(now).toISOString() }));
+}
+
+// The PR no longer needs a rebase: forget the attempts so a later conflict
+// starts with a fresh budget.
+function clearRebaseState(state, key) {
+  const existing = state.depActions?.[key];
+  if (!existing || (!existing.rebaseAttempts && !existing.lastRebaseAt)) return state;
+  const { rebaseAttempts, lastRebaseAt, ...rest } = existing;
+  return { ...state, depActions: { ...state.depActions, [key]: rest } };
+}
+
+function markCiFixDispatched(state, key, headSha, now = Date.now()) {
+  return patchAction(state, key, (a) => ({
+    ...a,
+    ciFixAttempts: (a.ciFixAttempts || 0) + 1,
+    ciFixShas: [...(a.ciFixShas || []), headSha],
+    lastCiFixAt: new Date(now).toISOString(),
+  }));
 }
 
 const MERGEABLE_STATES_OK = new Set(['clean', 'has_hooks']);
@@ -335,7 +417,7 @@ function pruneState(state, openKeys, crawledRepos) {
   const filter = (obj) => Object.fromEntries(
     Object.entries(obj || {}).filter(([k]) => keep.has(k) || !crawled.has(repoOf(k)))
   );
-  return { ...state, conflicts: filter(state.conflicts), dependabot: filter(state.dependabot) };
+  return { ...state, conflicts: filter(state.conflicts), dependabot: filter(state.dependabot), depActions: filter(state.depActions) };
 }
 
 // ------------------------------------------------------------------- report
@@ -366,15 +448,19 @@ function buildReport(events, { runUrl = '', date = new Date() } = {}) {
   const pending = events.pending || [];
   const errors = events.errors || [];
   const conflicts = events.conflicts || [];
+  const rebases = events.rebases || [];
+  const ciFixes = events.ciFixes || [];
   const dateLabel = new Date(date).toISOString().slice(0, 10);
-  const shouldSend = merged.length + flagged.length + confirmed.length + conflicts.length > 0;
-  const flagOnly = flagged.length > 0 && merged.length + confirmed.length + conflicts.length === 0;
+  const shouldSend = merged.length + flagged.length + confirmed.length + conflicts.length + rebases.length + ciFixes.length > 0;
+  const flagOnly = flagged.length > 0 && merged.length + confirmed.length + conflicts.length + rebases.length + ciFixes.length === 0;
 
   const subjectParts = [];
   if (merged.length) subjectParts.push(`${merged.length} merged`);
   if (flagged.length) subjectParts.push(`${flagged.length} suspicious`);
   if (confirmed.length) subjectParts.push(`${confirmed.length} confirmed`);
   if (conflicts.length) subjectParts.push(`${conflicts.length} conflict fix${conflicts.length === 1 ? '' : 'es'}`);
+  if (rebases.length) subjectParts.push(`${rebases.length} rebase${rebases.length === 1 ? '' : 's'} requested`);
+  if (ciFixes.length) subjectParts.push(`${ciFixes.length} CI fix${ciFixes.length === 1 ? '' : 'es'} dispatched`);
   const subject = `[the-intern] nightly crawl ${dateLabel}: ${subjectParts.join(', ') || 'nothing to report'}`;
 
   const sections = [];
@@ -389,6 +475,12 @@ function buildReport(events, { runUrl = '', date = new Date() } = {}) {
   }
   if (conflicts.length) {
     sections.push(`🔧 Conflict fixes dispatched (${conflicts.length})\n${conflicts.map((c) => `- ${c.key}\n  ${c.url}`).join('\n')}`);
+  }
+  if (rebases.length) {
+    sections.push(`🔁 @dependabot rebase requested (${rebases.length})\n${rebases.map((c) => `- ${c.key} (${c.reason})\n  ${c.url}`).join('\n')}`);
+  }
+  if (ciFixes.length) {
+    sections.push(`🩹 CI failure dispatched to the-intern (${ciFixes.length})\n${ciFixes.map((c) => `- ${c.key}: ${(c.checks || []).join(', ') || 'failing checks'}\n  ${c.url}`).join('\n')}`);
   }
   if (pending.length) {
     sections.push(`⏳ Waiting (${pending.length})\n${pending.map((i) => `- ${i.key}: ${describeUpdate(i)} — ${i.reason}`).join('\n')}`);
@@ -405,6 +497,8 @@ function buildReport(events, { runUrl = '', date = new Date() } = {}) {
     flagged.length ? `⚠️ suspicious: ${flagged.map((i) => `${i.key} (${describeUpdate(i)})`).join(', ')}` : null,
     confirmed.length ? `🕑 confirmed: ${confirmed.map((i) => i.key).join(', ')}` : null,
     conflicts.length ? `🔧 conflict fixes: ${conflicts.map((c) => c.key).join(', ')}` : null,
+    rebases.length ? `🔁 rebase requested: ${rebases.map((c) => c.key).join(', ')}` : null,
+    ciFixes.length ? `🩹 CI fix dispatched: ${ciFixes.map((c) => c.key).join(', ')}` : null,
     errors.length ? `❌ errors: ${errors.length}` : null,
     runUrl ? `Run: ${runUrl}` : null,
   ].filter(Boolean).join('\n');
@@ -452,6 +546,16 @@ module.exports = {
   parseVerdict,
   isCiGreen,
   isCiFailing,
+  classifyCiFailures,
+  needsRebase,
+  REBASE_COMMENT,
+  MAX_REBASE_ATTEMPTS,
+  MAX_CI_FIX_ATTEMPTS,
+  shouldRequestRebase,
+  shouldDispatchCiFix,
+  markRebaseRequested,
+  clearRebaseState,
+  markCiFixDispatched,
   CI_FAILURE_MARKER,
   ciFailureComment,
   hasCiFailureRequest,

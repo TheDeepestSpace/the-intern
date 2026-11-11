@@ -528,3 +528,106 @@ describe('report', () => {
     expect(postReportComment).not.toHaveBeenCalled();
   });
 });
+
+describe('plan: dependabot rebase + CI-failure dispatch', () => {
+  const baseEnv = { GH_TOKEN: 'gha-token', GITHUB_REPOSITORY: 'TheDeepestSpace/the-intern', PLAN_FILE: 'plan.json' };
+  const repos = [{ repo: 'acme/widgets', installationId: 11 }];
+  const diffAware = (p) => ({ headers }) => (headers.Accept.includes('diff') ? { text: 'd' } : { body: p });
+  const ci = (runs, statuses) => ({
+    'GET /repos/acme/widgets/commits/sha1/check-runs?per_page=100': { body: { check_runs: runs } },
+    'GET /repos/acme/widgets/commits/sha1/status': { body: statuses || { total_count: 0, state: 'pending', statuses: [] } },
+  });
+  const failed = [{ name: 'test', status: 'completed', conclusion: 'failure' }, { name: 'lint', status: 'completed', conclusion: 'success' }];
+  const run = (p, extra, store = memoryStore(), env = {}) => {
+    const gh = fakeGitHub({
+      'GET /repos/acme/widgets/pulls?state=open&per_page=100': { body: [p] },
+      'GET /repos/acme/widgets/dependabot/alerts?state=open&per_page=100': { body: [] },
+      'GET /repos/acme/widgets/pulls/1': diffAware(p),
+      'POST /repos/acme/widgets/issues/1/comments': { body: {} },
+      ...extra,
+    });
+    return plan({ ...baseEnv, ...env }, { fetchImpl: gh.fetchImpl, mintToken: async () => 't', enumerateRepos: async () => repos, now: () => NOW, ...store }).then((result) => ({ result, gh, store }));
+  };
+  const comments = (gh) => gh.called('POST /repos/acme/widgets/issues/1/comments').map((c) => c.body.body);
+
+  it('comments @dependabot rebase on a behind PR, records the attempt, and skips CI dispatch', async () => {
+    const { result, gh, store } = await run(pr({ mergeable_state: 'behind' }), ci(failed));
+    expect(comments(gh)).toEqual(['@dependabot rebase']);
+    expect(result.rebases).toEqual([{ key: 'acme/widgets#1', url: 'https://github.com/acme/widgets/pull/1', requested: true, reason: 'behind' }]);
+    expect(result.ciFailures).toEqual([]);
+    expect(store.get().depActions['acme/widgets#1']).toMatchObject({ rebaseAttempts: 1 });
+  });
+
+  it('requests a rebase for a conflicting PR', async () => {
+    const { gh } = await run(pr({ mergeable: false, mergeable_state: 'dirty' }), {});
+    expect(comments(gh)).toEqual(['@dependabot rebase']);
+  });
+
+  it('does not repeat a rebase request within a day or beyond the attempt cap', async () => {
+    const recent = { ...emptyState(), depActions: { 'acme/widgets#1': { rebaseAttempts: 1, lastRebaseAt: new Date(NOW - 1000).toISOString() } } };
+    expect(comments((await run(pr({ mergeable_state: 'behind' }), {}, memoryStore(recent))).gh)).toEqual([]);
+    const capped = { ...emptyState(), depActions: { 'acme/widgets#1': { rebaseAttempts: 3, lastRebaseAt: new Date(NOW - 5 * DAY).toISOString() } } };
+    expect(comments((await run(pr({ mergeable_state: 'behind' }), {}, memoryStore(capped))).gh)).toEqual([]);
+    const old = { ...emptyState(), depActions: { 'acme/widgets#1': { rebaseAttempts: 1, lastRebaseAt: new Date(NOW - 2 * DAY).toISOString() } } };
+    const again = await run(pr({ mergeable_state: 'behind' }), {}, memoryStore(old));
+    expect(comments(again.gh)).toEqual(['@dependabot rebase']);
+    expect(again.store.get().depActions['acme/widgets#1'].rebaseAttempts).toBe(2);
+  });
+
+  it('resets rebase attempts once the PR no longer needs a rebase', async () => {
+    const st = { ...emptyState(), depActions: { 'acme/widgets#1': { rebaseAttempts: 2, lastRebaseAt: new Date(NOW - 5 * DAY).toISOString() } } };
+    const { store } = await run(pr(), ci([{ name: 'test', status: 'completed', conclusion: 'success' }]), memoryStore(st));
+    expect(store.get().depActions['acme/widgets#1'].rebaseAttempts).toBeUndefined();
+  });
+
+  it('dispatches the bot with failing check names once per head SHA', async () => {
+    const first = await run(pr(), ci(failed));
+    expect(comments(first.gh)).toHaveLength(1);
+    expect(comments(first.gh)[0]).toContain('@the-intern-bot');
+    expect(comments(first.gh)[0]).toContain('`test`');
+    expect(comments(first.gh)[0]).not.toContain('`lint`');
+    expect(first.result.ciFailures).toEqual([{ key: 'acme/widgets#1', url: 'https://github.com/acme/widgets/pull/1', dispatched: true, checks: ['test'] }]);
+    expect(first.store.get().depActions['acme/widgets#1']).toMatchObject({ ciFixAttempts: 1, ciFixShas: ['sha1'] });
+    // same SHA next night: no repeat
+    const second = await run(pr(), ci(failed), memoryStore(first.store.get()));
+    expect(comments(second.gh)).toEqual([]);
+  });
+
+  it('dispatches again on a new head SHA until the attempt cap', async () => {
+    const st = { ...emptyState(), depActions: { 'acme/widgets#1': { ciFixAttempts: 1, ciFixShas: ['old'] } } };
+    expect(comments((await run(pr(), ci(failed), memoryStore(st))).gh)).toHaveLength(1);
+    const capped = { ...emptyState(), depActions: { 'acme/widgets#1': { ciFixAttempts: 3, ciFixShas: ['a', 'b', 'c'] } } };
+    expect(comments((await run(pr(), ci(failed), memoryStore(capped))).gh)).toEqual([]);
+  });
+
+  it('does not dispatch for infra/rerunnable failures or passing CI', async () => {
+    const infra = [{ name: 'build', status: 'completed', conclusion: 'cancelled' }, { name: 'e2e', status: 'completed', conclusion: 'timed_out' }, { name: 'x', status: 'completed', conclusion: 'startup_failure' }];
+    expect(comments((await run(pr(), ci(infra))).gh)).toEqual([]);
+    expect(comments((await run(pr(), ci([{ name: 't', status: 'completed', conclusion: 'success' }]))).gh)).toEqual([]);
+  });
+
+  it('counts failing legacy commit statuses by context', async () => {
+    const { gh } = await run(pr(), ci([], { total_count: 1, state: 'failure', statuses: [{ context: 'ci/circle', state: 'failure' }] }));
+    expect(comments(gh)[0]).toContain('`ci/circle`');
+  });
+
+  it('dry run comments nothing and records nothing', async () => {
+    const { result, gh, store } = await run(pr({ mergeable_state: 'behind' }), {}, memoryStore(), { DRY_RUN: 'true' });
+    expect(comments(gh)).toEqual([]);
+    expect(result.rebases[0].requested).toBe(false);
+    expect(store.updateState).not.toHaveBeenCalled();
+  });
+
+  it('act and report surface both actions', async () => {
+    const { result } = await run(pr({ mergeable_state: 'behind' }), {});
+    const ciRes = (await run(pr(), ci(failed))).result;
+    fs.writeFileSync('plan.json', JSON.stringify({ ...result, ciFailures: ciRes.ciFailures, dependabot: [] }));
+    const events = await act({ ...baseEnv, PLAN_FILE: 'plan.json', VERDICTS_DIR: 'none', EVENTS_FILE: 'ev.json' }, { fetchImpl: fakeGitHub({}).fetchImpl, mintToken: async () => 't', ...memoryStore(), now: () => NOW });
+    expect(events.rebases).toHaveLength(1);
+    expect(events.ciFixes).toHaveLength(1);
+    const sent = [];
+    await report({ ...baseEnv, EVENTS_FILE: 'ev.json' }, { postReportComment: async (b) => { sent.push(b); return { url: '' }; }, now: () => NOW });
+    expect(sent[0].text).toContain('@dependabot rebase requested (1)');
+    expect(sent[0].text).toContain('CI failure dispatched to the-intern (1)');
+  });
+});

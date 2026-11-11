@@ -51,6 +51,7 @@ describe('parseState', () => {
       version: 1,
       conflicts: {},
       dependabot: { 'a/b#1': { verdict: 'safe' } },
+      depActions: {},
     });
   });
 });
@@ -387,9 +388,9 @@ describe('ci failure request', () => {
     expect(isCiFailing({ checkRuns: [{ status: 'completed', conclusion: 'success' }] })).toBe(false);
   });
 
-  it('dedupes on the marker comment', () => {
+  it('detects the marker comment and names failing checks', () => {
     expect(hasCiFailureRequest([{ body: 'hi' }])).toBe(false);
     expect(hasCiFailureRequest([{ body: ciFailureComment() }])).toBe(true);
-    expect(ciFailureComment()).toContain('@the-intern-bot');
+    expect(ciFailureComment({ checks: ['a', 'b'], sha: 'abcdef123' })).toMatch(/@the-intern-bot.*abcdef1.*`a`, `b`/s);
   });
 });
