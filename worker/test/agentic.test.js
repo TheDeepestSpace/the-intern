@@ -408,7 +408,10 @@ describe('system triggers: ci_failure / merge_conflict / review', () => {
       const handler = spy.getMockImplementation();
       spy.mockImplementation(async (input, init) => {
         // A PR-less suite off the default branch falls back to the commit's PRs: none.
-        if (new URL(new Request(input, init).url).pathname.endsWith('/commits/sha-abc123/pulls')) return new Response('[]', { status: 200 });
+        const { pathname } = new URL(new Request(input, init).url);
+        if (pathname.endsWith('/commits/sha-abc123/pulls')) return new Response('[]', { status: 200 });
+        // Relay-log write is best-effort; let its installation lookup fail quietly.
+        if (pathname.endsWith('/installation')) return new Response('nope', { status: 404 });
         return handler(input, init);
       });
       expect(await send(baseGithubEnv(), suite({ head_branch: 'feature' }))).toBe('ignored: check_suite has no pull requests');
