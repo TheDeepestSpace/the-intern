@@ -246,9 +246,11 @@ const CI_FAILURE_MARKER = '<!-- the-intern-nightly-crawl:ci-failure -->';
 // remedy, so they never dispatch the agent.
 const RERUNNABLE_CONCLUSIONS = new Set(['timed_out', 'cancelled', 'startup_failure', 'stale', 'action_required']);
 
-// Splits the head commit's failures into `failing` (a definite failure an
-// agent could fix) and `rerunnable` (infra/flaky-looking). Legacy commit
-// statuses in failure/error state count as failing.
+/**
+ * Splits the head commit's failures into `failing` (a definite failure an
+ * agent could fix) and `rerunnable` (infra/flaky-looking). Legacy commit
+ * statuses in failure/error state count as failing.
+ */
 function classifyCiFailures({ checkRuns = [], combinedStatus = null } = {}) {
   const done = checkRuns.filter((c) => c.status === 'completed');
   const failing = done.filter((c) => c.conclusion === 'failure').map((c) => c.name);
@@ -264,6 +266,7 @@ function classifyCiFailures({ checkRuns = [], combinedStatus = null } = {}) {
   return { failing, rerunnable };
 }
 
+/** Builds the comment body asking the bot to fix the listed failing checks on `sha`. */
 function ciFailureComment({ checks = [], sha = '' } = {}) {
   const names = checks.length ? ` Failing check${checks.length === 1 ? '' : 's'}: ${checks.map((c) => `\`${c}\``).join(', ')}.` : '';
   const at = sha ? ` (head ${sha.slice(0, 7)})` : '';
@@ -275,14 +278,16 @@ function hasCiFailureRequest(comments = []) {
   return comments.some((c) => (c.body || '').includes(CI_FAILURE_MARKER));
 }
 
-// PR needs Dependabot to rebase it: behind base or conflicting.
+/** True if the PR needs Dependabot to rebase it: behind base or conflicting. */
 function needsRebase(pr) {
   return pr.mergeable_state === 'behind' || isConflicting(pr);
 }
 
 const REBASE_COMMENT = '@dependabot rebase';
 
-// `action` is the PR's depActions record: { rebaseAttempts, lastRebaseAt }.
+/**
+ * `action` is the PR's depActions record: { rebaseAttempts, lastRebaseAt }.
+ */
 function shouldRequestRebase({ action = {}, now = Date.now() }) {
   const attempts = action.rebaseAttempts || 0;
   if (attempts >= MAX_REBASE_ATTEMPTS) return { request: false, reason: `rebase attempt cap reached (${attempts})` };
@@ -292,25 +297,31 @@ function shouldRequestRebase({ action = {}, now = Date.now() }) {
   return { request: true, reason: null };
 }
 
-// Once per head SHA, at most MAX_CI_FIX_ATTEMPTS in total per PR. `action`
-// holds { ciFixAttempts, ciFixShas: [...] }.
+/**
+ * Once per head SHA, at most MAX_CI_FIX_ATTEMPTS in total per PR. `action`
+ * holds { ciFixAttempts, ciFixShas: [...] }.
+ */
 function shouldDispatchCiFix({ action = {}, headSha }) {
   if ((action.ciFixShas || []).includes(headSha)) return { dispatch: false, reason: `already dispatched for ${headSha}` };
   if ((action.ciFixAttempts || 0) >= MAX_CI_FIX_ATTEMPTS) return { dispatch: false, reason: `CI-fix attempt cap reached (${action.ciFixAttempts})` };
   return { dispatch: true, reason: null };
 }
 
+/** Returns a new state with `depActions[key]` replaced by `fn(existing)`. */
 function patchAction(state, key, fn) {
   const existing = state.depActions?.[key] || {};
   return { ...state, depActions: { ...state.depActions, [key]: fn(existing) } };
 }
 
+/** Records a rebase request (attempt count and timestamp) for the PR `key`. */
 function markRebaseRequested(state, key, now = Date.now()) {
   return patchAction(state, key, (a) => ({ ...a, rebaseAttempts: (a.rebaseAttempts || 0) + 1, lastRebaseAt: new Date(now).toISOString() }));
 }
 
-// The PR no longer needs a rebase: forget the attempts so a later conflict
-// starts with a fresh budget.
+/**
+ * The PR no longer needs a rebase: forget the attempts so a later conflict
+ * starts with a fresh budget.
+ */
 function clearRebaseState(state, key) {
   const existing = state.depActions?.[key];
   if (!existing || (!existing.rebaseAttempts && !existing.lastRebaseAt)) return state;
@@ -318,6 +329,7 @@ function clearRebaseState(state, key) {
   return { ...state, depActions: { ...state.depActions, [key]: rest } };
 }
 
+/** Records a CI-fix dispatch for `headSha` against the PR `key`. */
 function markCiFixDispatched(state, key, headSha, now = Date.now()) {
   return patchAction(state, key, (a) => ({
     ...a,

@@ -476,10 +476,12 @@ async function fetchCi(token, repo, sha, deps) {
   return store.isCiGreen(await fetchCiInputs(token, repo, sha, deps));
 }
 
-// Dependabot maintenance for one PR: ask Dependabot to rebase when the PR is
-// behind/conflicting, otherwise dispatch the bot when CI has a definite
-// failure on the head. Returns the actions taken plus state mutations; the
-// caller persists them. Rerunnable/infra failures are left alone.
+/**
+ * Dependabot maintenance for one PR: ask Dependabot to rebase when the PR is
+ * behind/conflicting, otherwise dispatch the bot when CI has a definite
+ * failure on the head. Returns the actions taken plus state mutations; the
+ * caller persists them. Rerunnable/infra failures are left alone.
+ */
 async function maintainDependabotPr({ token, repo, detail, key, state, dryRun, now }, deps) {
   const out = { rebase: null, ciFix: null, mutations: [] };
   const action = state.depActions?.[key] || {};
