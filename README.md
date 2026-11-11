@@ -26,7 +26,7 @@ node scripts/validate-agentic.js --explain event.json # dry-run: which agent, ac
 | `dispatch` | `workflow_dispatch` of `dispatcher.yml` with a `dispatch` JSON input from an allowlisted caller (see [dispatch_agent](#dispatch_agent-generic-caller-dispatch)). | `dispatcher.yml` |
 | `manual` | `workflow_dispatch` of `dispatcher.yml` with `agent` + `parameters` (JSON, typed) — what a `dispatch_agent` action fires. | `dispatcher.yml` |
 | `telegram` | A message in the admin chat. | `telegram-session.yml` |
-| `ci_failure` | A check suite failed on a PR whose author is in `pr_authors` (the worker; `dedup` = once per PR+commit for that long, `skip_preexisting` = not when every failing check already fails on the base). | `dispatcher.yml` (`ci_failure` dispatch) |
+| `ci_failure` | A check suite failed on a PR whose author is in `pr_authors` (the worker; `dedup` = once per PR+commit for that long, `skip_preexisting` = not when every failing check already fails on the base). With `branches: [default]` it instead routes PR-less failures on the default branch, gated by the commit's author/committer in `pr_authors`; dedup is per (repo, sha), `skip_preexisting` compares with the previous commit, and `max_consecutive` (default 3) caps auto-fix dispatches until a green run. | `dispatcher.yml` (`ci_failure` dispatch) |
 | `merge_conflict` | A default-branch push (worker) or the nightly crawl's sweep left a PR by a `pr_authors` author `dirty`. | `dispatcher.yml` (`merge_conflict` dispatch) |
 | `review` | A review by one of `reviewers` (CodeRabbit) was `submitted` (`actions`) on a PR by a `pr_authors` author. | `dispatcher.yml` (`coderabbit_review` dispatch) |
 | `schedule` | A cron; the agent has `job:` instead of a prompt (see below). | its own workflow |
