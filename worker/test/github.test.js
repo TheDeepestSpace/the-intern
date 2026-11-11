@@ -546,6 +546,25 @@ describe('handleGitHub check_suite handling', () => {
     expect(dispatchCalls(fetchSpy)).toHaveLength(1);
   });
 
+  it('dedup expires (short TTL), so a dead agent run is retried instead of skipped for good', async () => {
+    const env = baseGithubEnv();
+    const fetchSpy = mockCheckSuiteDispatchFlow();
+    const send = () => worker.fetch(githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }), env);
+    const t0 = Date.now();
+    const now = vi.spyOn(Date, 'now');
+    try {
+      now.mockReturnValue(t0);
+      expect(await (await send()).text()).toBe('ok');
+      now.mockReturnValue(t0 + 60 * 60 * 1000);
+      expect(await (await send()).text()).toBe('ignored: ci_failure already dispatched for this PR+commit');
+      now.mockReturnValue(t0 + 2 * 60 * 60 * 1000 + 1000);
+      expect(await (await send()).text()).toBe('ok');
+      expect(dispatchCalls(fetchSpy)).toHaveLength(2);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('dispatches again for the same PR when a different commit sha fails', async () => {
     const fetchSpy = mockCheckSuiteDispatchFlow();
     const env = baseGithubEnv();

@@ -106,7 +106,8 @@ agents:
   # content itself). `pr_authors` is the gate: the bot only acts on its own PRs.
 
   # A check suite failed on a bot PR. `dedup`: the same (PR, failing commit)
-  # fires once (push + pull_request runs make two suites per commit); a new
+  # fires once per 2h (push + pull_request runs make two suites per commit; the
+  # window is short so a failed agent run is retried, not skipped for good); a new
   # commit dispatches again. `skip_preexisting`: no dispatch when every failing
   # check already fails on the PR's base (the PR didn't introduce it).
   ci_fixer:
@@ -114,7 +115,7 @@ agents:
       ci_failure:
         pr_authors: ["the-intern-bot[bot]"]
         skip_preexisting: true
-        dedup: 14d
+        dedup: 2h
     access:
       repos:
         - { name: $trigger.ci_failure.repo, scope: read/write }
@@ -135,7 +136,7 @@ agents:
         branches: [default]
         pr_authors: ["the-intern-bot[bot]"]
         skip_preexisting: true
-        dedup: 14d
+        dedup: 2h
         max_consecutive: 3
     access:
       repos:
@@ -153,7 +154,7 @@ agents:
         pr_authors: ["the-intern-bot[bot]"]
         head_branch: 'specage/*'
         skip_preexisting: true
-        dedup: 14d
+        dedup: 2h
     access:
       repos:
         - { name: $trigger.ci_failure.repo, scope: read/write }

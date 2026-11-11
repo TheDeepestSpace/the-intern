@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { shouldDispatchBotCiFix, markBotCiDispatched, shouldDispatchCiFix, markCiFixDispatched } from '../nightly-crawl-store.js';
 import {
   CONFIRMATION_DELAY_MS,
   CONFLICT_DEDUPE_MS,
@@ -50,6 +51,7 @@ describe('parseState', () => {
     expect(parseState('{"dependabot":{"a/b#1":{"verdict":"safe"}}}')).toEqual({
       version: 1,
       conflicts: {},
+      botCi: {},
       dependabot: { 'a/b#1': { verdict: 'safe' } },
       depActions: {},
     });
@@ -93,22 +95,16 @@ describe('shouldDispatchConflictFix', () => {
     expect(shouldDispatchConflictFix({ key, state, now: NOW }).dispatch).toBe(true);
   });
 
-  it('skips when the bot already commented about conflicts within 24h', () => {
+  it('ignores bot comments: a failed agent run\'s own "conflict" comment must not suppress the retry', () => {
     const botComments = [
       { user: { login: 'the-intern-bot[bot]' }, created_at: new Date(NOW - 2 * HOUR).toISOString(), body: 'Resolved the merge conflicts and pushed.' },
     ];
-    const result = shouldDispatchConflictFix({ key, state: emptyState(), botComments, now: NOW });
-    expect(result.dispatch).toBe(false);
-    expect(result.reason).toMatch(/bot already commented/);
+    expect(shouldDispatchConflictFix({ key, state: emptyState(), botComments, now: NOW }).dispatch).toBe(true);
   });
 
-  it('ignores old bot comments, other authors, and unrelated bot comments', () => {
-    const botComments = [
-      { user: { login: 'the-intern-bot[bot]' }, created_at: new Date(NOW - 3 * DAY).toISOString(), body: 'conflicts resolved' },
-      { user: { login: 'human' }, created_at: new Date(NOW - HOUR).toISOString(), body: 'please fix the conflicts' },
-      { user: { login: 'the-intern-bot[bot]' }, created_at: new Date(NOW - HOUR).toISOString(), body: 'Opened PR.' },
-    ];
-    expect(shouldDispatchConflictFix({ key, state: emptyState(), botComments, now: NOW }).dispatch).toBe(true);
+  it('retries a conflict the crawl dispatched ~24h ago (daily cron jitter)', () => {
+    const state = markConflictDispatched(emptyState(), key, NOW - (24 * HOUR - 30_000));
+    expect(shouldDispatchConflictFix({ key, state, now: NOW }).dispatch).toBe(true);
   });
 });
 
@@ -392,5 +388,31 @@ describe('ci failure request', () => {
     expect(hasCiFailureRequest([{ body: 'hi' }])).toBe(false);
     expect(hasCiFailureRequest([{ body: ciFailureComment() }])).toBe(true);
     expect(ciFailureComment({ checks: ['a', 'b'], sha: 'abcdef123' })).toMatch(/@the-intern-bot.*abcdef1.*`a`, `b`/s);
+  });
+});
+
+describe('bot CI-failure safety net', () => {
+  const k = 'a/b#1';
+  const old = new Date(NOW - 2 * DAY).toISOString();
+
+  it('leaves a recently-pushed head to the worker path', () => {
+    const r = shouldDispatchBotCiFix({ key: k, state: emptyState(), headSha: 's', headDate: new Date(NOW - HOUR).toISOString(), now: NOW });
+    expect(r.dispatch).toBe(false);
+  });
+
+  it('dispatches for a head that has been red for a day, once per window', () => {
+    expect(shouldDispatchBotCiFix({ key: k, state: emptyState(), headSha: 's', headDate: old, now: NOW }).dispatch).toBe(true);
+    const st = markBotCiDispatched(emptyState(), k, 's', NOW - 2 * HOUR);
+    expect(shouldDispatchBotCiFix({ key: k, state: st, headSha: 's', headDate: old, now: NOW }).dispatch).toBe(false);
+    // expires, and a new sha is not blocked
+    expect(shouldDispatchBotCiFix({ key: k, state: st, headSha: 's', headDate: old, now: NOW + DAY }).dispatch).toBe(true);
+    expect(shouldDispatchBotCiFix({ key: k, state: st, headSha: 't', headDate: old, now: NOW }).dispatch).toBe(true);
+  });
+
+  it('dependabot ciFixShas expire instead of blocking forever', () => {
+    const st = markCiFixDispatched(emptyState(), k, 's', NOW - 2 * HOUR);
+    const action = st.depActions[k];
+    expect(shouldDispatchCiFix({ action, headSha: 's', now: NOW }).dispatch).toBe(false);
+    expect(shouldDispatchCiFix({ action, headSha: 's', now: NOW + DAY }).dispatch).toBe(true);
   });
 });

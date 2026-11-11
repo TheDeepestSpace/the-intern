@@ -15,8 +15,12 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // safe" for at least this long — gives upstream a window to yank a bad
 // release before it lands here.
 const CONFIRMATION_DELAY_MS = 2 * DAY_MS;
-// A conflict-fix dispatch for the same PR is not repeated within this window.
-const CONFLICT_DEDUPE_MS = DAY_MS;
+// A conflict-fix / CI-fix dispatch for the same PR (and head sha) is not
+// repeated within this window, and a failing head is only retried by the crawl
+// once it has been red this long. Slightly under 24h so a daily cron whose run
+// starts a few seconds earlier than the last one still counts as "a day later".
+const CONFLICT_DEDUPE_MS = 20 * 60 * 60 * 1000;
+const STALE_FAILURE_MS = CONFLICT_DEDUPE_MS;
 const STATE_VERSION = 1;
 // Dependabot maintenance nudges (rebase request / CI-fix dispatch): at most
 // this many per PR, and a rebase request is not repeated within the window.
@@ -33,7 +37,7 @@ function prKey(repo, number) {
 }
 
 function emptyState() {
-  return { version: STATE_VERSION, conflicts: {}, dependabot: {}, depActions: {} };
+  return { version: STATE_VERSION, conflicts: {}, botCi: {}, dependabot: {}, depActions: {} };
 }
 
 // Never falls back to an empty state on malformed input: the caller would
@@ -52,6 +56,7 @@ function parseState(raw) {
   return {
     version: STATE_VERSION,
     conflicts: parsed.conflicts && typeof parsed.conflicts === 'object' ? parsed.conflicts : {},
+    botCi: parsed.botCi && typeof parsed.botCi === 'object' ? parsed.botCi : {},
     dependabot: parsed.dependabot && typeof parsed.dependabot === 'object' ? parsed.dependabot : {},
     depActions: parsed.depActions && typeof parsed.depActions === 'object' ? parsed.depActions : {},
   };
@@ -74,23 +79,14 @@ function isConflicting(pr) {
 
 // ---------------------------------------------------------------- conflicts
 
-// Dedupe for the conflict sweep: skip when this crawl already dispatched a
-// fix for the PR in the last ~24h, or when the bot itself posted a
-// conflict-related comment in that window (the normal merge_conflict path
-// or a prior dispatch is already on it — the dispatcher's per-issue
-// concurrency queue serializes anything that still overlaps).
-function shouldDispatchConflictFix({ key, state, botComments = [], now = Date.now() }) {
+// Dedupe for the conflict sweep: skip only when this crawl itself dispatched a
+// fix for the PR within the window. Bot comments are deliberately ignored: a
+// failed agent run leaves its own "conflict" comment behind, and that must not
+// suppress the retry. (`botComments` is accepted for compatibility, unused.)
+function shouldDispatchConflictFix({ key, state, now = Date.now() }) {
   const previous = state.conflicts?.[key];
   if (previous?.dispatchedAt && now - Date.parse(previous.dispatchedAt) < CONFLICT_DEDUPE_MS) {
     return { dispatch: false, reason: `conflict fix already dispatched at ${previous.dispatchedAt}` };
-  }
-  const recent = botComments.find(
-    (c) => (c.user?.login || '').toLowerCase() === BOT_LOGIN
-      && now - Date.parse(c.created_at) < CONFLICT_DEDUPE_MS
-      && /conflict/i.test(c.body || '')
-  );
-  if (recent) {
-    return { dispatch: false, reason: `bot already commented about conflicts at ${recent.created_at}` };
   }
   return { dispatch: true, reason: null };
 }
@@ -100,6 +96,31 @@ function markConflictDispatched(state, key, now = Date.now()) {
     ...state,
     conflicts: { ...state.conflicts, [key]: { dispatchedAt: new Date(now).toISOString() } },
   };
+}
+
+// ------------------------------------------------------- bot PR CI failures
+
+/**
+ * Safety net for a bot PR whose head has been red for a while: the worker's
+ * check_suite dispatch fires once per failure, so if that agent run died the
+ * PR would stay red forever. Re-dispatch when the head commit is older than
+ * STALE_FAILURE_MS and the crawl hasn't already dispatched for that sha within
+ * the window. Bot comments are ignored, same as for conflicts.
+ */
+function shouldDispatchBotCiFix({ key, state, headSha, headDate, now = Date.now() }) {
+  const t = Date.parse(headDate || '');
+  if (!Number.isFinite(t) || now - t < STALE_FAILURE_MS) {
+    return { dispatch: false, reason: 'head commit is recent; the worker path owns it' };
+  }
+  const previous = state.botCi?.[key];
+  if (previous?.sha === headSha && now - Date.parse(previous.dispatchedAt) < CONFLICT_DEDUPE_MS) {
+    return { dispatch: false, reason: `CI fix already dispatched at ${previous.dispatchedAt}` };
+  }
+  return { dispatch: true, reason: null };
+}
+
+function markBotCiDispatched(state, key, headSha, now = Date.now()) {
+  return { ...state, botCi: { ...state.botCi, [key]: { sha: headSha, dispatchedAt: new Date(now).toISOString() } } };
 }
 
 // --------------------------------------------------------------- dependabot
@@ -301,8 +322,11 @@ function shouldRequestRebase({ action = {}, now = Date.now() }) {
  * Once per head SHA, at most MAX_CI_FIX_ATTEMPTS in total per PR. `action`
  * holds { ciFixAttempts, ciFixShas: [...] }.
  */
-function shouldDispatchCiFix({ action = {}, headSha }) {
-  if ((action.ciFixShas || []).includes(headSha)) return { dispatch: false, reason: `already dispatched for ${headSha}` };
+function shouldDispatchCiFix({ action = {}, headSha, now = Date.now() }) {
+  // A sha only blocks while the last dispatch is recent; after that the failed
+  // attempt is presumed dead and retried (the attempt cap is the loop guard).
+  const recent = action.lastCiFixAt && now - Date.parse(action.lastCiFixAt) < CONFLICT_DEDUPE_MS;
+  if (recent && (action.ciFixShas || []).includes(headSha)) return { dispatch: false, reason: `already dispatched for ${headSha}` };
   if ((action.ciFixAttempts || 0) >= MAX_CI_FIX_ATTEMPTS) return { dispatch: false, reason: `CI-fix attempt cap reached (${action.ciFixAttempts})` };
   return { dispatch: true, reason: null };
 }
@@ -429,7 +453,7 @@ function pruneState(state, openKeys, crawledRepos) {
   const filter = (obj) => Object.fromEntries(
     Object.entries(obj || {}).filter(([k]) => keep.has(k) || !crawled.has(repoOf(k)))
   );
-  return { ...state, conflicts: filter(state.conflicts), dependabot: filter(state.dependabot), depActions: filter(state.depActions) };
+  return { ...state, conflicts: filter(state.conflicts), botCi: filter(state.botCi), dependabot: filter(state.dependabot), depActions: filter(state.depActions) };
 }
 
 // ------------------------------------------------------------------- report
@@ -551,6 +575,9 @@ module.exports = {
   isConflicting,
   shouldDispatchConflictFix,
   markConflictDispatched,
+  shouldDispatchBotCiFix,
+  markBotCiDispatched,
+  STALE_FAILURE_MS,
   parseDependabotTitle,
   classifyDependabotPr,
   computeDiffHash,

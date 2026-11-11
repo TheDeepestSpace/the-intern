@@ -49,12 +49,21 @@ export function baseGithubEnv(overrides = {}) {
 // exercise dedup persisting across separate webhook deliveries.
 export function createFakeKvNamespace() {
   const store = new Map();
+  const expiry = new Map();
   return {
+    // Records each put's expirationTtl; entries lapse once Date.now() passes
+    // it, so tests can fake the clock to exercise dedup expiry.
     async get(key) {
+      if (expiry.has(key) && Date.now() >= expiry.get(key)) {
+        store.delete(key);
+        expiry.delete(key);
+      }
       return store.has(key) ? store.get(key) : null;
     },
-    async put(key, value) {
+    async put(key, value, opts = {}) {
       store.set(key, value);
+      if (opts.expirationTtl) expiry.set(key, Date.now() + opts.expirationTtl * 1000);
+      else expiry.delete(key);
     },
     async delete(key) {
       store.delete(key);

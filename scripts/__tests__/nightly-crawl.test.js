@@ -184,6 +184,38 @@ describe('plan', () => {
     expect(s.updateState).not.toHaveBeenCalled();
   });
 
+  describe('bot PR still red after ~24h', () => {
+    const botPr = pr({ number: 6, user: { login: 'the-intern-bot[bot]' }, head: { ref: 'feat', sha: 'h1' } });
+    const routes = (commitDate) => ({
+      'GET /repos/acme/widgets/pulls?state=open&per_page=100': { body: [botPr] },
+      'GET /repos/acme/widgets/pulls/6': { body: botPr },
+      'GET /repos/acme/widgets/commits/h1/check-runs?per_page=100': { body: { check_runs: [{ name: 'test', status: 'completed', conclusion: 'failure' }] } },
+      'GET /repos/acme/widgets/commits/h1/status': { body: { total_count: 0, state: 'pending', statuses: [] } },
+      'GET /repos/acme/widgets/commits/h1': { body: { commit: { committer: { date: commitDate } } } },
+      'POST /repos/TheDeepestSpace/the-intern/dispatches': { status: 204, text: '' },
+    });
+    const go = (commitDate, s = memoryStore()) => {
+      const gh = fakeGitHub(routes(commitDate));
+      return plan(baseEnv, { fetchImpl: gh.fetchImpl, mintToken: async () => 't', enumerateRepos: async () => repos, now: () => NOW, ...s }).then((result) => ({ result, gh, s }));
+    };
+
+    it('re-dispatches ci_failure once, then not again within the window', async () => {
+      const first = await go(new Date(NOW - 2 * DAY).toISOString());
+      const d = first.gh.called('POST /repos/TheDeepestSpace/the-intern/dispatches');
+      expect(d).toHaveLength(1);
+      expect(d[0].body.event_type).toBe('ci_failure');
+      expect(d[0].body.client_payload.raw).toMatchObject({ check_suite: { conclusion: 'failure', head_sha: 'h1', head_branch: 'feat' }, pull_request: { number: 6 } });
+      expect(first.s.get().botCi['acme/widgets#6']).toMatchObject({ sha: 'h1' });
+      const second = await go(new Date(NOW - 2 * DAY).toISOString(), memoryStore(first.s.get()));
+      expect(second.gh.called('POST /repos/TheDeepestSpace/the-intern/dispatches')).toHaveLength(0);
+    });
+
+    it('leaves a freshly-pushed red head to the worker', async () => {
+      const { gh } = await go(new Date(NOW - 3600000).toISOString());
+      expect(gh.called('POST /repos/TheDeepestSpace/the-intern/dispatches')).toHaveLength(0);
+    });
+  });
+
   it('does not dispatch in dry-run mode', async () => {
     const botPr = pr({ number: 5, user: { login: 'the-intern-bot[bot]' }, mergeable_state: 'dirty', mergeable: false });
     const gh = fakeGitHub({

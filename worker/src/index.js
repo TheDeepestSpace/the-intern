@@ -77,6 +77,12 @@ async function rateLimitKey(env, resolved) {
   return { key, exceeded: count >= limit, count };
 }
 
+// One line per skipped ci_failure / merge_conflict event, so "why did nothing
+// happen" is answerable from the worker logs.
+function logSkip(kind, target, reason) {
+  console.log(`skip ${kind} ${target}: ${reason}`);
+}
+
 async function countRun(env, limitState) {
   if (!limitState.key) return;
   await env.CI_FAILURE_DEDUP.put(limitState.key, String((limitState.count || 0) + 1), { expirationTtl: 2 * 3600 });
@@ -480,6 +486,7 @@ async function processCheckSuite(payload, env) {
       const dedupKey = `ci_failure:${sourceOwner}/${sourceRepo}#${number}@${sha}`;
       if (dedupTtl && await env.CI_FAILURE_DEDUP.get(dedupKey)) {
         deduped++;
+        logSkip('ci_failure', `${sourceOwner}/${sourceRepo}#${number}@${sha}`, 'dedup (already dispatched within window)');
         continue;
       }
 
@@ -492,6 +499,7 @@ async function processCheckSuite(payload, env) {
           // Every failing check already fails on the base branch too - pre-existing
           // breakage, not something this PR introduced. Skip the fix-dispatch.
           skippedPreExisting++;
+          logSkip('ci_failure', `${sourceOwner}/${sourceRepo}#${number}@${sha}`, `preexisting (${[...headFailures].join(', ')} also failing on base)`);
           continue;
         }
       }
@@ -499,6 +507,7 @@ async function processCheckSuite(payload, env) {
       const limit = await rateLimitKey(env, resolved);
       if (limit.exceeded) {
         rateLimited++;
+        logSkip('ci_failure', `${sourceOwner}/${sourceRepo}#${number}@${sha}`, 'rate limit (max_runs_per_hour)');
         continue;
       }
 
@@ -585,6 +594,7 @@ async function handleDefaultBranchFailure(payload, env) {
     const dedupTtl = trigger.dedup ? parseDuration(trigger.dedup) : 0;
     const dedupKey = `ci_failure:${owner}/${repo}@${sha}`;
     if (dedupTtl && await env.CI_FAILURE_DEDUP.get(dedupKey)) {
+      logSkip('ci_failure', `${owner}/${repo}@${sha}`, 'dedup (already dispatched within window)');
       return new Response('ignored: ci_failure already dispatched for this commit', { status: 200 });
     }
 
@@ -594,6 +604,7 @@ async function handleDefaultBranchFailure(payload, env) {
       if (headFailures && headFailures.size > 0 && parent) {
         const baseFailures = await getFailingCheckNames(owner, repo, parent, token);
         if (baseFailures && [...headFailures].every(name => baseFailures.has(name))) {
+          logSkip('ci_failure', `${owner}/${repo}@${sha}`, 'preexisting on previous commit');
           return new Response('ignored: all failures pre-existing on previous commit', { status: 200 });
         }
       }
@@ -603,10 +614,12 @@ async function handleDefaultBranchFailure(payload, env) {
     const streakKey = mainStreakKey(fullName);
     const streak = env.CI_FAILURE_DEDUP ? Number(await env.CI_FAILURE_DEDUP.get(streakKey)) || 0 : 0;
     if (streak >= max) {
+      logSkip('ci_failure', `${owner}/${repo}@${sha}`, `cap (${max} consecutive default-branch attempts)`);
       return new Response(`ignored: ${max} consecutive auto-fix attempts on the default branch reached`, { status: 200 });
     }
 
     const limit = await rateLimitKey(env, resolved);
+    if (limit.exceeded) logSkip('ci_failure', `${owner}/${repo}@${sha}`, 'rate limit (max_runs_per_hour)');
     if (limit.exceeded) return new Response(`ignored: rate limit for agent ${hit.name} reached`, { status: 200 });
 
     const dispatchRes = await dispatchRepoEvent(env, token, 'ci_failure', raw, { agent: hit.name });
@@ -629,7 +642,8 @@ async function handleDefaultBranchFailure(payload, env) {
 // (see pollMergeableState). No dedup/KV: a push only fires this once per PR
 // per push (unlike handleCheckSuite's push+pull_request double check-suite),
 // and a PR that's still dirty on the next push just re-dispatches, which is
-// the intended retry-until-fixed behavior.
+// the intended retry-until-fixed behavior. A failed agent run is not retried
+// here (no push, no event); the nightly crawl re-dispatches PRs still dirty.
 async function handlePush(payload, env, deliveryId = '') {
   // agentic.yaml commit triggers (e.g. the specage spec/review branches) come
   // first; a push that matches one never reaches the default-branch logic.
@@ -709,7 +723,10 @@ async function handlePush(payload, env, deliveryId = '') {
         pollAttempts,
         pollDelayMs
       );
-      if (!polled || polled.mergeable_state !== 'dirty') continue;
+      if (!polled || polled.mergeable_state !== 'dirty') {
+        logSkip('merge_conflict', `${sourceOwner}/${sourceRepo}#${number}`, `not dirty (${polled?.mergeable_state ?? 'unknown'})`);
+        continue;
+      }
       // The author the pre-filter matched on (the list entry) is authoritative.
       const pullRequest = { ...polled, user: polled.user || listedUser };
 
@@ -724,7 +741,10 @@ async function handlePush(payload, env, deliveryId = '') {
         continue;
       }
       const limit = await rateLimitKey(env, routed.resolved);
-      if (limit.exceeded) continue;
+      if (limit.exceeded) {
+        logSkip('merge_conflict', `${sourceOwner}/${sourceRepo}#${number}`, 'rate limit (max_runs_per_hour)');
+        continue;
+      }
 
       const dispatchRes = await dispatchRepoEvent(env, token, 'merge_conflict', {
         repository: payload.repository,
