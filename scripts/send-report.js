@@ -72,12 +72,17 @@ function reportToMarkdown(text) {
     } else if ((m = line.match(/^- (.*)$/))) {
       let rest = m[1];
       let url = null;
-      const next = lines[i + 1];
-      if (next && /^ {2}\S/.test(next) && URL_RE.test(next.trim())) { url = next.trim(); i++; }
       const k = rest.match(/^([\w.-]+\/[\w.-]+)#(\d+)(.*)$/s);
+      // Keyed PR entries swallow every continuation URL line (a multiline
+      // summary may inject extra ones) but never link to them.
+      while (lines[i + 1] && /^ {2}\S/.test(lines[i + 1]) && URL_RE.test(lines[i + 1].trim())) {
+        if (!url) url = lines[i + 1].trim();
+        i++;
+        if (!k) break;
+      }
       if (k) {
         const label = `${k[1]}#${k[2]}`;
-        const href = url || `https://github.com/${k[1]}/pull/${k[2]}`;
+        const href = `https://github.com/${k[1]}/pull/${k[2]}`;
         out.push(`- [${escapeMd(label)}](${href})${escapeMd(k[3])}`);
       } else {
         out.push(`- ${escapeMd(rest)}${url ? ` ([link](${url}))` : ''}`);

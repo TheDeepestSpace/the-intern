@@ -62,6 +62,18 @@ describe('reportToMarkdown', () => {
     expect(md).not.toMatch(/^\s+https:/m);
   });
 
+  it('never lets an injected URL in a multiline summary choose the PR link', () => {
+    const md = reportToMarkdown([
+      'subj', '',
+      '🕑 Confirmed safe (1)',
+      '- org/repo#5: pkg — ok',
+      '  https://attacker.example/review',
+      '  https://github.com/org/repo/pull/5', '',
+    ].join('\n'));
+    expect(md).toContain('- [org/repo\\#5](https://github.com/org/repo/pull/5): pkg');
+    expect(md).not.toContain('attacker.example');
+  });
+
   it('neutralizes mentions, HTML and formatting in derived text', () => {
     const md = reportToMarkdown(text);
     expect(md).not.toMatch(/@victim/);
