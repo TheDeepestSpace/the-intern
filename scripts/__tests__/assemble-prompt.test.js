@@ -30,6 +30,15 @@ function build(agent, env = {}) {
 }
 
 describe('assemble-prompt', () => {
+  it('adds the no-human-reviewer override only for specage agents, after the style', () => {
+    const style = path.join(dir, 'style.md');
+    fs.writeFileSync(style, 'STYLE RULES');
+    const sp = build({ ...baseAgent, agent: 'ci_fixer_specage' }, { STYLE_FILE: style }).prompt;
+    expect(sp).toContain('Specage override');
+    expect(sp.indexOf('Specage override')).toBeGreaterThan(sp.indexOf('STYLE RULES'));
+    expect(build(baseAgent, { STYLE_FILE: style }).prompt).not.toContain('Specage override');
+  });
+
   it('puts the resolved prompt first, the access list, then style, prior summary and the request last', () => {
     const style = path.join(dir, 'style.md');
     fs.writeFileSync(style, 'STYLE RULES');
