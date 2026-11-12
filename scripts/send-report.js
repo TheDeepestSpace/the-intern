@@ -43,12 +43,64 @@ async function findOrCreateIssue(repo, env, fetchImpl) {
   return created.number;
 }
 
+// Neutralizes user/LLM-derived text so it renders literally in a GitHub
+// comment: no mentions, HTML, autolinks, or markdown formatting.
+function escapeMd(str) {
+  return String(str)
+    .replace(/[\\`*_{}\[\]()<>#+!|~&"]/g, '\\$&')
+    .replace(/@/g, '@\u200b')
+    .replace(/:\/\//g, ':\\/\\/')
+    .replace(/\s*\n\s*/g, ' ');
+}
+
+const URL_RE = /^https?:\/\/[^\s<>()]+$/;
+
+// Converts the plain-text report (report.txt format, shared with other
+// consumers) into regular Markdown for the GitHub comment. The subject line
+// is dropped (the comment header already carries it).
+function reportToMarkdown(text) {
+  const lines = String(text).replace(/\n+$/, '').split('\n');
+  const out = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) { if (out.length && out[out.length - 1] !== '') out.push(''); continue; }
+    let m;
+    if ((m = line.match(/^Run: (\S+)$/)) && URL_RE.test(m[1])) {
+      out.push('', `Run: [${m[1]}](${m[1]})`);
+    } else if ((m = line.match(/^ {4}• (.*)$/))) {
+      out.push(`  - ${escapeMd(m[1])}`);
+    } else if ((m = line.match(/^- (.*)$/))) {
+      let rest = m[1];
+      let url = null;
+      const k = rest.match(/^([\w.-]+\/[\w.-]+)#(\d+)(.*)$/s);
+      // Keyed PR entries swallow every continuation URL line (a multiline
+      // summary may inject extra ones) but never link to them.
+      while (lines[i + 1] && /^ {2}\S/.test(lines[i + 1]) && URL_RE.test(lines[i + 1].trim())) {
+        if (!url) url = lines[i + 1].trim();
+        i++;
+        if (!k) break;
+      }
+      if (k) {
+        const label = `${k[1]}#${k[2]}`;
+        const href = `https://github.com/${k[1]}/pull/${k[2]}`;
+        out.push(`- [${escapeMd(label)}](${href})${escapeMd(k[3])}`);
+      } else {
+        out.push(`- ${escapeMd(rest)}${url ? ` ([link](${url}))` : ''}`);
+      }
+    } else {
+      if (out.length && out[out.length - 1] !== '') out.push('');
+      out.push(`### ${escapeMd(line)}`, '');
+    }
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 async function postReportComment({ subject, text }, env = process.env, fetchImpl = fetch) {
   if (!env.REPORT_TOKEN) throw new Error('REPORT_TOKEN is required to post the report');
   const repo = env.REPORT_REPO || 'TheDeepestSpace/the-intern';
   const mention = env.REPORT_MENTION || 'TheDeepestSpace';
   const number = await findOrCreateIssue(repo, env, fetchImpl);
-  const body = `@${mention} **${subject}**\n\n\`\`\`\n${text}\n\`\`\``;
+  const body = `@${mention} **${escapeMd(subject)}**\n\n${reportToMarkdown(text)}`;
   const data = await gh(`/repos/${repo}/issues/${number}/comments`, env, fetchImpl, {
     method: 'POST',
     body: JSON.stringify({ body }),
@@ -56,4 +108,4 @@ async function postReportComment({ subject, text }, env = process.env, fetchImpl
   return { url: data.html_url || null };
 }
 
-module.exports = { postReportComment, ISSUE_TITLE };
+module.exports = { postReportComment, reportToMarkdown, escapeMd, ISSUE_TITLE };
