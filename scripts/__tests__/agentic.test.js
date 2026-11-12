@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import YAML from 'yaml';
 import { describe, it, expect } from 'vitest';
 import { loadSpec, loadSpecObject, explain, accessAllows, route, branchPattern, resolveAction, eventFromWebhook, eventFromTelegram } from '../lib/agentic-yaml.js';
 import { main } from '../validate-agentic.js';
@@ -418,4 +419,17 @@ describe('comment trigger: head_branch route', () => {
     const ic = { comment: { user: { login: 'a' }, body: 'x' }, issue: { number: 3, pull_request: {} }, repository: { full_name: 'Acme/proj' } };
     expect(eventFromWebhook(s, 'issue_comment', ic, { head_ref: 'specage/z' }).head_ref).toBe('specage/z');
   });
+});
+
+describe('specage fixers re-request review after pushing', () => {
+  const raw = YAML.parse(rootText).agents;
+  for (const name of ['ci_fixer_specage', 'conflict_fixer_specage']) {
+    it(`${name} request names the review branch, the new-head-SHA guard and the specage data repo`, () => {
+      const agent = raw[name];
+      expect(agent.request).toMatch(/Re-request review/);
+      expect(agent.request).toMatch(/specages\/<project>\/review/);
+      expect(agent.request).toMatch(/unchanged/);
+      expect(agent.access.repos).toContainEqual({ name: 'specage_data', scope: 'read/write' });
+    });
+  }
 });
