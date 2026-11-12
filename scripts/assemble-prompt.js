@@ -51,6 +51,16 @@ function dispatchBlock(agent) {
   return `${lines.join('\n')}\n\n`;
 }
 
+// Specage-flavoured agents (specage_planner, specage_reviewer, ci_fixer_specage,
+// ...) must not request or assign a human reviewer: the specage reviewer agent
+// handles review/merge. Placed after shared-style.md so it overrides its
+// default "request a review from TheDeepestSpace" rule.
+const isSpecageAgent = (agent) => /(^|[_-])specage([_-]|$)/.test(agent.agent || '');
+function specageBlock(agent) {
+  if (!isSpecageAgent(agent)) return '';
+  return 'Specage override (takes precedence over the style rules above): when you open a pull request, do NOT request a human review (no `--reviewer`) and do not assign anyone. The specage reviewer agent handles review and merge.\n\n';
+}
+
 function actionsBlock(agent, env) {
   const actions = agent.actions || [];
   if (!actions.length) return '';
@@ -97,6 +107,7 @@ function assemble(env = process.env) {
   prompt += dispatchBlock(agent);
   prompt += actionsBlock(agent, env);
   if (style.trim()) prompt += `${style}\n\n`;
+  prompt += specageBlock(agent);
   if (prior.trim()) prompt += `Previous work summary on this issue/PR:\n${prior}\n\n`;
   let body = request;
   if (agent.dispatch?.prompt_source) {
@@ -124,4 +135,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { assemble, accessLine, dispatchBlock, actionsBlock };
+module.exports = { assemble, specageBlock, accessLine, dispatchBlock, actionsBlock };
