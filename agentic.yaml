@@ -160,7 +160,7 @@ agents:
         - { name: specage_data, scope: read/write }
     prompt: *headless_prompt
     request: |-
-      CI is failing on this specage PR (conclusion: $trigger.ci_failure.conclusion). Check suite: $trigger.ci_failure.html_url. This check suite ran against commit `$trigger.ci_failure.head_sha`. Before investigating, compare that commit to the PR's current head (e.g. `gh pr view $issue_number --json headRefOid`). If the PR's head has already moved past `$trigger.ci_failure.head_sha`, this failure is stale - a newer commit supersedes it, so stop immediately without commenting or pushing anything. Otherwise, read `.specage/config.yaml` (data_repo, project) for the specage context, investigate the failing checks and push a fix, then follow the specage protocol for trace/review commits.
+      CI is failing on this specage PR (conclusion: $trigger.ci_failure.conclusion). Check suite: $trigger.ci_failure.html_url. This check suite ran against commit `$trigger.ci_failure.head_sha`. Before investigating, compare that commit to the PR's current head (e.g. `gh pr view $issue_number --json headRefOid`). If the PR's head has already moved past `$trigger.ci_failure.head_sha`, this failure is stale - a newer commit supersedes it, so stop immediately without commenting or pushing anything. Otherwise, read `.specage/config.yaml` (data_repo, project) for the specage context, investigate the failing checks and push a fix, then follow the specage protocol for trace/review commits. Re-request review: only if your push succeeded and moved the PR head to a new SHA (compare `git rev-parse HEAD` / `gh pr view $issue_number --json headRefOid` with the head before you started), request a fresh review of the new head the same way the initial review is requested: push a commit whose message is `review <owner/repo>#$issue_number` to the `specages/<project>/review` branch of the specage data repo, so specage_reviewer runs on the new head SHA. Do not re-request if nothing was pushed, the push failed, or the head SHA is unchanged (no loops).
 
   # A push to a PR's base branch left a bot PR unmergeable (also sent by the
   # nightly crawl's conflict sweep).
@@ -178,6 +178,7 @@ agents:
   # Same, for PRs from `specage/*` branches: wins over `conflict_fixer` there.
   # Gets the specage data repo (read/write) like ci_fixer_specage. No separate
   # attempt cap: like conflict_fixer it fires once per push/crawl sweep.
+  # Both specage fixers re-request review after a successful push (see request).
   conflict_fixer_specage:
     trigger:
       merge_conflict:
@@ -189,7 +190,7 @@ agents:
         - { name: specage_data, scope: read/write }
     prompt: *headless_prompt
     request: |-
-      A push to $trigger.merge_conflict.base_ref left this specage PR unmergeable (mergeable_state: $trigger.merge_conflict.mergeable_state). Read `.specage/config.yaml` (data_repo, project) for the specage context, then merge or rebase the latest default branch into this PR's branch, resolve the conflicts, and push the fix. Follow the specage protocol for trace/review commits, keeping the `Spec:` trailers.
+      A push to $trigger.merge_conflict.base_ref left this specage PR unmergeable (mergeable_state: $trigger.merge_conflict.mergeable_state). Read `.specage/config.yaml` (data_repo, project) for the specage context, then merge or rebase the latest default branch into this PR's branch, resolve the conflicts, and push the fix. Follow the specage protocol for trace/review commits, keeping the `Spec:` trailers. Re-request review: only if your push succeeded and moved the PR head to a new SHA (compare `git rev-parse HEAD` / `gh pr view $issue_number --json headRefOid` with the head before you started), request a fresh review of the new head the same way the initial review is requested: push a commit whose message is `review <owner/repo>#$issue_number` to the `specages/<project>/review` branch of the specage data repo, so specage_reviewer runs on the new head SHA. Do not re-request if nothing was pushed, the push failed, or the head SHA is unchanged (no loops).
 
   # CodeRabbit submitted a review on a bot PR.
   review_responder:
