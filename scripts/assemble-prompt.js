@@ -58,7 +58,13 @@ function dispatchBlock(agent) {
 const isSpecageAgent = (agent) => /(^|[_-])specage([_-]|$)/.test(agent.agent || '');
 function specageBlock(agent) {
   if (!isSpecageAgent(agent)) return '';
-  return 'Specage override (takes precedence over the style rules above): when you open a pull request, do NOT request a human review (no `--reviewer`) and do not assign anyone. The specage reviewer agent handles review and merge.\n\n';
+  let out = 'Specage override (takes precedence over the style rules above): when you open a pull request, do NOT request a human review (no `--reviewer`) and do not assign anyone. The specage reviewer agent handles review and merge.\n\n';
+  // Shared re-review step for every worker that may push to a specage/* PR.
+  // The planner (dispatches the implementer) and the reviewer itself are excluded.
+  if (!/(^|[_-])(planner|reviewer)$/.test(agent.agent || '')) {
+    out += 'Re-request review (specage): only if your push succeeded and moved the PR head to a new SHA (compare `git rev-parse HEAD` / `gh pr view <PR> --json headRefOid` with the head before you started; for a newly opened PR, its head), request a review of that head: push a commit whose message is `review <owner/repo>#<PR number>` to the `specages/<project>/review` branch of the specage data repo (project and data_repo are in `.specage/config.yaml`), so specage_reviewer runs on that head SHA. Once per head SHA: skip it if the review branch already has such a commit for this PR since your push, or if nothing was pushed, the push failed, or the head SHA is unchanged (no loops).\n\n';
+  }
+  return out;
 }
 
 function actionsBlock(agent, env) {

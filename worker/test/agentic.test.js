@@ -629,6 +629,7 @@ describe('comment trigger: head_branch route (worker)', () => {
   const REPO = 'TheDeepestSpace/the-intern';
   const envWith = (extra = {}) => {
     const spec = structuredClone(SPEC);
+    delete spec.agents.specage_pr;
     spec.agents.branch_agent = {
       ...structuredClone(spec.agents.default),
       trigger: { comment: { verb: '*', on: ['pr', 'review_thread'], head_branch: 'specage/*', max_attempts: 2, params: { backend: 'string', model: 'string', effort: 'string' } } },

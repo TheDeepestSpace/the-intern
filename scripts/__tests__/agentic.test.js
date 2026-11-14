@@ -421,15 +421,15 @@ describe('comment trigger: head_branch route', () => {
   });
 });
 
-describe('specage fixers re-request review after pushing', () => {
+describe('specage routes can request a re-review after pushing', () => {
   const raw = YAML.parse(rootText).agents;
-  for (const name of ['ci_fixer_specage', 'conflict_fixer_specage']) {
-    it(`${name} request names the review branch, the new-head-SHA guard and the specage data repo`, () => {
-      const agent = raw[name];
-      expect(agent.request).toMatch(/Re-request review/);
-      expect(agent.request).toMatch(/specages\/<project>\/review/);
-      expect(agent.request).toMatch(/unchanged/);
-      expect(agent.access.repos).toContainEqual({ name: 'specage_data', scope: 'read/write' });
+  for (const name of ['specage_pr', 'ci_fixer_specage', 'conflict_fixer_specage']) {
+    it(`${name} has write access to the specage data repo (review request is in the shared assemble-prompt block)`, () => {
+      expect(raw[name].access.repos).toContainEqual({ name: 'specage_data', scope: 'read/write' });
+      expect(raw[name].request || '').not.toMatch(/Re-request review/);
     });
   }
+  it('specage_pr routes comments on specage/* PR heads', () => {
+    expect(raw.specage_pr.trigger.comment.head_branch).toBe('specage/*');
+  });
 });
