@@ -184,8 +184,8 @@ async function listOpenAlerts(token, repo, deps) {
   }
 }
 
-async function dispatchMergeConflict(env, { repo, pr, installationId, defaultBranch }, deps) {
-  const raw = {
+function prRaw(repo, pr, installationId, defaultBranch) {
+  return {
     repository: {
       full_name: repo,
       name: repo.split('/')[1],
@@ -201,13 +201,36 @@ async function dispatchMergeConflict(env, { repo, pr, installationId, defaultBra
       base: { ref: pr.base?.ref },
       mergeable_state: pr.mergeable_state,
     },
-    merge_conflict: { mergeable_state: pr.mergeable_state, base_ref: pr.base?.ref },
     installation: { id: installationId },
     nightly_crawl: true,
+  };
+}
+
+async function dispatchMergeConflict(env, { repo, pr, installationId, defaultBranch }, deps) {
+  const raw = {
+    ...prRaw(repo, pr, installationId, defaultBranch),
+    merge_conflict: { mergeable_state: pr.mergeable_state, base_ref: pr.base?.ref },
   };
   await ghRequest(env.GH_TOKEN || env.GITHUB_TOKEN, `/repos/${env.GITHUB_REPOSITORY}/dispatches`, {
     method: 'POST',
     body: { event_type: 'merge_conflict', client_payload: { raw } },
+  }, deps.fetchImpl);
+}
+
+// Same payload shape the worker sends for a failed check suite on a PR.
+async function dispatchBotCiFailure(env, { repo, pr, installationId, defaultBranch }, deps) {
+  const raw = {
+    ...prRaw(repo, pr, installationId, defaultBranch),
+    check_suite: {
+      conclusion: 'failure',
+      head_sha: pr.head?.sha,
+      head_branch: pr.head?.ref,
+      html_url: `${pr.html_url}/checks`,
+    },
+  };
+  await ghRequest(env.GH_TOKEN || env.GITHUB_TOKEN, `/repos/${env.GITHUB_REPOSITORY}/dispatches`, {
+    method: 'POST',
+    body: { event_type: 'ci_failure', client_payload: { raw } },
   }, deps.fetchImpl);
 }
 
@@ -245,8 +268,8 @@ async function plan(env = process.env, deps = {}) {
     reviews: [],
   };
   const dispatchedKeys = [];
+  const ciDispatched = [];
   const actionMutations = [];
-  const since = new Date(now - store.CONFLICT_DEDUPE_MS).toISOString();
 
   for (const { repo, installationId, defaultBranch } of repos) {
     let pulls;
@@ -268,9 +291,39 @@ async function plan(env = process.env, deps = {}) {
       try {
         if (store.isBotPr(pr)) {
           const detail = await getPrDetail(token, repo, pr.number, d);
-          if (!store.isConflicting(detail)) continue;
-          const comments = await listRecentBotComments(token, repo, pr.number, since, d);
-          const decision = store.shouldDispatchConflictFix({ key, state, botComments: comments, now });
+          if (!store.isConflicting(detail)) {
+            // Not conflicting: safety net for a head that has stayed red.
+            const sha = detail.head?.sha;
+            const inputs = sha ? await fetchCiInputs(token, repo, sha, d) : null;
+            if (!inputs || store.classifyCiFailures(inputs).failing.length === 0) continue;
+            const failing = store.classifyCiFailures(inputs).failing;
+            // Same safeguard as the worker's skip_preexisting: ignore failures that also fail on the base.
+            const baseRef = detail.base?.ref;
+            if (baseRef) {
+              const baseInputs = await fetchCiInputs(token, repo, baseRef, d).catch(() => null);
+              const baseFailing = baseInputs ? new Set(store.classifyCiFailures(baseInputs).failing) : null;
+              if (baseFailing && failing.every((n) => baseFailing.has(n))) {
+                console.log(`${key}: CI failing but skipped — preexisting on ${baseRef}`);
+                continue;
+              }
+            }
+            const commit = await ghJson(token, `/repos/${repo}/commits/${sha}`, {}, d.fetchImpl);
+            const ciDecision = store.shouldDispatchBotCiFix({
+              key, state, headSha: sha, headDate: commit?.commit?.committer?.date, now,
+            });
+            if (!ciDecision.dispatch) {
+              console.log(`${key}: CI failing but skipped — ${ciDecision.reason}`);
+              continue;
+            }
+            if (!dryRun) {
+              await dispatchBotCiFailure(env, { repo, pr: detail, installationId, defaultBranch }, d);
+              ciDispatched.push({ key, sha });
+            }
+            planOut.ciFailures.push({ key, url: pr.html_url, dispatched: !dryRun, checks: store.classifyCiFailures(inputs).failing });
+            console.log(`${key}: CI still failing after ~24h${dryRun ? ' (dry run, not dispatched)' : ', dispatched ci_failure'}.`);
+            continue;
+          }
+          const decision = store.shouldDispatchConflictFix({ key, state, now });
           const entry = { key, url: pr.html_url, dispatched: false, reason: decision.reason };
           if (decision.dispatch) {
             if (!dryRun) {
@@ -327,10 +380,11 @@ async function plan(env = process.env, deps = {}) {
     console.log(`${needing.length - planOut.reviews.length} review(s) deferred to a later run (MAX_REVIEWS=${maxReviews}).`);
   }
 
-  if (dispatchedKeys.length > 0 || actionMutations.length > 0) {
+  if (dispatchedKeys.length > 0 || ciDispatched.length > 0 || actionMutations.length > 0) {
     await (deps.updateState || updateState)((current) => {
       let next = current;
       for (const key of dispatchedKeys) next = store.markConflictDispatched(next, key, now);
+      for (const c of ciDispatched) next = store.markBotCiDispatched(next, c.key, c.sha, now);
       for (const m of actionMutations) next = m(next);
       return { state: next };
     });
@@ -508,7 +562,7 @@ async function maintainDependabotPr({ token, repo, detail, key, state, dryRun, n
     if (rerunnable.length > 0) console.log(`${key}: only rerunnable/infra failures (${rerunnable.join(', ')}); not dispatching.`);
     return out;
   }
-  const decision = store.shouldDispatchCiFix({ action, headSha: sha });
+  const decision = store.shouldDispatchCiFix({ action, headSha: sha, now });
   if (!decision.dispatch) {
     console.log(`${key}: CI failing but skipped — ${decision.reason}`);
     return out;
@@ -747,6 +801,7 @@ module.exports = {
   makeTokenMinter,
   getPrDetail,
   dispatchMergeConflict,
+  dispatchBotCiFailure,
   buildReviewPrompt,
   plan,
   reviewPrompt,
