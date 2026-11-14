@@ -10,8 +10,13 @@ AGENT_INFRA_REPO = "the-intern"
 # the repo root, bundled into src/agentic.generated.js at deploy and test time
 # (scripts/bundle-agentic.js) — no per-agent vars here.
 
-# no-op change to trigger deploy-worker.yml after Node 22 fix (#27)
-
 [[kv_namespaces]]
 binding = "CI_FAILURE_DEDUP"
 id = "fcf245f1528e47f7a38215cc678977ba"
+
+[triggers]
+# Heartbeats usage-limit-poller.yml via repository_dispatch (poller_tick) —
+# more reliable than GitHub Actions' own `schedule` trigger, which can lag
+# under load (see #105). The GH-side schedule/workflow_dispatch triggers stay
+# in place as a fallback.
+crons = ["*/5 * * * *"]

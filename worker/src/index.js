@@ -100,6 +100,15 @@ export default {
     }
     return handleGitHub(request, env);
   },
+
+  // Cloudflare Cron Trigger (see [triggers] in wrangler.toml): a heartbeat
+  // that's far more reliable than GitHub Actions' own `schedule` trigger,
+  // which can lag well beyond its cadence under load (see #105). This is
+  // additive — usage-limit-poller.yml keeps its schedule/workflow_dispatch
+  // triggers as a fallback in case the Cloudflare side ever misfires.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(handleScheduled(env));
+  },
 };
 
 // Shared dispatch POST used by the generic flow, handleCheckSuite, and
@@ -1042,6 +1051,49 @@ async function handleReview(payload, env) {
   }
 }
 
+// Resolves the installation id for the configured owner/repo: prefers the
+// static AGENT_INFRA_INSTALLATION_ID override, otherwise mints an App JWT and
+// looks it up live. Shared by handleTelegram and handleScheduled.
+async function resolveInstallationId(env, owner, repo) {
+  if (env.AGENT_INFRA_INSTALLATION_ID) return env.AGENT_INFRA_INSTALLATION_ID;
+
+  const appId = env.APP_ID;
+  let privateKey = getPrivateKey(env);
+  if (!appId || !privateKey) return null;
+
+  privateKey = privateKey.trim();
+  if (!privateKey.includes('-----BEGIN')) {
+    privateKey = Buffer.from(privateKey, 'base64').toString('utf8');
+  }
+  const appJwt = mintAppJwt(appId, privateKey);
+  return getInstallationIdForRepo(appJwt, `${owner}/${repo}`);
+}
+
+// Dispatches a poller_tick event on every Cron Trigger firing, so
+// usage-limit-poller.yml gets a heartbeat that isn't subject to GH Actions'
+// own schedule-trigger delays. scripts/poll-pending-retries.js only re-fires
+// entries whose retry_after has passed, so an extra/overlapping trigger
+// source is safe. Throws on failure so Cloudflare records the invocation as
+// failed (surfaced via `wrangler tail` / the dashboard) rather than silently
+// swallowing errors — the GH-side schedule trigger still runs as a fallback.
+async function handleScheduled(env) {
+  const owner = env.AGENT_INFRA_OWNER || 'TheDeepestSpace';
+  const repo = env.AGENT_INFRA_REPO || 'the-intern';
+
+  const installationId = await resolveInstallationId(env, owner, repo);
+  if (!installationId) {
+    throw new Error('missing installation id for agent-infra');
+  }
+
+  const token = await getInstallationToken(env, installationId);
+  const dispatchRes = await dispatchRepoEvent(env, token, 'poller_tick', {});
+
+  if (!dispatchRes.ok) {
+    const errorText = await dispatchRes.text();
+    throw new Error(`dispatch failed: ${errorText}`);
+  }
+}
+
 // Returns {file_id, file_name} for a non-image file attachment (document,
 // video, audio, voice, animation), or null. Images are handled as photos.
 function pickFileAttachment(message) {
@@ -1100,20 +1152,7 @@ async function handleTelegram(request, env) {
       return new Response(`ignored: rate limit for agent ${hit.name} reached`, { status: 200 });
     }
 
-    let installationId = env.AGENT_INFRA_INSTALLATION_ID;
-    if (!installationId) {
-      const appId = env.APP_ID;
-      let privateKey = getPrivateKey(env);
-      if (appId && privateKey) {
-        privateKey = privateKey.trim();
-        if (!privateKey.includes('-----BEGIN')) {
-          privateKey = Buffer.from(privateKey, 'base64').toString('utf8');
-        }
-        const appJwt = mintAppJwt(appId, privateKey);
-        installationId = await getInstallationIdForRepo(appJwt, `${owner}/${repo}`);
-      }
-    }
-
+    const installationId = await resolveInstallationId(env, owner, repo);
     if (!installationId) {
       return new Response('missing installation id for agent-infra', { status: 500 });
     }
