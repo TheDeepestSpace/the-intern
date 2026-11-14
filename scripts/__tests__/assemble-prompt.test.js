@@ -39,6 +39,15 @@ describe('assemble-prompt', () => {
     expect(build(baseAgent, { STYLE_FILE: style }).prompt).not.toContain('Specage override');
   });
 
+  it('adds the specage re-review step for pushing specage agents, not planner/reviewer/plain agents', () => {
+    for (const a of ['specage_pr', 'ci_fixer_specage', 'conflict_fixer_specage', 'specage_implementer']) {
+      expect(build({ ...baseAgent, agent: a }).prompt).toContain('Re-request review (specage)');
+    }
+    for (const a of ['specage_planner', 'specage_reviewer', 'default']) {
+      expect(build({ ...baseAgent, agent: a }).prompt).not.toContain('Re-request review (specage)');
+    }
+  });
+
   it('puts the resolved prompt first, the access list, then style, prior summary and the request last', () => {
     const style = path.join(dir, 'style.md');
     fs.writeFileSync(style, 'STYLE RULES');
