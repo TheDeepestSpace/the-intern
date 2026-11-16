@@ -154,7 +154,7 @@ async function saveRunLog({ prefix, runId, logFile = '/tmp/run.log' } = {}) {
     runGit(['worktree', 'add', '--detach', worktreeDir]);
     ensureSafeDirectory(worktreeDir);
     runGit(['config', 'user.name', 'the-intern-bot[bot]'], { ...gitOpts, allowFailure: true });
-    runGit(['config', 'user.email', 'the-intern-bot[bot]@users.noreply.github.com'], { ...gitOpts, allowFailure: true });
+    runGit(['config', 'user.email', '308992161+the-intern-bot[bot]@users.noreply.github.com'], { ...gitOpts, allowFailure: true });
 
     pushWithRetry(remoteUrl, gitOpts, () => {
       try {

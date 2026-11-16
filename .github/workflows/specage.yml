@@ -584,7 +584,7 @@ jobs:
               "cd \"$TARGET_DIR\"",
               "git config --global --add safe.directory \"$TARGET_DIR\"",
               "git config user.name \"the-intern-bot[bot]\"",
-              "git config user.email \"the-intern-bot[bot]@users.noreply.github.com\"",
+              "git config user.email \"308992161+the-intern-bot[bot]@users.noreply.github.com\"",
               "mkdir -p \"$HOME/.claude\"",
               // Unquoted heredoc delimiter here (STOPHOOKEOF, not a quoted variant) since this
               // whole script string is itself wrapped in single quotes by the outer node -e

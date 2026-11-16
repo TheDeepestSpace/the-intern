@@ -159,7 +159,7 @@ async function saveSummaryToDataRepo(targetRepo, issueNumber, promptText, result
 
   try {
     runGit('config user.name "the-intern-bot[bot]"');
-    runGit('config user.email "the-intern-bot[bot]@users.noreply.github.com"');
+    runGit('config user.email "308992161+the-intern-bot[bot]@users.noreply.github.com"');
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (attempt > 1) {
