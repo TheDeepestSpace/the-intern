@@ -151,6 +151,7 @@ function triggerContext(kind, def, values) {
     ctx.param = t.parameters;
     if (t.parameters.repo !== undefined) ctx.repo = t.parameters.repo;
     if (t.parameters.issue_number !== undefined) ctx.issue_number = t.parameters.issue_number;
+    else if (t.parameters.pr_number !== undefined) ctx.issue_number = t.parameters.pr_number;
   }
   return ctx;
 }
@@ -415,8 +416,12 @@ function validateAgent(name, agent, spec, errors) {
   if (SYSTEM_FIELDS[kind]) {
     if (typeof agent.request !== 'string' || !agent.request.trim()) errors.push(`${where}.request: required for a ${kind} trigger`);
     else checkVars(agent.request, ctx, [], `${where}.request`, errors);
+  } else if (agent.request !== undefined && !isJob && kind === 'manual') {
+    // Optional for manual agents: spells out the facts of a run that carries no free text.
+    if (typeof agent.request !== 'string' || !agent.request.trim()) errors.push(`${where}.request: must be a non-empty string`);
+    else checkVars(agent.request, ctx, [], `${where}.request`, errors);
   } else if (agent.request !== undefined && !isJob) {
-    errors.push(`${where}.request: only valid with a ${Object.keys(SYSTEM_FIELDS).join('|')} trigger`);
+    errors.push(`${where}.request: only valid with a ${Object.keys(SYSTEM_FIELDS).join('|')}|manual trigger`);
   }
 
   // prompt

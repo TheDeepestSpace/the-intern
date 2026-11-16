@@ -281,6 +281,23 @@ agents:
         dispatch_agent:
           agent: specage_implementer
           with: { repo: $trigger.commit.matcher.project, issue_number: $issue_number }
+      # Existing-PR dispatches: push to the PR's own head branch, never open a
+      # second PR. Use these (not the implement action) when a PR exists.
+      - name: dispatch agent to fix CI on existing PR
+        parameters: { pr_number: integer }
+        dispatch_agent:
+          agent: specage_ci_fixer_pr
+          with: { repo: $trigger.commit.matcher.project, pr_number: $pr_number }
+      - name: dispatch agent to fix merge conflicts on existing PR
+        parameters: { pr_number: integer }
+        dispatch_agent:
+          agent: specage_conflict_fixer_pr
+          with: { repo: $trigger.commit.matcher.project, pr_number: $pr_number }
+      - name: dispatch agent to re-review existing PR
+        parameters: { pr_number: integer }
+        dispatch_agent:
+          agent: specage_rereview_pr
+          with: { repo: $trigger.commit.matcher.project, pr_number: $pr_number }
 
   specage_implementer:
     trigger:
@@ -290,7 +307,50 @@ agents:
       repos:
         - { name: $trigger.manual.parameters.repo, scope: read/write }
         - { name: specage_data, scope: read }
-    prompt: Implement $repo#$issue_number following the spec in the specage data repo.
+    prompt: |-
+      Implement $repo#$issue_number following the spec in the specage data repo.
+      First check for an existing PR that already claims this issue (`gh pr list --repo $repo --state all --search "$issue_number in:body"`, and branches named `specage/*`). If one exists (open or merged), do NOT run the implement flow or open a PR: post a one-line comment on the issue pointing at that PR and stop.
+
+  # Manual (planner/thread-dispatched) counterparts of ci_fixer_specage,
+  # conflict_fixer_specage and specage_reviewer, targeting an EXISTING PR by
+  # number. They never open a new PR: they check out the PR's head branch and
+  # push to it. Re-review after a push comes from the shared specage block in
+  # scripts/assemble-prompt.js.
+  specage_ci_fixer_pr:
+    trigger:
+      manual:
+        parameters: { repo: string, pr_number: integer }
+    access:
+      repos:
+        - { name: $trigger.manual.parameters.repo, scope: read/write }
+        - { name: specage_data, scope: read/write }
+    prompt: *headless_prompt
+    request: |-
+      CI needs fixing on existing specage PR $repo#$issue_number. Do NOT open a new PR and do not run the implement flow. First confirm the PR is open and its head branch is `specage/*` (`gh pr view $issue_number --repo $repo --json state,headRefName`); if not, comment why and stop. Check out that head branch, read `.specage/config.yaml` (data_repo, project) for the specage context, investigate the failing checks (`gh pr checks $issue_number`) and push a fix to the existing head branch. If CI is already green, stop without pushing. Then follow the specage protocol for trace/review commits.
+
+  specage_conflict_fixer_pr:
+    trigger:
+      manual:
+        parameters: { repo: string, pr_number: integer }
+    access:
+      repos:
+        - { name: $trigger.manual.parameters.repo, scope: read/write }
+        - { name: specage_data, scope: read/write }
+    prompt: *headless_prompt
+    request: |-
+      Existing specage PR $repo#$issue_number needs its merge conflicts resolved. Do NOT open a new PR and do not run the implement flow. First confirm the PR is open and its head branch is `specage/*` (`gh pr view $issue_number --repo $repo --json state,headRefName,mergeable`); if not, comment why and stop. Read `.specage/config.yaml` (data_repo, project) for the specage context, then merge or rebase the latest default branch into the PR's head branch, resolve the conflicts, and push the fix to that branch. Follow the specage protocol for trace/review commits, keeping the `Spec:` trailers.
+
+  specage_rereview_pr:
+    trigger:
+      manual:
+        parameters: { repo: string, pr_number: integer }
+    access:
+      repos:
+        - { name: $trigger.manual.parameters.repo, scope: read/write }
+        - { name: specage_data, scope: read }
+    prompt_file: { repo: specage, path: protocol/PROTOCOL.md }
+    request: |-
+      Re-review request: review the current head of existing PR $repo#$issue_number (the same as a `review $repo#$issue_number` commit on the project's review branch). Do not open a new PR.
 
   # Review request: the implement agent (the bot) pushes `review <owner/repo>#<n>`
   # to the project's review branch; the commit message (in the request text)

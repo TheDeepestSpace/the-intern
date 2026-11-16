@@ -194,11 +194,25 @@ describe('comment trigger (review comment, system events, workflow_dispatch)', (
 });
 
 describe('manual trigger (workflow_dispatch with agent + parameters)', () => {
+  it('resolves the existing-PR fixers against the given PR, never the implement flow', () => {
+    for (const a of ['specage_ci_fixer_pr', 'specage_conflict_fixer_pr']) {
+      const { outputs, text } = run('workflow_dispatch', { inputs: { agent: a, parameters: JSON.stringify({ repo: SPECAGE, pr_number: 133 }) } });
+      expect(outputs).toMatchObject({ agent: a, target_repo: SPECAGE, issue_number: '133', event_type: 'manual' });
+      expect(JSON.parse(outputs.access)).toEqual([{ repo: SPECAGE, scope: 'read/write' }, { repo: DATA, scope: 'read/write' }]);
+      expect(text).toContain(`${SPECAGE}#133`);
+      expect(text).toContain('Do NOT open a new PR');
+    }
+    const r = run('workflow_dispatch', { inputs: { agent: 'specage_rereview_pr', parameters: JSON.stringify({ repo: SPECAGE, pr_number: 133 }) } });
+    expect(r.outputs.prompt_path).toBe('protocol/PROTOCOL.md');
+    expect(r.text).toContain(`${SPECAGE}#133`);
+  });
+
   it('resolves the implementer with typed parameters and its own scope', () => {
     const { outputs, text, agent } = run('workflow_dispatch', { inputs: { agent: 'specage_implementer', parameters: JSON.stringify({ repo: SPECAGE, issue_number: 12 }) } });
     expect(outputs).toMatchObject({ agent: 'specage_implementer', target_repo: SPECAGE, issue_number: '12', event_type: 'manual', backend: 'claude' });
     expect(JSON.parse(outputs.access)).toEqual([{ repo: SPECAGE, scope: 'read/write' }, { repo: DATA, scope: 'read' }]);
-    expect(agent.prompt).toBe('Implement TheDeepestSpace/specage#12 following the spec in the specage data repo.');
+    expect(agent.prompt).toMatch(/^Implement TheDeepestSpace\/specage#12 following the spec in the specage data repo\.\n/);
+    expect(agent.prompt).toContain('do NOT run the implement flow');
     expect(text).toContain('specage_implementer');
     expect(text).toContain('issue_number=12');
   });
@@ -220,7 +234,7 @@ describe('commit trigger (agent_commit)', () => {
     const { outputs, text, agent } = run('repository_dispatch', push());
     expect(outputs).toMatchObject({
       agent: 'specage_planner', target_repo: DATA, issue_number: '', installation_id: '42', event_type: 'agent_commit',
-      prompt_repo: SPECAGE, prompt_ref: '', prompt_path: 'protocol/PROTOCOL.md', actions_count: 1,
+      prompt_repo: SPECAGE, prompt_ref: '', prompt_path: 'protocol/PROTOCOL.md', actions_count: 4,
     });
     expect(JSON.parse(outputs.access)).toEqual([{ repo: SPECAGE, scope: 'read/write' }, { repo: DATA, scope: 'read/write' }]);
     expect(text).toBe(`Commit abc123 was pushed to branch specages/specage/spec of ${DATA} by specage-app[bot].\nBranch captures: project=specage.\n\nCommit message:\nspec: add node`);
