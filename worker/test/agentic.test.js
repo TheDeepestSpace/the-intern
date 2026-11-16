@@ -422,12 +422,12 @@ describe('system triggers: ci_failure / merge_conflict / review', () => {
       expect(dispatches(spy2)).toHaveLength(0);
     });
 
-    it('does not route PR-less failures in repos the route is not scoped to', async () => {
+    it('routes PR-less failures in any installed repo (route is not repo-scoped)', async () => {
       const spy = mockCheckSuiteDispatchFlow({ commitsBySha: commits() });
       const body = suite();
       body.repository = { ...body.repository, full_name: REPO, name: 'the-intern' };
-      expect(await send(baseGithubEnv(), body)).toMatch(/^ignored: no agent trigger matches/);
-      expect(dispatches(spy)).toHaveLength(0);
+      expect(await send(baseGithubEnv(), body)).toBe('ok');
+      expect(dispatches(spy)).toHaveLength(1);
     });
 
     it('dedups per (repo, sha)', async () => {
