@@ -129,7 +129,7 @@ async function updateEntries(mutate) {
     ensureSafeDirectory(worktreeDir);
 
     runGit('config user.name "the-intern-bot[bot]"', { ...gitOpts, allowFailure: true });
-    runGit('config user.email "the-intern-bot[bot]@users.noreply.github.com"', { ...gitOpts, allowFailure: true });
+    runGit('config user.email "308992161+the-intern-bot[bot]@users.noreply.github.com"', { ...gitOpts, allowFailure: true });
 
     let result;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {

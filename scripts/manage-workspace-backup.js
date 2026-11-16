@@ -410,7 +410,7 @@ async function clearBackup(targetRepo, issueNumber) {
     runGit(`worktree add --detach "${worktreeDir}"`);
     ensureSafeDirectory(worktreeDir);
     runGit('config user.name "the-intern-bot[bot]"', { ...gitOpts, allowFailure: true });
-    runGit('config user.email "the-intern-bot[bot]@users.noreply.github.com"', { ...gitOpts, allowFailure: true });
+    runGit('config user.email "308992161+the-intern-bot[bot]@users.noreply.github.com"', { ...gitOpts, allowFailure: true });
 
     try {
       runGit(`${CLEAR_TARGET_REPO_EXTRAHEADER} fetch ${remoteUrl} ${branchName}:${branchName}`, gitOpts);
@@ -481,7 +481,7 @@ async function saveBackup(targetRepo, issueNumber, { diffPatch, commitsPatch, tr
     runGit(`worktree add --detach "${worktreeDir}"`);
     ensureSafeDirectory(worktreeDir);
     runGit('config user.name "the-intern-bot[bot]"', { ...gitOpts, allowFailure: true });
-    runGit('config user.email "the-intern-bot[bot]@users.noreply.github.com"', { ...gitOpts, allowFailure: true });
+    runGit('config user.email "308992161+the-intern-bot[bot]@users.noreply.github.com"', { ...gitOpts, allowFailure: true });
 
     pushWithRetry(remoteUrl, branchName, gitOpts, () => {
       try {
@@ -638,7 +638,7 @@ async function runRestoreStep(env = process.env) {
       // its own author, and this restore step runs before the dispatcher
       // configures one in the target checkout (that happens later, inside
       // "Run agent") — set it inline for just this command instead.
-      runGit(`-c user.name="the-intern-bot[bot]" -c user.email="the-intern-bot[bot]@users.noreply.github.com" am --3way "${patchFile}"`);
+      runGit(`-c user.name="the-intern-bot[bot]" -c user.email="308992161+the-intern-bot[bot]@users.noreply.github.com" am --3way "${patchFile}"`);
       restoredSomething = true;
       console.log('Restored previously unpushed commits from backup.');
     } catch (err) {

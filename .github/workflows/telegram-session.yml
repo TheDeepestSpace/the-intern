@@ -144,7 +144,7 @@ jobs:
           exec >> "$LOG_FILE" 2>&1
           REPO_URL="https://github.com/TheDeepestSpace/the-intern-data.git"
           git config --global user.name "the-intern-bot[bot]"
-          git config --global user.email "the-intern-bot[bot]@users.noreply.github.com"
+          git config --global user.email "308992161+the-intern-bot[bot]@users.noreply.github.com"
           git config --global --add safe.directory "*"
           git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=$GH_TOKEN"; }; f'
 
@@ -400,7 +400,7 @@ jobs:
           # to a session improvising one, producing a commit author
           # (missing the required [bot] suffix) GitHub couldn't resolve to
           # the bot's account.
-          su dev -c 'git config --global user.name "the-intern-bot[bot]" && git config --global user.email "the-intern-bot[bot]@users.noreply.github.com"'
+          su dev -c 'git config --global user.name "the-intern-bot[bot]" && git config --global user.email "308992161+the-intern-bot[bot]@users.noreply.github.com"'
 
           # Reset the safety-net sentinel send-telegram.js writes on a
           # successful send (issue #201) — the fallback check below only
@@ -490,7 +490,7 @@ jobs:
         run: |
           exec >> "$LOG_FILE" 2>&1
           git config user.name "the-intern-bot[bot]"
-          git config user.email "the-intern-bot[bot]@users.noreply.github.com"
+          git config user.email "308992161+the-intern-bot[bot]@users.noreply.github.com"
           git add convo.md
           if git diff --cached --quiet; then
             echo "nothing to commit"

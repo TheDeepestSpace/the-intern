@@ -208,7 +208,7 @@ async function main(env = process.env, deps = {}) {
     ensureSafeDirectory(tmpDir);
     runGit('init -q', { cwd: tmpDir });
     runGit('config user.name "the-intern-bot[bot]"', { cwd: tmpDir });
-    runGit('config user.email "the-intern-bot[bot]@users.noreply.github.com"', { cwd: tmpDir });
+    runGit('config user.email "308992161+the-intern-bot[bot]@users.noreply.github.com"', { cwd: tmpDir });
 
     let defaultBranch;
     try {
