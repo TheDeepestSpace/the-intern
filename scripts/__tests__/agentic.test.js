@@ -126,7 +126,7 @@ describe('validation', () => {
     expect(errs(ok.replace('14d', '14w')).join()).toMatch(/dedup/);
     expect(errs(`  a:\n    trigger: {merge_conflict: {pr_authors: [x], skip_preexisting: true}}\n    prompt: hi\n    request: hi\n`).join()).toMatch(/unknown key 'skip_preexisting'/);
     expect(errs(`  a:\n    trigger: {review: {pr_authors: [x]}}\n    prompt: hi\n    request: hi\n`).join()).toMatch(/reviewers: non-empty list required/);
-    expect(errs(`  a:\n    trigger: {manual: {}}\n    prompt: hi\n    request: hi\n`).join()).toMatch(/request: only valid with/);
+    expect(errs(`  a:\n    trigger: {comment: {}}\n    prompt: hi\n    request: hi\n`).join()).toMatch(/request: only valid with/);
     // Free text is never a trusted source for a repo, but the event's repo is.
     expect(errs(ok.replace('$trigger.ci_failure.repo', '$trigger.ci_failure.conclusion')).join()).toMatch(/not a trusted source/);
   });
@@ -293,7 +293,13 @@ describe('cutover behaviours (issue #273)', () => {
   it('resolves prompt files and validates prompt_file.ref vars', () => {
     const r = explain(spec, { kind: 'commit', repo: 'TheDeepestSpace/specage-data', branch: 'specages/specage/spec', author: 'specage-app[bot]', sha: 'abc' });
     expect(r.prompt_file).toEqual({ repo: 'TheDeepestSpace/specage', ref: null, path: 'protocol/PROTOCOL.md' });
-    expect(r.actions).toEqual([{ name: 'dispatch agent to implement issue', parameters: { issue_number: 'integer' }, kind: 'dispatch_agent' }]);
+    expect(r.actions.map((a) => a.name)).toEqual([
+      'dispatch agent to implement issue',
+      'dispatch agent to fix CI on existing PR',
+      'dispatch agent to fix merge conflicts on existing PR',
+      'dispatch agent to re-review existing PR',
+    ]);
+    expect(r.actions[0]).toEqual({ name: 'dispatch agent to implement issue', parameters: { issue_number: 'integer' }, kind: 'dispatch_agent' });
     const pinned = loadSpec(`${BASE}  a:\n    trigger: {commit: {repo: data, branch: x/@p, author: b}}\n    access: {repos: [{name: data, scope: read}]}\n    prompt_file: {repo: data, ref: $trigger.commit.sha, path: P.md}\n`).spec;
     const e = explain(pinned, { kind: 'commit', repo: 'Acme/data', branch: 'x/y', author: 'b', sha: 'deadbeef' });
     expect(e.prompt_file.ref).toBe('deadbeef');

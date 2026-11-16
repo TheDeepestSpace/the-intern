@@ -64,6 +64,9 @@ function specageBlock(agent) {
   if (!/(^|[_-])(planner|reviewer)$/.test(agent.agent || '')) {
     out += 'Re-request review (specage): only if you successfully created a new PR (always request the initial review of its head) or your push to an existing PR moved its head to a new SHA (compare `git rev-parse HEAD` / `gh pr view <PR> --json headRefOid` with the head before you started; apply this comparison to existing PRs only), request a review of that head: push a commit whose message is `review <owner/repo>#<PR number>` to the `specages/<project>/review` branch of the specage data repo (project and data_repo are in `.specage/config.yaml`), so specage_reviewer runs on that head SHA. Once per head SHA: skip it if the review branch already has such a commit for this PR since your push, or if nothing was pushed, the push failed, or (existing PR) the head SHA is unchanged (no loops).\n\n';
   }
+  if (/(^|[_-])planner$/.test(agent.agent || '')) {
+    out += 'Existing PRs (specage): when a PR already exists for a claim/issue, never use "dispatch agent to implement issue" (that would open a duplicate PR). Instead use "dispatch agent to fix CI on existing PR", "dispatch agent to fix merge conflicts on existing PR" or "dispatch agent to re-review existing PR" with the PR number; they push to the PR\'s existing head branch. Do not refuse a CI-fix, conflict-fix or re-review request for lack of a dispatch option.\n\n';
+  }
   return out;
 }
 

@@ -48,6 +48,13 @@ describe('assemble-prompt', () => {
     }
   });
 
+  it('tells the planner to use existing-PR dispatches instead of refusing', () => {
+    const p = build({ ...baseAgent, agent: 'specage_planner' }).prompt;
+    expect(p).toContain('fix CI on existing PR');
+    expect(p).toContain('never use "dispatch agent to implement issue"');
+    expect(build({ ...baseAgent, agent: 'default' }).prompt).not.toContain('Existing PRs (specage)');
+  });
+
   it('puts the resolved prompt first, the access list, then style, prior summary and the request last', () => {
     const style = path.join(dir, 'style.md');
     fs.writeFileSync(style, 'STYLE RULES');
