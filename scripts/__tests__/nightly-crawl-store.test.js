@@ -400,19 +400,16 @@ describe('bot CI-failure safety net', () => {
     expect(r.dispatch).toBe(false);
   });
 
-  it('dispatches for a head that has been red for a day, once per window', () => {
+  it('dispatches for a head that has been red for a day, with no per-sha dedup', () => {
     expect(shouldDispatchBotCiFix({ key: k, state: emptyState(), headSha: 's', headDate: old, now: NOW }).dispatch).toBe(true);
     const st = markBotCiDispatched(emptyState(), k, 's', NOW - 2 * HOUR);
-    expect(shouldDispatchBotCiFix({ key: k, state: st, headSha: 's', headDate: old, now: NOW }).dispatch).toBe(false);
-    // expires, and a new sha is not blocked
-    expect(shouldDispatchBotCiFix({ key: k, state: st, headSha: 's', headDate: old, now: NOW + DAY }).dispatch).toBe(true);
-    expect(shouldDispatchBotCiFix({ key: k, state: st, headSha: 't', headDate: old, now: NOW }).dispatch).toBe(true);
+    expect(shouldDispatchBotCiFix({ key: k, state: st, headSha: 's', headDate: old, now: NOW }).dispatch).toBe(true);
   });
 
-  it('dependabot ciFixShas expire instead of blocking forever', () => {
+  it('dependabot CI fix has no per-sha dedup, only the attempt cap', () => {
     const st = markCiFixDispatched(emptyState(), k, 's', NOW - 2 * HOUR);
     const action = st.depActions[k];
-    expect(shouldDispatchCiFix({ action, headSha: 's', now: NOW }).dispatch).toBe(false);
-    expect(shouldDispatchCiFix({ action, headSha: 's', now: NOW + DAY }).dispatch).toBe(true);
+    expect(shouldDispatchCiFix({ action, headSha: 's', now: NOW }).dispatch).toBe(true);
+    expect(shouldDispatchCiFix({ action: { ciFixAttempts: 3 }, headSha: 't', now: NOW }).dispatch).toBe(false);
   });
 });

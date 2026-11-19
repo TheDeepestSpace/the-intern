@@ -112,7 +112,7 @@ describe('validation', () => {
 
   it('validates system triggers (ci_failure, merge_conflict, review)', () => {
     const ok = `  a:
-    trigger: {ci_failure: {pr_authors: ["bot[bot]"], skip_preexisting: true, dedup: 14d}}
+    trigger: {ci_failure: {pr_authors: ["bot[bot]"], skip_preexisting: true}}
     access: {repos: [{name: $trigger.ci_failure.repo, scope: read/write}]}
     prompt: 'fix $repo#$issue_number'
     request: 'CI failed ($trigger.ci_failure.conclusion) at $trigger.ci_failure.head_sha'
@@ -123,7 +123,7 @@ describe('validation', () => {
     expect(errs(ok.replace('pr_authors: ["bot[bot]"]', 'pr_authors: []')).join()).toMatch(/pr_authors: non-empty list required/);
     expect(errs(ok.replace('    request:', '    #request:')).join()).toMatch(/request: required for a ci_failure trigger/);
     expect(errs(ok.replace('$trigger.ci_failure.head_sha', '$trigger.ci_failure.nope')).join()).toMatch(/unknown variable/);
-    expect(errs(ok.replace('14d', '14w')).join()).toMatch(/dedup/);
+    expect(errs(ok.replace("skip_preexisting: true", "dedup: 2h")).join()).toMatch(/dedup/);
     expect(errs(`  a:\n    trigger: {merge_conflict: {pr_authors: [x], skip_preexisting: true}}\n    prompt: hi\n    request: hi\n`).join()).toMatch(/unknown key 'skip_preexisting'/);
     expect(errs(`  a:\n    trigger: {review: {pr_authors: [x]}}\n    prompt: hi\n    request: hi\n`).join()).toMatch(/reviewers: non-empty list required/);
     expect(errs(`  a:\n    trigger: {comment: {}}\n    prompt: hi\n    request: hi\n`).join()).toMatch(/request: only valid with/);
@@ -350,12 +350,12 @@ describe('relays', () => {
 describe('ci_failure trigger: head_branch route', () => {
   const AGENTS = `
   plain:
-    trigger: { ci_failure: { pr_authors: [bot], dedup: 14d } }
+    trigger: { ci_failure: { pr_authors: [bot] } }
     access: { repos: [{ name: $trigger.ci_failure.repo, scope: read/write }] }
     prompt: hi
     request: fix
   routed:
-    trigger: { ci_failure: { pr_authors: [bot], dedup: 14d, head_branch: 'specage/*' } }
+    trigger: { ci_failure: { pr_authors: [bot], head_branch: 'specage/*' } }
     access: { repos: [{ name: $trigger.ci_failure.repo, scope: read/write }] }
     prompt: hi
     request: fix

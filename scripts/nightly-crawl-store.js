@@ -104,17 +104,13 @@ function markConflictDispatched(state, key, now = Date.now()) {
  * Safety net for a bot PR whose head has been red for a while: the worker's
  * check_suite dispatch fires once per failure, so if that agent run died the
  * PR would stay red forever. Re-dispatch when the head commit is older than
- * STALE_FAILURE_MS and the crawl hasn't already dispatched for that sha within
- * the window. Bot comments are ignored, same as for conflicts.
+ * STALE_FAILURE_MS. No per-sha dedup: every crawl re-dispatches a still-red
+ * stale head. Bot comments are ignored, same as for conflicts.
  */
 function shouldDispatchBotCiFix({ key, state, headSha, headDate, now = Date.now() }) {
   const t = Date.parse(headDate || '');
   if (!Number.isFinite(t) || now - t < STALE_FAILURE_MS) {
     return { dispatch: false, reason: 'head commit is recent; the worker path owns it' };
-  }
-  const previous = state.botCi?.[key];
-  if (previous?.sha === headSha && now - Date.parse(previous.dispatchedAt) < CONFLICT_DEDUPE_MS) {
-    return { dispatch: false, reason: `CI fix already dispatched at ${previous.dispatchedAt}` };
   }
   return { dispatch: true, reason: null };
 }
@@ -319,14 +315,10 @@ function shouldRequestRebase({ action = {}, now = Date.now() }) {
 }
 
 /**
- * Once per head SHA, at most MAX_CI_FIX_ATTEMPTS in total per PR. `action`
+ * At most MAX_CI_FIX_ATTEMPTS in total per PR (no per-sha dedup). `action`
  * holds { ciFixAttempts, ciFixShas: [...] }.
  */
 function shouldDispatchCiFix({ action = {}, headSha, now = Date.now() }) {
-  // A sha only blocks while the last dispatch is recent; after that the failed
-  // attempt is presumed dead and retried (the attempt cap is the loop guard).
-  const recent = action.lastCiFixAt && now - Date.parse(action.lastCiFixAt) < CONFLICT_DEDUPE_MS;
-  if (recent && (action.ciFixShas || []).includes(headSha)) return { dispatch: false, reason: `already dispatched for ${headSha}` };
   if ((action.ciFixAttempts || 0) >= MAX_CI_FIX_ATTEMPTS) return { dispatch: false, reason: `CI-fix attempt cap reached (${action.ciFixAttempts})` };
   return { dispatch: true, reason: null };
 }

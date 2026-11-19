@@ -504,7 +504,7 @@ describe('handleGitHub check_suite handling', () => {
     );
   }
 
-  it('dedupes a second check-suite completion for the same PR + commit sha', async () => {
+  it('does not dedupe a second check-suite completion for the same PR + commit sha', async () => {
     const fetchSpy = mockCheckSuiteDispatchFlow();
     const env = baseGithubEnv();
 
@@ -520,9 +520,9 @@ describe('handleGitHub check_suite handling', () => {
       env
     );
     expect(second.status).toBe(200);
-    expect(await second.text()).toBe('ignored: ci_failure already dispatched for this PR+commit');
+    expect(await second.text()).toBe('ok');
 
-    expect(dispatchCalls(fetchSpy)).toHaveLength(1);
+    expect(dispatchCalls(fetchSpy)).toHaveLength(2);
   });
 
   it('retries on the next delivery after a failed dispatch instead of deduping it', async () => {
@@ -546,23 +546,13 @@ describe('handleGitHub check_suite handling', () => {
     expect(dispatchCalls(fetchSpy)).toHaveLength(1);
   });
 
-  it('dedup expires (short TTL), so a dead agent run is retried instead of skipped for good', async () => {
+  it('caps auto-fix dispatches per PR', async () => {
     const env = baseGithubEnv();
     const fetchSpy = mockCheckSuiteDispatchFlow();
     const send = () => worker.fetch(githubRequest({ eventType: 'check_suite', body: checkSuitePayload() }), env);
-    const t0 = Date.now();
-    const now = vi.spyOn(Date, 'now');
-    try {
-      now.mockReturnValue(t0);
-      expect(await (await send()).text()).toBe('ok');
-      now.mockReturnValue(t0 + 60 * 60 * 1000);
-      expect(await (await send()).text()).toBe('ignored: ci_failure already dispatched for this PR+commit');
-      now.mockReturnValue(t0 + 2 * 60 * 60 * 1000 + 1000);
-      expect(await (await send()).text()).toBe('ok');
-      expect(dispatchCalls(fetchSpy)).toHaveLength(2);
-    } finally {
-      now.mockRestore();
-    }
+    for (let i = 0; i < 10; i++) expect(await (await send()).text()).toBe('ok');
+    expect(await (await send()).text()).toBe('ignored: per-PR ci_failure attempt cap reached');
+    expect(dispatchCalls(fetchSpy)).toHaveLength(10);
   });
 
   it('dispatches again for the same PR when a different commit sha fails', async () => {

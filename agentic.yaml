@@ -119,17 +119,15 @@ agents:
   # or other third-party text — tier-2 injection-safe: the agent reads the real
   # content itself). `pr_authors` is the gate: the bot only acts on its own PRs.
 
-  # A check suite failed on a bot PR. `dedup`: the same (PR, failing commit)
-  # fires once per 2h (push + pull_request runs make two suites per commit; the
-  # window is short so a failed agent run is retried, not skipped for good); a new
-  # commit dispatches again. `skip_preexisting`: no dispatch when every failing
+  # A check suite failed on a bot PR. No per-commit dedup (every failing suite
+  # dispatches); the worker's per-PR attempts cap and `max_runs_per_hour` bound
+  # loops. `skip_preexisting`: no dispatch when every failing
   # check already fails on the PR's base (the PR didn't introduce it).
   ci_fixer:
     trigger:
       ci_failure:
         pr_authors: ["the-intern-bot[bot]"]
         skip_preexisting: true
-        dedup: 2h
     access:
       repos:
         - { name: $trigger.ci_failure.repo, scope: read/write }
@@ -140,8 +138,7 @@ agents:
   # A check suite failed on the default branch with no PR (e.g. right after a
   # merge): fix it in a new PR, or rerun if transient. `branches: [default]`
   # makes this the PR-less route (PR events keep using ci_fixer); the gate is
-  # the failing commit's author/committer in `pr_authors`. `dedup` is per
-  # (repo, sha), `skip_preexisting` compares with the previous commit, and
+  # the failing commit's author/committer in `pr_authors`. `skip_preexisting` compares with the previous commit, and
   # `max_consecutive` caps auto-fix dispatches until the branch goes green.
   main_ci_fixer:
     trigger:
@@ -149,7 +146,6 @@ agents:
         branches: [default]
         pr_authors: ["the-intern-bot[bot]"]
         skip_preexisting: true
-        dedup: 2h
         max_consecutive: 3
     access:
       repos:
@@ -167,7 +163,6 @@ agents:
         pr_authors: ["the-intern-bot[bot]"]
         head_branch: 'specage/*'
         skip_preexisting: true
-        dedup: 2h
     access:
       repos:
         - { name: $trigger.ci_failure.repo, scope: read/write }

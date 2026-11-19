@@ -280,7 +280,7 @@ function validateTrigger(name, trigger, spec, errors) {
     case 'ci_failure':
     case 'merge_conflict':
     case 'review': {
-      unknownKeys(def, ['repo', 'pr_authors', ...(kind === 'ci_failure' ? ['skip_preexisting', 'dedup', 'branches', 'max_consecutive'] : []),
+      unknownKeys(def, ['repo', 'pr_authors', ...(kind === 'ci_failure' ? ['skip_preexisting', 'branches', 'max_consecutive'] : []),
         ...(kind === 'ci_failure' || kind === 'merge_conflict' ? ['head_branch'] : []),
         ...(kind === 'review' ? ['reviewers', 'actions'] : [])], w, errors);
       repoRef('repo');
@@ -303,11 +303,6 @@ function validateTrigger(name, trigger, spec, errors) {
         errors.push(`${w}.head_branch: must be a non-empty glob string (PR head branch)`);
       }
       if (def.skip_preexisting !== undefined && typeof def.skip_preexisting !== 'boolean') errors.push(`${w}.skip_preexisting: must be a boolean`);
-      if (def.dedup !== undefined) {
-        const dedupSeconds = parseDuration(def.dedup);
-        // Cloudflare KV rejects an expirationTtl below 60s; 0 means no dedup.
-        if (dedupSeconds === null || (dedupSeconds !== 0 && dedupSeconds < 60)) errors.push(`${w}.dedup: like 30m|2h|14d (at least 60s)`);
-      }
       break;
     }
     case 'schedule':
