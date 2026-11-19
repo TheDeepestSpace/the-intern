@@ -67,7 +67,8 @@ function routeEvent(env, event, what) {
 }
 
 // agentic.yaml `limits.max_runs_per_hour`, counted per agent per UTC hour in
-// KV. A cost/loop guard, not an access control: skipped when no KV binding
+// KV. A cost/loop guard, not an access control, and approximate under
+// concurrent deliveries (non-atomic KV read/write): skipped when no KV binding
 // is configured (tests), counted only after a successful dispatch.
 async function rateLimitKey(env, resolved) {
   const limit = resolved.limits?.max_runs_per_hour;
@@ -283,7 +284,9 @@ async function fetchPrHeadRef(fullName, number, token) {
 }
 
 // Dispatches per (head-branch agent, PR), counted in KV after a successful
-// dispatch; skipped when no KV binding is configured (tests).
+// dispatch. KV has no atomic increment, so concurrent deliveries for the same
+// PR can both pass the check and undercount: the cap is approximate (same for
+// max_runs_per_hour). Skipped when no KV binding is configured (tests).
 async function attemptState(env, agent, payload, max) {
   if (!env.CI_FAILURE_DEDUP) return { key: null, exceeded: false, max };
   const number = payload.issue?.number ?? payload.pull_request?.number;

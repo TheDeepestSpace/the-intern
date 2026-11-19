@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { shouldDispatchBotCiFix, markBotCiDispatched, shouldDispatchCiFix, markCiFixDispatched } from '../nightly-crawl-store.js';
+import { MAX_BOT_CI_ATTEMPTS, shouldDispatchBotCiFix, markBotCiDispatched, shouldDispatchCiFix, markCiFixDispatched } from '../nightly-crawl-store.js';
 import {
   CONFIRMATION_DELAY_MS,
   CONFLICT_DEDUPE_MS,
@@ -404,6 +404,14 @@ describe('bot CI-failure safety net', () => {
     expect(shouldDispatchBotCiFix({ key: k, state: emptyState(), headSha: 's', headDate: old, now: NOW }).dispatch).toBe(true);
     const st = markBotCiDispatched(emptyState(), k, 's', NOW - 2 * HOUR);
     expect(shouldDispatchBotCiFix({ key: k, state: st, headSha: 's', headDate: old, now: NOW }).dispatch).toBe(true);
+  });
+
+  it('stops dispatching once the persistent per-PR attempt cap is reached', () => {
+    let st = emptyState();
+    for (let i = 0; i < MAX_BOT_CI_ATTEMPTS; i++) st = markBotCiDispatched(st, k, 's', NOW - 2 * HOUR);
+    const r = shouldDispatchBotCiFix({ key: k, state: st, headSha: 's', headDate: old, now: NOW });
+    expect(r.dispatch).toBe(false);
+    expect(r.reason).toMatch(/attempt cap/);
   });
 
   it('dependabot CI fix has no per-sha dedup, only the attempt cap', () => {
