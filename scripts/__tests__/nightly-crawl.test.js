@@ -199,7 +199,7 @@ describe('plan', () => {
       return plan(baseEnv, { fetchImpl: gh.fetchImpl, mintToken: async () => 't', enumerateRepos: async () => repos, now: () => NOW, ...s }).then((result) => ({ result, gh, s }));
     };
 
-    it('re-dispatches ci_failure once, then not again within the window', async () => {
+    it('re-dispatches ci_failure on every crawl while still red', async () => {
       const first = await go(new Date(NOW - 2 * DAY).toISOString());
       const d = first.gh.called('POST /repos/TheDeepestSpace/the-intern/dispatches');
       expect(d).toHaveLength(1);
@@ -207,7 +207,7 @@ describe('plan', () => {
       expect(d[0].body.client_payload.raw).toMatchObject({ check_suite: { conclusion: 'failure', head_sha: 'h1', head_branch: 'feat' }, pull_request: { number: 6 } });
       expect(first.s.get().botCi['acme/widgets#6']).toMatchObject({ sha: 'h1' });
       const second = await go(new Date(NOW - 2 * DAY).toISOString(), memoryStore(first.s.get()));
-      expect(second.gh.called('POST /repos/TheDeepestSpace/the-intern/dispatches')).toHaveLength(0);
+      expect(second.gh.called('POST /repos/TheDeepestSpace/the-intern/dispatches')).toHaveLength(1);
     });
 
     it('skips when every failing check also fails on the base branch', async () => {
@@ -622,7 +622,7 @@ describe('plan: dependabot rebase + CI-failure dispatch', () => {
     expect(store.get().depActions['acme/widgets#1'].rebaseAttempts).toBeUndefined();
   });
 
-  it('dispatches the bot with failing check names once per head SHA', async () => {
+  it('dispatches the bot with failing check names with no per-SHA dedup', async () => {
     const first = await run(pr(), ci(failed));
     expect(comments(first.gh)).toHaveLength(1);
     expect(comments(first.gh)[0]).toContain('@the-intern-bot');
@@ -630,9 +630,9 @@ describe('plan: dependabot rebase + CI-failure dispatch', () => {
     expect(comments(first.gh)[0]).not.toContain('`lint`');
     expect(first.result.ciFailures).toEqual([{ key: 'acme/widgets#1', url: 'https://github.com/acme/widgets/pull/1', dispatched: true, checks: ['test'] }]);
     expect(first.store.get().depActions['acme/widgets#1']).toMatchObject({ ciFixAttempts: 1, ciFixShas: ['sha1'] });
-    // same SHA next night: no repeat
+    // same SHA next night: dispatches again (attempt cap is the only guard)
     const second = await run(pr(), ci(failed), memoryStore(first.store.get()));
-    expect(comments(second.gh)).toEqual([]);
+    expect(comments(second.gh)).toHaveLength(1);
   });
 
   it('dispatches again on a new head SHA until the attempt cap', async () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { shouldDispatchBotCiFix, markBotCiDispatched, shouldDispatchCiFix, markCiFixDispatched } from '../nightly-crawl-store.js';
+import { MAX_BOT_CI_ATTEMPTS, shouldDispatchBotCiFix, markBotCiDispatched, shouldDispatchCiFix, markCiFixDispatched } from '../nightly-crawl-store.js';
 import {
   CONFIRMATION_DELAY_MS,
   CONFLICT_DEDUPE_MS,
@@ -400,19 +400,24 @@ describe('bot CI-failure safety net', () => {
     expect(r.dispatch).toBe(false);
   });
 
-  it('dispatches for a head that has been red for a day, once per window', () => {
+  it('dispatches for a head that has been red for a day, with no per-sha dedup', () => {
     expect(shouldDispatchBotCiFix({ key: k, state: emptyState(), headSha: 's', headDate: old, now: NOW }).dispatch).toBe(true);
     const st = markBotCiDispatched(emptyState(), k, 's', NOW - 2 * HOUR);
-    expect(shouldDispatchBotCiFix({ key: k, state: st, headSha: 's', headDate: old, now: NOW }).dispatch).toBe(false);
-    // expires, and a new sha is not blocked
-    expect(shouldDispatchBotCiFix({ key: k, state: st, headSha: 's', headDate: old, now: NOW + DAY }).dispatch).toBe(true);
-    expect(shouldDispatchBotCiFix({ key: k, state: st, headSha: 't', headDate: old, now: NOW }).dispatch).toBe(true);
+    expect(shouldDispatchBotCiFix({ key: k, state: st, headSha: 's', headDate: old, now: NOW }).dispatch).toBe(true);
   });
 
-  it('dependabot ciFixShas expire instead of blocking forever', () => {
+  it('stops dispatching once the persistent per-PR attempt cap is reached', () => {
+    let st = emptyState();
+    for (let i = 0; i < MAX_BOT_CI_ATTEMPTS; i++) st = markBotCiDispatched(st, k, 's', NOW - 2 * HOUR);
+    const r = shouldDispatchBotCiFix({ key: k, state: st, headSha: 's', headDate: old, now: NOW });
+    expect(r.dispatch).toBe(false);
+    expect(r.reason).toMatch(/attempt cap/);
+  });
+
+  it('dependabot CI fix has no per-sha dedup, only the attempt cap', () => {
     const st = markCiFixDispatched(emptyState(), k, 's', NOW - 2 * HOUR);
     const action = st.depActions[k];
-    expect(shouldDispatchCiFix({ action, headSha: 's', now: NOW }).dispatch).toBe(false);
-    expect(shouldDispatchCiFix({ action, headSha: 's', now: NOW + DAY }).dispatch).toBe(true);
+    expect(shouldDispatchCiFix({ action, headSha: 's', now: NOW }).dispatch).toBe(true);
+    expect(shouldDispatchCiFix({ action: { ciFixAttempts: 3 }, headSha: 't', now: NOW }).dispatch).toBe(false);
   });
 });

@@ -67,7 +67,8 @@ function routeEvent(env, event, what) {
 }
 
 // agentic.yaml `limits.max_runs_per_hour`, counted per agent per UTC hour in
-// KV. A cost/loop guard, not an access control: skipped when no KV binding
+// KV. A cost/loop guard, not an access control, and approximate under
+// concurrent deliveries (non-atomic KV read/write): skipped when no KV binding
 // is configured (tests), counted only after a successful dispatch.
 async function rateLimitKey(env, resolved) {
   const limit = resolved.limits?.max_runs_per_hour;
@@ -283,7 +284,9 @@ async function fetchPrHeadRef(fullName, number, token) {
 }
 
 // Dispatches per (head-branch agent, PR), counted in KV after a successful
-// dispatch; skipped when no KV binding is configured (tests).
+// dispatch. KV has no atomic increment, so concurrent deliveries for the same
+// PR can both pass the check and undercount: the cap is approximate (same for
+// max_runs_per_hour). Skipped when no KV binding is configured (tests).
 async function attemptState(env, agent, payload, max) {
   if (!env.CI_FAILURE_DEDUP) return { key: null, exceeded: false, max };
   const number = payload.issue?.number ?? payload.pull_request?.number;
@@ -338,13 +341,8 @@ async function getFailingCheckNames(owner, repo, ref, token) {
 
 // Auto-queues a fix-CI dispatch when a check suite fails on a PR the bot
 // itself opened, so it can fix its own broken PRs without a human comment.
-// Deduped per (PR, head commit sha) via the CI_FAILURE_DEDUP KV namespace,
-// since a same-repo bot PR commonly triggers both a `push` and a
-// `pull_request` Actions run for the identical head sha, producing two
-// check suites that would otherwise each fire their own ci_failure dispatch.
-// A *new* commit on the same PR still dispatches normally — retry-until-fixed
-// across distinct commits is preserved, only the same-commit double-fire is
-// suppressed. (handlePush below has no such double-trigger and stays KV-free.)
+// No per-sha dedup (too many failures were being skipped); runaway loops are
+// bounded by a per-PR attempts cap and the agent's max_runs_per_hour.
 //
 // Guardrail: if every failing check on the PR's head is already failing on
 // its base branch, the breakage is pre-existing (e.g. a shared transitive
@@ -450,7 +448,7 @@ async function processCheckSuite(payload, env) {
     }
 
     let dispatched = 0;
-    let deduped = 0;
+    let capped = 0;
     let skippedPreExisting = 0;
     let rateLimited = 0;
     for (const { number } of pullRequests) {
@@ -467,9 +465,9 @@ async function processCheckSuite(payload, env) {
       if (!prRes.ok) continue;
       const pullRequest = await prRes.json();
 
-      // Which PRs are fixable (author allowlist), the dedup window and the
-      // pre-existing-failure guard all come from the matching ci_failure
-      // agent in agentic.yaml.
+      // Which PRs are fixable (author allowlist) and the pre-existing-failure
+      // guard
+      // come from the matching ci_failure agent in agentic.yaml.
       const routed = routeEvent(env, eventFromSystem('ci_failure', {
         repository: payload.repository,
         pull_request: pullRequest,
@@ -481,12 +479,11 @@ async function processCheckSuite(payload, env) {
       }
       const { hit, resolved } = routed;
       const trigger = routed.spec.agents[hit.name].trigger.ci_failure;
-      const dedupTtl = trigger.dedup ? parseDuration(trigger.dedup) : 0;
 
-      const dedupKey = `ci_failure:${sourceOwner}/${sourceRepo}#${number}@${sha}`;
-      if (dedupTtl && await env.CI_FAILURE_DEDUP.get(dedupKey)) {
-        deduped++;
-        logSkip('ci_failure', `${sourceOwner}/${sourceRepo}#${number}@${sha}`, 'dedup (already dispatched within window)');
+      const attempts = await attemptState(env, hit.name, { repository: payload.repository, pull_request: { number } }, MAX_CI_ATTEMPTS_PER_PR);
+      if (attempts.exceeded) {
+        capped++;
+        logSkip('ci_failure', `${sourceOwner}/${sourceRepo}#${number}@${sha}`, `cap (${attempts.max} auto-fix attempts for this PR)`);
         continue;
       }
 
@@ -522,10 +519,7 @@ async function processCheckSuite(payload, env) {
         const errorText = await dispatchRes.text();
         return new Response(`dispatch failed: ${errorText}`, { status: 502 });
       }
-      // Marked only after a successful dispatch, so a failed delivery leaves
-      // the key unset and a subsequent retry (e.g. GitHub webhook redelivery)
-      // can still go through instead of being permanently deduped.
-      if (dedupTtl) await env.CI_FAILURE_DEDUP.put(dedupKey, '1', { expirationTtl: dedupTtl });
+      await countAttempt(env, attempts);
       await countRun(env, limit);
       dispatched++;
     }
@@ -533,8 +527,8 @@ async function processCheckSuite(payload, env) {
     if (dispatched > 0) {
       return new Response('ok', { status: 200 });
     }
-    if (deduped > 0) {
-      return new Response('ignored: ci_failure already dispatched for this PR+commit', { status: 200 });
+    if (capped > 0) {
+      return new Response('ignored: per-PR ci_failure attempt cap reached', { status: 200 });
     }
     if (skippedPreExisting > 0) {
       return new Response('ignored: all failures pre-existing on base branch', { status: 200 });
@@ -549,6 +543,7 @@ async function processCheckSuite(payload, env) {
 }
 
 const DEFAULT_MAX_CONSECUTIVE = 3;
+const MAX_CI_ATTEMPTS_PER_PR = 10;
 const mainStreakKey = fullName => `ci_main_streak:${fullName}`.toLowerCase();
 
 async function fetchCommit(owner, repo, sha, token) {
@@ -564,14 +559,14 @@ async function fetchCommit(owner, repo, sha, token) {
 
 // A check suite failed on the default branch with no PR (e.g. right after a
 // bot PR merged). Routed to a `ci_failure` agent with `branches: [default]`;
-// the commit's author/committer must be in its `pr_authors`. Guards: dedup per
-// (repo, sha), skip_preexisting against the previous commit, the per-hour rate
+// the commit's author/committer must be in its `pr_authors`. Guards:
+// skip_preexisting against the previous commit, the per-hour rate
 // limit, and `max_consecutive` auto-fix dispatches on main without a green
 // run in between (reset by a successful default-branch suite).
 async function handleDefaultBranchFailure(payload, env) {
   const checkSuite = payload.check_suite;
   const installationId = payload.installation?.id;
-  if (!installationId) return new Response('missing installation id', { status: 400 });
+// (repo, sha)? placeholder
   const owner = payload.repository?.owner?.login;
   const repo = payload.repository?.name;
   const fullName = payload.repository?.full_name;
@@ -590,13 +585,6 @@ async function handleDefaultBranchFailure(payload, env) {
     if (routed.response) return routed.response;
     const { hit, resolved } = routed;
     const trigger = routed.spec.agents[hit.name].trigger.ci_failure;
-
-    const dedupTtl = trigger.dedup ? parseDuration(trigger.dedup) : 0;
-    const dedupKey = `ci_failure:${owner}/${repo}@${sha}`;
-    if (dedupTtl && await env.CI_FAILURE_DEDUP.get(dedupKey)) {
-      logSkip('ci_failure', `${owner}/${repo}@${sha}`, 'dedup (already dispatched within window)');
-      return new Response('ignored: ci_failure already dispatched for this commit', { status: 200 });
-    }
 
     if (trigger.skip_preexisting) {
       const headFailures = await getFailingCheckNames(owner, repo, sha, token);
@@ -626,7 +614,6 @@ async function handleDefaultBranchFailure(payload, env) {
     if (!dispatchRes.ok) {
       return new Response(`dispatch failed: ${await dispatchRes.text()}`, { status: 502 });
     }
-    if (dedupTtl) await env.CI_FAILURE_DEDUP.put(dedupKey, '1', { expirationTtl: dedupTtl });
     if (env.CI_FAILURE_DEDUP) await env.CI_FAILURE_DEDUP.put(streakKey, String(streak + 1), { expirationTtl: 7 * 86400 });
     await countRun(env, limit);
     return new Response('ok', { status: 200 });

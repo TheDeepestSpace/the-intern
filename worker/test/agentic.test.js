@@ -357,7 +357,7 @@ describe('system triggers: ci_failure / merge_conflict / review', () => {
     expect(dispatches(spy2)).toHaveLength(1);
   });
 
-  it('ci_failure skip_preexisting and dedup are read from the trigger', async () => {
+  it('ci_failure skip_preexisting is read from the trigger', async () => {
     const runs = { 'sha-abc123': failing, 'base-sha': failing };
     const body = { ...checkSuite(), check_suite: { ...checkSuite().check_suite, pull_requests: [{ number: 7 }] } };
     // Declared (default): pre-existing failures are skipped.
@@ -365,10 +365,9 @@ describe('system triggers: ci_failure / merge_conflict / review', () => {
     expect(await (await worker.fetch(githubRequest({ eventType: 'check_suite', body }), baseGithubEnv())).text())
       .toBe('ignored: all failures pre-existing on base branch');
     spy.mockRestore();
-    // Turned off in yaml: dispatches, and without dedup a repeat dispatches again.
+    // Turned off in yaml: dispatches, and a repeat dispatches again.
     const env = specWith(a => {
       a.ci_fixer.trigger.ci_failure.skip_preexisting = false;
-      delete a.ci_fixer.trigger.ci_failure.dedup;
     });
     const spy2 = mockCheckSuiteDispatchFlow({ checkRunsByRef: runs });
     for (let i = 0; i < 2; i++) {
@@ -430,12 +429,12 @@ describe('system triggers: ci_failure / merge_conflict / review', () => {
       expect(dispatches(spy)).toHaveLength(1);
     });
 
-    it('dedups per (repo, sha)', async () => {
+    it('does not dedup per (repo, sha)', async () => {
       const env = baseGithubEnv();
       const spy = mockCheckSuiteDispatchFlow({ commitsBySha: commits() });
       expect(await send(env)).toBe('ok');
-      expect(await send(env)).toBe('ignored: ci_failure already dispatched for this commit');
-      expect(dispatches(spy)).toHaveLength(1);
+      expect(await send(env)).toBe('ok');
+      expect(dispatches(spy)).toHaveLength(2);
     });
 
     it('skips when the previous commit already fails the same checks', async () => {
