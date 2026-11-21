@@ -1380,6 +1380,12 @@ function eventFromWebhook(spec, eventType, payload, { head_ref } = {}) {
 // worker builds its dispatch payload and routes it through this same function,
 // so it and scripts/resolve-agent.js can never disagree.
 const SYSTEM_EVENT_TYPES = { ci_failure: 'ci_failure', merge_conflict: 'merge_conflict', coderabbit_review: 'review' };
+function checkSuiteUrl(raw) {
+  const repo = raw.repository?.full_name;
+  const cs = raw.check_suite;
+  if (!repo || !cs?.head_sha) return '';
+  return `https://github.com/${repo}/commit/${cs.head_sha}/checks` + (cs.id ? `?check_suite_id=${cs.id}` : '');
+}
 function eventFromSystem(type, raw) {
   const kind = SYSTEM_EVENT_TYPES[type];
   if (!kind) return null;
@@ -1399,7 +1405,8 @@ function eventFromSystem(type, raw) {
       head_branch: raw.check_suite?.head_branch || '',
       default_branch: raw.repository?.default_branch || '',
       commit_actors: [raw.commit?.author_login, raw.commit?.committer_login].filter(Boolean),
-      html_url: raw.check_suite?.html_url || '',
+      // GitHub's check_suite webhook payload carries no html_url; derive it.
+      html_url: raw.check_suite?.html_url || checkSuiteUrl(raw),
     });
   } else if (kind === 'merge_conflict') {
     Object.assign(event, {

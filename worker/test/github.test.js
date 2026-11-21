@@ -466,7 +466,7 @@ describe('handleGitHub check_suite handling', () => {
       baseGithubEnv()
     );
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe('ignored: no bot-authored pull requests');
+    expect(await res.text()).toBe('ignored: no agent trigger matches this check suite');
 
     const dispatchCall = fetchSpy.mock.calls.find(([input]) =>
       new URL(input.url ?? input).pathname.endsWith('/dispatches')
