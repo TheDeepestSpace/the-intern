@@ -160,14 +160,16 @@ jobs:
           path: verdict-${{ matrix.slug }}-${{ matrix.number }}.json
           retention-days: 7
 
-      - name: Upload run log on failure
-        if: failure()
+      - name: Upload run log
+        if: always()
         continue-on-error: true
         run: |
           exec >> "$LOG_FILE" 2>&1
           node scripts/manage-run-log.js
         env:
-          RUN_LOG_PREFIX: nightly-crawl/${{ matrix.repo }}/${{ matrix.number }}
+          RUN_LOG_TARGET: ${{ matrix.repo }}
+          RUN_LOG_ISSUE: ${{ matrix.number }}
+          RUN_LOG_STATUS: ${{ job.status }}
           DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
 
   act:
