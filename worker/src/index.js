@@ -451,6 +451,8 @@ async function processCheckSuite(payload, env) {
     let capped = 0;
     let skippedPreExisting = 0;
     let rateLimited = 0;
+    let routeIgnored = 0;
+    let lastIgnore = '';
     for (const { number } of pullRequests) {
       const prRes = await fetch(
         `https://api.github.com/repos/${sourceOwner}/${sourceRepo}/pulls/${number}`,
@@ -475,6 +477,9 @@ async function processCheckSuite(payload, env) {
       }), 'check suite');
       if (routed.response) {
         if (routed.response.status !== 200) return routed.response;
+        routeIgnored++;
+        lastIgnore = await routed.response.clone().text();
+        logSkip('ci_failure', `${sourceOwner}/${sourceRepo}#${number}@${sha}`, lastIgnore);
         continue;
       }
       const { hit, resolved } = routed;
@@ -535,6 +540,9 @@ async function processCheckSuite(payload, env) {
     }
     if (rateLimited > 0) {
       return new Response('ignored: rate limit for the ci_failure agent reached', { status: 200 });
+    }
+    if (routeIgnored > 0) {
+      return new Response(lastIgnore.startsWith('ignored') ? lastIgnore : `ignored: ${lastIgnore}`, { status: 200 });
     }
     return new Response('ignored: no bot-authored pull requests', { status: 200 });
   } catch (err) {

@@ -305,6 +305,16 @@ describe('system triggers: ci_failure / merge_conflict / review', () => {
     expect(dispatches(spy)[0]).toMatchObject({ event_type: 'ci_failure', client_payload: { agent: 'ci_fixer_specage' } });
   });
 
+  it.each([['fix/thing', 'ci_fixer'], ['specage/some-spec', 'ci_fixer_specage']])(
+    'ci_failure on %s dispatches %s when the check_suite payload has no html_url (real GitHub shape)', async (ref, agent) => {
+      const spy = mockCheckSuiteDispatchFlow({ pullRequestHeadRef: ref });
+      const base = checkSuite();
+      const { html_url, ...suiteNoUrl } = base.check_suite;
+      const body = { ...base, check_suite: { ...suiteNoUrl, id: 99, pull_requests: [{ number: 7 }] } };
+      expect(await (await worker.fetch(githubRequest({ eventType: 'check_suite', body }), baseGithubEnv())).text()).toBe('ok');
+      expect(dispatches(spy)[0]).toMatchObject({ client_payload: { agent } });
+  });
+
   it('ci_failure on other branches still routes to ci_fixer', async () => {
     const spy = mockCheckSuiteDispatchFlow({ pullRequestHeadRef: 'fix/thing' });
     const body = { ...checkSuite(), check_suite: { ...checkSuite().check_suite, pull_requests: [{ number: 7 }] } };
@@ -349,7 +359,7 @@ describe('system triggers: ci_failure / merge_conflict / review', () => {
     const spy = mockCheckSuiteDispatchFlow();
     const body = { ...checkSuite(), check_suite: { ...checkSuite().check_suite, pull_requests: [{ number: 7 }] } };
     expect(await (await worker.fetch(githubRequest({ eventType: 'check_suite', body }), env)).text())
-      .toBe('ignored: no bot-authored pull requests');
+      .toBe('ignored: no agent trigger matches this check suite');
     expect(dispatches(spy)).toHaveLength(0);
     spy.mockRestore();
     const spy2 = mockCheckSuiteDispatchFlow({ pullRequestAuthor: 'someone-else' });
@@ -395,6 +405,14 @@ describe('system triggers: ci_failure / merge_conflict / review', () => {
       'sha-abc123': { author: { login }, committer: { login: 'web-flow' }, parents: [{ sha: 'parent-sha' }] },
     });
     const send = (env, body = suite()) => worker.fetch(githubRequest({ eventType: 'check_suite', body }), env).then(r => r.text());
+
+    it('dispatches main_ci_fixer when the check_suite payload has no html_url', async () => {
+      const spy = mockCheckSuiteDispatchFlow({ commitsBySha: commits() });
+      const body = suite();
+      delete body.check_suite.html_url;
+      expect(await send(baseGithubEnv(), body)).toBe('ok');
+      expect(dispatches(spy)[0]).toMatchObject({ client_payload: { agent: 'main_ci_fixer' } });
+    });
 
     it('dispatches main_ci_fixer for a bot-authored commit', async () => {
       const spy = mockCheckSuiteDispatchFlow({ commitsBySha: commits() });
