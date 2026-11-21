@@ -60,10 +60,12 @@ const TOKEN_PATTERNS = [
   /\b(Bearer|Basic|token)\s+[A-Za-z0-9._~+\/=-]{16,}/gi,
 ];
 const SECRET_ENV_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|API_KEY|_KEY$|CREDENTIAL|AUTH)/i;
-const MIN_SECRET_LEN = 8;
 
 function redactSecrets(text, env = process.env) {
-  let out = redactUrl(String(text));
+  // Workflow-command masks (::add-mask::<secret>) carry raw secrets, e.g. from
+  // rotate-codex-auth.js; the runner never consumes them once stdout is
+  // redirected into the log file, so blank them.
+  let out = redactUrl(String(text).replace(/^::add-mask::.*$/gm, '::add-mask::***'));
   for (const re of TOKEN_PATTERNS) {
     out = out.replace(re, (m, scheme) => (typeof scheme === 'string' ? `${scheme} ***` : '***'));
   }
@@ -72,7 +74,7 @@ function redactSecrets(text, env = process.env) {
   for (const [name, value] of Object.entries(env)) {
     if (!value || !SECRET_ENV_NAME.test(name)) continue;
     for (const v of [value, ...String(value).split(/\r?\n/)]) {
-      if (v.length >= MIN_SECRET_LEN) values.add(v);
+      if (v.length > 0) values.add(v);
     }
   }
   for (const v of [...values].sort((x, y) => y.length - x.length)) {
@@ -170,6 +172,7 @@ async function withWorktree(fn) {
     runGit(['branch', '-D', BRANCH_NAME], { ...gitOpts, allowFailure: true });
     runGit(['worktree', 'remove', '--force', worktreeDir], { allowFailure: true });
     fs.rmSync(worktreeDir, { recursive: true, force: true });
+    runGit(['branch', '-D', `${BRANCH_NAME}-squashed`], { allowFailure: true });
   }
 }
 

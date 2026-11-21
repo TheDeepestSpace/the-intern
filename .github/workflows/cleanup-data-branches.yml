@@ -35,6 +35,7 @@ jobs:
       # Daily retention for action-logs/ (issue #335): drops day directories
       # older than 7 days and squashes the branch so they leave history too.
       - name: Prune old action logs on the-intern-data
+        if: ${{ !cancelled() }}
         continue-on-error: true
         run: node scripts/manage-run-log.js --prune
         env:

@@ -99,13 +99,23 @@ describe('manage-run-log', () => {
       expect(out).toBe('x\n***\ny');
     });
 
-    it('masks values of secret-looking env vars but not others or short values', () => {
+    it('masks values of secret-looking env vars but not others', () => {
       const out = redactSecrets('pw=hunter2hunter2 name=public short=abc', {
         MY_SECRET: 'hunter2hunter2',
         PUBLIC_NAME: 'public',
         SOME_TOKEN: 'abc',
       });
-      expect(out).toBe('pw=*** name=public short=abc');
+      expect(out).toBe('pw=*** name=public short=***');
+    });
+  });
+
+  describe('add-mask lines', () => {
+    it('never leaves the masked value in the log', () => {
+      const auth = JSON.stringify({ refresh_token: 'rt_plainvalue123' });
+      const b64 = Buffer.from(auth).toString('base64');
+      const out = redactSecrets(`a\n::add-mask::${b64}\n::add-mask::rt_plainvalue123\nb`, {});
+      expect(out).not.toContain(b64);
+      expect(out).not.toContain('rt_plainvalue123');
     });
   });
 
