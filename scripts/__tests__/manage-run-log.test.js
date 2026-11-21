@@ -3,7 +3,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { getLogPath, saveRunLog, BRANCH_NAME, MAX_LOG_BYTES } from '../manage-run-log.js';
+import {
+  getLogPath, saveRunLog, pruneRunLogs, redactSecrets, buildHeader, isExpiredDir, BRANCH_NAME, MAX_LOG_BYTES,
+} from '../manage-run-log.js';
 
 // Same real-git-against-a-scratch-bare-repo approach as
 // manage-codex-log.test.js/manage-workspace-backup.test.js: the-intern-data
@@ -34,6 +36,8 @@ describe('manage-run-log', () => {
   let originalCwd;
   let tmpRoot;
   let dataRemoteDir;
+  const NOW = new Date('2026-11-21T12:00:00Z');
+  const info = (extra = {}) => ({ runId: '999', attempt: '2', target: 'acme/widgets', issue: '5', status: 'failure', ...extra });
 
   beforeEach(() => {
     originalCwd = process.cwd();
@@ -53,155 +57,172 @@ describe('manage-run-log', () => {
   function newWorkDir(name) {
     const dir = path.join(tmpRoot, name);
     initWorkRepo(dir);
+    process.chdir(dir);
     return dir;
   }
 
-  function readFromRemote(relPath) {
-    return sh(`git show ${BRANCH_NAME}:${relPath}`, dataRemoteDir);
-  }
+  const readFromRemote = relPath => sh(`git show ${BRANCH_NAME}:${relPath}`, dataRemoteDir);
+  const writeLog = (name, text) => {
+    const f = path.join(tmpRoot, name);
+    fs.writeFileSync(f, text);
+    return f;
+  };
 
   describe('getLogPath', () => {
-    it('sanitizes non-alphanumeric characters per segment and nests by prefix/run', () => {
-      expect(getLogPath('dispatcher/acme/weird.repo!name/7', '12345')).toBe(
-        path.join('dispatcher', 'acme', 'weird-repo-name', '7', '12345.log')
+    it('builds action-logs/<date>/<run>-<attempt>-<slug>-<issue>.log', () => {
+      expect(getLogPath({ date: NOW, runId: '12345', attempt: '2', target: 'acme/weird.repo!', issue: '7' })).toBe(
+        'action-logs/2026-11-21/12345-2-acme-weird-repo--7.log'
       );
     });
 
-    it('supports a prefix with no natural repo/issue scoping', () => {
-      expect(getLogPath('telegram-session', '42')).toBe(path.join('telegram-session', '42.log'));
+    it('omits the issue segment when absent', () => {
+      expect(getLogPath({ date: NOW, runId: '42', attempt: '1', target: 'telegram-session' })).toBe(
+        'action-logs/2026-11-21/42-1-telegram-session.log'
+      );
+    });
+  });
+
+  describe('redactSecrets', () => {
+    it('masks known token shapes and URL credentials', () => {
+      const ghp = 'ghp_' + 'a'.repeat(36);
+      const pat = 'github_pat_' + 'B'.repeat(40);
+      const out = redactSecrets(
+        `tok ${ghp} ${pat} sk-ant-api03-abcdefghijklmnop https://x-access-token:s3cr3tvalue@github.com/a/b.git Authorization: Bearer abcdefghijklmnopqrstuv`,
+        {}
+      );
+      expect(out).not.toMatch(/ghp_a|github_pat_B|sk-ant|s3cr3tvalue|abcdefghijklmnopqrstuv/);
+      expect(out).toContain('github.com/a/b.git');
+    });
+
+    it('masks private key blocks', () => {
+      const out = redactSecrets('x\n-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----\ny', {});
+      expect(out).toBe('x\n***\ny');
+    });
+
+    it('masks values of secret-looking env vars but not others', () => {
+      const out = redactSecrets('pw=hunter2hunter2 name=public short=abc', {
+        MY_SECRET: 'hunter2hunter2',
+        PUBLIC_NAME: 'public',
+        SOME_TOKEN: 'abc',
+      });
+      expect(out).toBe('pw=*** name=public short=***');
+    });
+  });
+
+  describe('add-mask lines', () => {
+    it('never leaves the masked value in the log', () => {
+      const auth = JSON.stringify({ refresh_token: 'rt_plainvalue123' });
+      const b64 = Buffer.from(auth).toString('base64');
+      const out = redactSecrets(`a\n::add-mask::${b64}\n::add-mask::rt_plainvalue123\nb`, {});
+      expect(out).not.toContain(b64);
+      expect(out).not.toContain('rt_plainvalue123');
+    });
+  });
+
+  describe('isExpiredDir', () => {
+    it('expires only valid date dirs older than 7 days', () => {
+      expect(isExpiredDir('2026-11-13', NOW)).toBe(true);
+      expect(isExpiredDir('2026-11-14', NOW)).toBe(false);
+      expect(isExpiredDir('2026-11-21', NOW)).toBe(false);
+      expect(isExpiredDir('notes', NOW)).toBe(false);
+    });
+  });
+
+  describe('buildHeader', () => {
+    it('includes run url, trigger, backend/model, target, timestamps, status', () => {
+      const h = buildHeader({ runUrl: 'https://github.com/o/r/actions/runs/1', trigger: 'issue_comment', backend: 'claude', model: 'm', target: 'a/b', issue: '3', startedAt: 's', finishedAt: 'f', status: 'cancelled' });
+      for (const l of ['# run: https://github.com/o/r/actions/runs/1', '# trigger: issue_comment', '# backend: claude', '# model: m', '# target: a/b#3', '# started: s', '# finished: f', '# status: cancelled']) {
+        expect(h).toContain(l);
+      }
     });
   });
 
   describe('saveRunLog', () => {
-    it('pushes the log content to the-intern-data at the expected path', async () => {
-      const work = newWorkDir('save-basic');
-      process.chdir(work);
-      const logFile = path.join(tmpRoot, 'run.log');
-      fs.writeFileSync(logFile, 'mint-installation-token failed: boom\n');
+    it('pushes header + redacted log to the dated path, whatever the status', async () => {
+      newWorkDir('save-basic');
+      const logFile = writeLog('run.log', 'boom ghp_' + 'z'.repeat(36) + '\n');
+      await saveRunLog({ logFile, info: info({ status: 'success' }), env: {}, now: NOW });
 
-      await saveRunLog({ prefix: 'dispatcher/acme/widgets/5', runId: '999', logFile });
-
-      const relPath = getLogPath('dispatcher/acme/widgets/5', '999');
-      expect(readFromRemote(relPath)).toBe('mint-installation-token failed: boom');
+      const pushed = readFromRemote('action-logs/2026-11-21/999-2-acme-widgets-5.log');
+      expect(pushed).toContain('# status: success');
+      expect(pushed).toContain('boom ***');
+      expect(pushed).not.toContain('ghp_z');
     });
 
-    it('leaves the caller checkout untouched (runs in an isolated worktree)', async () => {
+    it('leaves the caller checkout untouched', async () => {
       const work = newWorkDir('save-isolated');
-      process.chdir(work);
-      const branchBefore = sh('git rev-parse --abbrev-ref HEAD', work);
-      const logFile = path.join(tmpRoot, 'run.log');
-      fs.writeFileSync(logFile, 'boom\n');
-
-      await saveRunLog({ prefix: 'dispatcher/acme/widgets/5', runId: '1', logFile });
-
-      expect(sh('git rev-parse --abbrev-ref HEAD', work)).toBe(branchBefore);
-      expect(fs.existsSync(path.join(work, 'dispatcher'))).toBe(false);
+      const before = sh('git rev-parse --abbrev-ref HEAD', work);
+      await saveRunLog({ logFile: writeLog('run.log', 'boom\n'), info: info(), env: {}, now: NOW });
+      expect(sh('git rev-parse --abbrev-ref HEAD', work)).toBe(before);
+      expect(fs.existsSync(path.join(work, 'action-logs'))).toBe(false);
     });
 
-    it('accumulates logs from multiple runs under the same branch, in order', async () => {
-      const work = newWorkDir('save-multi');
-      process.chdir(work);
-      const logFileA = path.join(tmpRoot, 'a.log');
-      const logFileB = path.join(tmpRoot, 'b.log');
-      fs.writeFileSync(logFileA, 'mint-installation-token\nfetch-summary\n');
-      fs.writeFileSync(logFileB, 'chown\nrun-agent\n');
+    it('accumulates logs from multiple runs and keeps appended-step order', async () => {
+      newWorkDir('save-multi');
+      const a = path.join(tmpRoot, 'a.log');
+      fs.appendFileSync(a, 'step one\n');
+      fs.appendFileSync(a, 'step two\n');
+      await saveRunLog({ logFile: a, info: info({ runId: '1' }), env: {}, now: NOW });
+      await saveRunLog({ logFile: writeLog('b.log', 'other\n'), info: info({ runId: '2' }), env: {}, now: NOW });
 
-      await saveRunLog({ prefix: 'dispatcher/acme/widgets/5', runId: '1', logFile: logFileA });
-      await saveRunLog({ prefix: 'dispatcher/acme/widgets/5', runId: '2', logFile: logFileB });
-
-      expect(readFromRemote(getLogPath('dispatcher/acme/widgets/5', '1'))).toBe('mint-installation-token\nfetch-summary');
-      expect(readFromRemote(getLogPath('dispatcher/acme/widgets/5', '2'))).toBe('chown\nrun-agent');
+      expect(readFromRemote('action-logs/2026-11-21/1-2-acme-widgets-5.log')).toMatch(/step one\nstep two$/);
+      expect(readFromRemote('action-logs/2026-11-21/2-2-acme-widgets-5.log')).toMatch(/other$/);
     });
 
-    it('preserves the order of multiple steps appended into one run log (what `exec >> "$LOG_FILE" 2>&1` produces per step)', async () => {
-      const work = newWorkDir('save-appended-steps');
-      process.chdir(work);
-      const logFile = path.join(tmpRoot, 'run.log');
-
-      // Each workflow step's script starts with `exec >> "$LOG_FILE" 2>&1`, so
-      // a real run builds this file by repeated appends, one per step, in the
-      // order the steps execute — not by writing it all at once. Simulate
-      // that here rather than asserting on a single fs.writeFileSync blob.
-      fs.appendFileSync(logFile, 'Mint installation token: minted for acme/widgets\n');
-      fs.appendFileSync(logFile, 'Ensure dev user and workspace ownership: chown ok\n');
-      fs.appendFileSync(logFile, 'Run agent: session failed with exit 1\n');
-
-      await saveRunLog({ prefix: 'dispatcher/acme/widgets/5', runId: '1', logFile });
-
-      const pushed = readFromRemote(getLogPath('dispatcher/acme/widgets/5', '1'));
-      expect(pushed.split('\n')).toEqual([
-        'Mint installation token: minted for acme/widgets',
-        'Ensure dev user and workspace ownership: chown ok',
-        'Run agent: session failed with exit 1',
-      ]);
+    it('does nothing without a runId, a log file, or with an empty log', async () => {
+      newWorkDir('save-noop');
+      await saveRunLog({ logFile: writeLog('r.log', 'x\n'), info: info({ runId: '' }), env: {}, now: NOW });
+      await saveRunLog({ logFile: path.join(tmpRoot, 'missing.log'), info: info(), env: {}, now: NOW });
+      await saveRunLog({ logFile: writeLog('e.log', '  \n'), info: info(), env: {}, now: NOW });
+      expect(sh(`git ls-remote ${dataRemoteDir} ${BRANCH_NAME}`, tmpRoot)).toBe('');
     });
 
-    it('does nothing when prefix or runId is missing', async () => {
-      const work = newWorkDir('save-missing-key');
-      process.chdir(work);
-      const logFile = path.join(tmpRoot, 'run.log');
-      fs.writeFileSync(logFile, 'content\n');
+    it('truncates oversized content to a UTF-8-safe boundary', async () => {
+      newWorkDir('save-oversized');
+      const logFile = writeLog('big.log', 'a'.repeat(100) + '中' + 'b'.repeat(MAX_LOG_BYTES - 2));
+      await saveRunLog({ logFile, info: info(), env: {}, now: NOW });
 
-      await saveRunLog({ prefix: '', runId: '1', logFile });
-      await saveRunLog({ prefix: 'dispatcher/acme/widgets/5', runId: '', logFile });
-
-      expect(sh(`git ls-remote ${dataRemoteDir} ${BRANCH_NAME}`, work)).toBe('');
-    });
-
-    it('does nothing when the log file does not exist', async () => {
-      const work = newWorkDir('save-missing-file');
-      process.chdir(work);
-
-      await saveRunLog({
-        prefix: 'dispatcher/acme/widgets/5',
-        runId: '1',
-        logFile: path.join(tmpRoot, 'does-not-exist.log'),
-      });
-
-      expect(sh(`git ls-remote ${dataRemoteDir} ${BRANCH_NAME}`, work)).toBe('');
-    });
-
-    it('does nothing when the log file is empty', async () => {
-      const work = newWorkDir('save-empty-file');
-      process.chdir(work);
-      const logFile = path.join(tmpRoot, 'empty.log');
-      fs.writeFileSync(logFile, '   \n');
-
-      await saveRunLog({ prefix: 'dispatcher/acme/widgets/5', runId: '1', logFile });
-
-      expect(sh(`git ls-remote ${dataRemoteDir} ${BRANCH_NAME}`, work)).toBe('');
-    });
-
-    it('truncates oversized content to a UTF-8-safe boundary, never exceeding MAX_LOG_BYTES', async () => {
-      const work = newWorkDir('save-oversized-multibyte');
-      process.chdir(work);
-      const logFile = path.join(tmpRoot, 'oversized.log');
-
-      // Places a 3-byte multibyte char ('中') straddling the exact byte offset
-      // the truncation cut lands on, so the naive `slice(-MAX_LOG_BYTES)` would
-      // split it mid-character and produce an invalid UTF-8 tail.
-      const pad = 'a'.repeat(100);
-      const tail = 'b'.repeat(MAX_LOG_BYTES - 2);
-      fs.writeFileSync(logFile, pad + '中' + tail);
-
-      await saveRunLog({ prefix: 'dispatcher/acme/widgets/5', runId: '1', logFile });
-
-      const pushed = readFromRemote(getLogPath('dispatcher/acme/widgets/5', '1'));
-      expect(Buffer.byteLength(pushed, 'utf8')).toBeLessThanOrEqual(MAX_LOG_BYTES);
-      expect(pushed).not.toMatch(/�/); // no replacement chars from a mid-character split
+      const pushed = readFromRemote('action-logs/2026-11-21/999-2-acme-widgets-5.log');
+      expect(pushed).not.toMatch(/\uFFFD/);
       expect(pushed.endsWith('b'.repeat(100))).toBe(true);
+      expect(Buffer.byteLength(pushed, 'utf8')).toBeLessThanOrEqual(MAX_LOG_BYTES + 1024);
     });
 
-    it('does not throw when the-intern-data remote is not configured', async () => {
-      const work = newWorkDir('save-no-remote');
-      process.chdir(work);
+    it('does not throw when the remote is not configured', async () => {
+      newWorkDir('save-no-remote');
       delete process.env.DATA_REPO_REMOTE_URL;
-      const logFile = path.join(tmpRoot, 'run.log');
-      fs.writeFileSync(logFile, 'content\n');
+      await expect(saveRunLog({ logFile: writeLog('r.log', 'c\n'), info: info(), env: {}, now: NOW })).resolves.toBeUndefined();
+    });
 
-      await expect(
-        saveRunLog({ prefix: 'dispatcher/acme/widgets/5', runId: '1', logFile })
-      ).resolves.toBeUndefined();
+    it('does not throw when the push fails', async () => {
+      newWorkDir('save-bad-remote');
+      process.env.DATA_REPO_REMOTE_URL = path.join(tmpRoot, 'nonexistent.git');
+      await expect(saveRunLog({ logFile: writeLog('r.log', 'c\n'), info: info(), env: {}, now: NOW })).resolves.toBeUndefined();
+    });
+  });
+
+  describe('pruneRunLogs', () => {
+    it('deletes day dirs older than 7 days and squashes history to one commit', async () => {
+      newWorkDir('prune');
+      const old = new Date('2026-11-10T00:00:00Z');
+      const fresh = new Date('2026-11-20T00:00:00Z');
+      await saveRunLog({ logFile: writeLog('o.log', 'old\n'), info: info({ runId: '1' }), env: {}, now: old });
+      await saveRunLog({ logFile: writeLog('f.log', 'fresh\n'), info: info({ runId: '2' }), env: {}, now: fresh });
+
+      const res = await pruneRunLogs({ now: NOW });
+      expect(res.deleted).toEqual(['2026-11-10']);
+      const files = sh(`git ls-tree -r --name-only ${BRANCH_NAME}`, dataRemoteDir).split('\n');
+      expect(files).toEqual(['action-logs/2026-11-20/2-2-acme-widgets-5.log']);
+      expect(sh(`git rev-list --count ${BRANCH_NAME}`, dataRemoteDir)).toBe('1');
+    });
+
+    it('is a no-op when nothing has expired or the branch is missing', async () => {
+      newWorkDir('prune-noop');
+      expect((await pruneRunLogs({ now: NOW })).deleted).toEqual([]);
+      await saveRunLog({ logFile: writeLog('f.log', 'fresh\n'), info: info(), env: {}, now: NOW });
+      const before = sh(`git rev-parse ${BRANCH_NAME}`, dataRemoteDir);
+      expect((await pruneRunLogs({ now: NOW })).deleted).toEqual([]);
+      expect(sh(`git rev-parse ${BRANCH_NAME}`, dataRemoteDir)).toBe(before);
     });
   });
 });

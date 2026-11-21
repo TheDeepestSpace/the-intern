@@ -31,3 +31,12 @@ jobs:
           # other repos' pulls.
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+
+      # Daily retention for action-logs/ (issue #335): drops day directories
+      # older than 7 days and squashes the branch so they leave history too.
+      - name: Prune old action logs on the-intern-data
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: node scripts/manage-run-log.js --prune
+        env:
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}

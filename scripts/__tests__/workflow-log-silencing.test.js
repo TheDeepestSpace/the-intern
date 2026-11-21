@@ -92,15 +92,16 @@ describe.each([
     expect(jobLevelEnvMatch[1]).toMatch(/LOG_FILE: \/tmp\/run\.log/);
   });
 
-  it('has an "Upload run log on failure" step gated on failure(), not always()', () => {
-    const uploadStep = steps.find(s => s.name === 'Upload run log on failure');
+  it('has an "Upload run log" step gated on always() (success, failure and cancel)', () => {
+    const uploadStep = steps.find(s => s.name === 'Upload run log');
     expect(uploadStep).toBeTruthy();
-    expect(uploadStep.chunk).toMatch(/\n {8}if: failure\(\)\n/);
-    expect(uploadStep.chunk).not.toMatch(/\n {8}if: always\(\)/);
+    expect(uploadStep.chunk).toMatch(/\n {8}if: always\(\)\n/);
+    expect(uploadStep.chunk).toMatch(/continue-on-error: true/);
+    expect(uploadStep.chunk).not.toMatch(/upload-artifact|GITHUB_STEP_SUMMARY|\bcat\b.*LOG_FILE/);
   });
 
   it('runs manage-run-log.js from the upload step, authenticated via DATA_REPO_TOKEN', () => {
-    const uploadStep = steps.find(s => s.name === 'Upload run log on failure');
+    const uploadStep = steps.find(s => s.name === 'Upload run log');
     expect(uploadStep.chunk).toMatch(/manage-run-log\.js/);
     expect(uploadStep.chunk).toMatch(/DATA_REPO_TOKEN: \$\{\{ secrets\.DATA_REPO_TOKEN \}\}/);
   });

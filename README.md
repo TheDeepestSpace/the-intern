@@ -161,6 +161,12 @@ Top-level `relays:` maps a push (repo, `branch` pattern with `@project` capture,
 3. Workflows read the file from the checkout on every run; nothing else to
    deploy.
 
+## Private action logs
+
+Workflow steps write their output to `$LOG_FILE` instead of the public Actions log. A final `if: always()` step (`scripts/manage-run-log.js`) redacts known token patterns and secret env values, adds a small header (run URL, trigger, backend/model, target, timestamps, job status) and commits it to the `action-logs` branch of `the-intern-data` as `action-logs/<YYYY-MM-DD>/<run_id>-<attempt>-<target-slug>-<issue>.log`. Nothing is echoed, uploaded as an artifact or put in a step summary; push errors only warn. Covers dispatcher, specage, telegram-session and nightly-crawl.
+
+Retention: the daily `cleanup-data-branches` workflow runs `node scripts/manage-run-log.js --prune`, which deletes day directories older than 7 days and squashes the branch to one commit (force-push with a lease), so deleted logs don't linger in history.
+
 ## Nightly crawl (`.github/workflows/nightly-crawl.yml`)
 
 Runs at 04:30 UTC (and on `workflow_dispatch`, with optional `repos` and

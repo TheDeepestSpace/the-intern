@@ -1,26 +1,26 @@
-// Uploads the silenced, accumulated stdout/stderr log for a dispatcher/
-// telegram-session run to the-intern-data (private) when the job fails
-// (issue #224). Every `run:` step in those jobs redirects its own output into
-// a single on-disk log file instead of streaming it to the public Actions
-// log; this module is the "always() ... if: failure()" step at the end of
-// each job that pushes whatever accumulated there before the container tears
-// down. On a successful run nothing calls this, so nothing is ever uploaded
-// and the public log stays empty.
+// Persists the silenced, accumulated stdout/stderr log of a workflow run to
+// the-intern-data (private) at the end of every run (issue #224, extended by
+// #335). Every `run:` step in those jobs redirects its output into a single
+// on-disk log file instead of streaming it to the public Actions log; the
+// final `if: always()` step calls this module so a post-mortem is possible
+// after success, failure or cancellation alike. Nothing here ever echoes the
+// log to the public run log, uploads an artifact, or writes a step summary.
 //
-// Same shared-branch-per-log pattern as manage-codex-log.js: failures are
-// rare and diagnostic, so there's no benefit to per-issue branch
-// proliferation, and a single branch keeps every log path-browsable under
-// one tree. Kept as a separate module (rather than generalizing
-// manage-codex-log.js) since the two are wired up on different triggers —
-// this one fires on any job failure regardless of backend or step, while
-// manage-codex-log.js fires only on a detected codex-backend agent failure.
+// Layout on the `action-logs` branch:
+//   action-logs/<YYYY-MM-DD>/<run_id>-<attempt>-<target-slug>-<issue>.log
+// Content is redacted (known token patterns + values of secret-looking env
+// vars) and prefixed with a small header. `--prune` mode (daily cron) deletes
+// day directories older than RETENTION_DAYS and squashes the branch to a
+// single orphan commit so deleted logs don't live on in history.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { resolveDataRepoRemoteUrl, redactUrl } = require('./data-repo-remote.js');
 
-const BRANCH_NAME = 'run-logs';
+const BRANCH_NAME = 'action-logs';
+const LOG_DIR = 'action-logs';
+const RETENTION_DAYS = 7;
 // Caps what gets pushed, not what the job wrote to disk: keeps a single
 // pathological run from ballooning the-intern-data. The tail is what matters
 // for debugging a failure anyway (mirrors manage-codex-log.js's
@@ -31,20 +31,70 @@ function sanitizeSlug(value) {
   return String(value).replace(/[^a-zA-Z0-9_-]/g, '-');
 }
 
-// `prefix` is a caller-supplied, already-slash-delimited namespace (e.g.
-// "dispatcher/acme-widgets/42" or "telegram-session") — each segment is
-// sanitized individually so the slashes stay meaningful path separators
-// instead of being collapsed into dashes.
-function sanitizePrefix(prefix) {
-  return String(prefix || 'unknown')
-    .split('/')
-    .filter(Boolean)
-    .map(sanitizeSlug)
-    .join('/');
+function formatDate(date) {
+  return date.toISOString().slice(0, 10);
 }
 
-function getLogPath(prefix, runId) {
-  return path.join(sanitizePrefix(prefix), `${sanitizeSlug(runId)}.log`);
+// action-logs/<YYYY-MM-DD>/<run_id>-<attempt>-<target-slug>-<issue>.log
+// `target` is a repo ("owner/name") or a workflow label; `issue` is optional.
+function getLogPath({ date = new Date(), runId, attempt = '1', target, issue } = {}) {
+  const name = [runId, attempt, target || 'unknown', issue]
+    .filter(part => part !== undefined && part !== null && String(part) !== '')
+    .map(sanitizeSlug)
+    .join('-');
+  return `${LOG_DIR}/${formatDate(date)}/${name}.log`;
+}
+
+// Known token shapes. Order matters little; each is replaced independently.
+const TOKEN_PATTERNS = [
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
+  /\bgh[pousr]_[A-Za-z0-9]{20,}/g,
+  /\bsk-ant-[A-Za-z0-9_-]{10,}/g,
+  /\bsk-[A-Za-z0-9_-]{20,}/g,
+  /\bxox[abposr]-[A-Za-z0-9-]{10,}/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\bbot\d{6,}:[A-Za-z0-9_-]{30,}/g,
+  /\b\d{6,}:[A-Za-z0-9_-]{35}\b/g,
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  /\b(Bearer|Basic|token)\s+[A-Za-z0-9._~+\/=-]{16,}/gi,
+];
+const SECRET_ENV_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|API_KEY|_KEY$|CREDENTIAL|AUTH)/i;
+
+function redactSecrets(text, env = process.env) {
+  // Workflow-command masks (::add-mask::<secret>) carry raw secrets, e.g. from
+  // rotate-codex-auth.js; the runner never consumes them once stdout is
+  // redirected into the log file, so blank them.
+  let out = redactUrl(String(text).replace(/^::add-mask::.*$/gm, '::add-mask::***'));
+  for (const re of TOKEN_PATTERNS) {
+    out = out.replace(re, (m, scheme) => (typeof scheme === 'string' ? `${scheme} ***` : '***'));
+  }
+  // Env secret values, longest first so a value containing another is fully masked.
+  const values = new Set();
+  for (const [name, value] of Object.entries(env)) {
+    if (!value || !SECRET_ENV_NAME.test(name)) continue;
+    for (const v of [value, ...String(value).split(/\r?\n/)]) {
+      if (v.length > 0) values.add(v);
+    }
+  }
+  for (const v of [...values].sort((x, y) => y.length - x.length)) {
+    out = out.split(v).join('***');
+  }
+  return out;
+}
+
+function buildHeader(info = {}) {
+  const lines = [
+    ['run', info.runUrl],
+    ['trigger', info.trigger],
+    ['backend', info.backend],
+    ['model', info.model],
+    ['target', [info.target, info.issue].filter(Boolean).join('#')],
+    ['started', info.startedAt],
+    ['finished', info.finishedAt],
+    ['status', info.status],
+  ].map(([k, v]) => `# ${k}: ${v || 'unknown'}`);
+  return `${lines.join('\n')}\n${'#'.repeat(40)}\n`;
 }
 
 // Args are passed as an array (execFileSync, not a shell) so none of
@@ -100,13 +150,36 @@ function pushWithRetry(remoteUrl, gitOpts, prepare, { maxAttempts = 3 } = {}) {
   }
 }
 
-// Best-effort: a failure here must never fail the caller's own failure
-// handling — the job is already in a failed state, and the Telegram alert
-// (if any) doesn't depend on this succeeding. Every error path here only
-// warns.
-async function saveRunLog({ prefix, runId, logFile = '/tmp/run.log' } = {}) {
-  if (!prefix || !runId) {
-    console.log('Skipping run log upload: missing prefix or runId.');
+function isExpiredDir(dirName, now = new Date(), days = RETENTION_DAYS) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dirName)) return false;
+  const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+  return dirName < formatDate(cutoff);
+}
+
+// Runs `fn(worktreeDir, gitOpts)` in a throwaway detached worktree so the
+// caller's own checkout never ends up on the log branch.
+async function withWorktree(fn) {
+  ensureSafeDirectory();
+  const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'run-log-'));
+  const gitOpts = { cwd: worktreeDir };
+  try {
+    runGit(['worktree', 'add', '--detach', worktreeDir]);
+    ensureSafeDirectory(worktreeDir);
+    runGit(['config', 'user.name', 'the-intern-bot[bot]'], { ...gitOpts, allowFailure: true });
+    runGit(['config', 'user.email', '308992161+the-intern-bot[bot]@users.noreply.github.com'], { ...gitOpts, allowFailure: true });
+    return await fn(worktreeDir, gitOpts);
+  } finally {
+    runGit(['branch', '-D', BRANCH_NAME], { ...gitOpts, allowFailure: true });
+    runGit(['worktree', 'remove', '--force', worktreeDir], { allowFailure: true });
+    fs.rmSync(worktreeDir, { recursive: true, force: true });
+    runGit(['branch', '-D', `${BRANCH_NAME}-squashed`], { allowFailure: true });
+  }
+}
+
+// Best-effort: a failure here must never fail the job — it only warns.
+async function saveRunLog({ logFile = '/tmp/run.log', info = {}, env = process.env, now = new Date() } = {}) {
+  if (!info.runId) {
+    console.log('Skipping run log upload: missing runId.');
     return;
   }
   if (!fs.existsSync(logFile)) {
@@ -125,6 +198,8 @@ async function saveRunLog({ prefix, runId, logFile = '/tmp/run.log' } = {}) {
     console.log('Run log is empty; nothing to save.');
     return;
   }
+  // Redact before truncating so a token straddling the cut can't survive.
+  content = redactSecrets(content, env);
   const contentBytes = Buffer.from(content, 'utf8');
   if (contentBytes.length > MAX_LOG_BYTES) {
     let start = contentBytes.length - MAX_LOG_BYTES;
@@ -133,8 +208,12 @@ async function saveRunLog({ prefix, runId, logFile = '/tmp/run.log' } = {}) {
     while (start < contentBytes.length && (contentBytes[start] & 0xc0) === 0x80) start++;
     content = contentBytes.subarray(start).toString('utf8');
   }
+  let startedAt = info.startedAt;
+  if (!startedAt) {
+    try { startedAt = fs.statSync(logFile).birthtime.toISOString(); } catch { /* unknown */ }
+  }
+  const body = redactSecrets(buildHeader({ ...info, startedAt, finishedAt: info.finishedAt || now.toISOString() }), env) + content;
 
-  ensureSafeDirectory();
   let remoteUrl;
   try {
     remoteUrl = await resolveRemoteUrl();
@@ -143,55 +222,114 @@ async function saveRunLog({ prefix, runId, logFile = '/tmp/run.log' } = {}) {
     return;
   }
 
-  const relPath = getLogPath(prefix, runId);
-
-  // Runs in a temporary worktree rather than the caller's own checkout: this
-  // is called from a job's final step, whose caller (the outer agent-infra
-  // checkout) doesn't need to end up on this orphan branch.
-  const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'run-log-'));
-  const gitOpts = { cwd: worktreeDir };
+  const relPath = getLogPath({ date: now, runId: info.runId, attempt: info.attempt, target: info.target, issue: info.issue });
   try {
-    runGit(['worktree', 'add', '--detach', worktreeDir]);
-    ensureSafeDirectory(worktreeDir);
-    runGit(['config', 'user.name', 'the-intern-bot[bot]'], { ...gitOpts, allowFailure: true });
-    runGit(['config', 'user.email', '308992161+the-intern-bot[bot]@users.noreply.github.com'], { ...gitOpts, allowFailure: true });
+    await withWorktree((worktreeDir, gitOpts) => {
+      pushWithRetry(remoteUrl, gitOpts, () => {
+        try {
+          runGit(['checkout', '--orphan', BRANCH_NAME], gitOpts);
+          runGit(['rm', '-rf', '--ignore-unmatch', '.'], gitOpts);
+        } catch {
+          runGit(['checkout', BRANCH_NAME], gitOpts);
+        }
 
-    pushWithRetry(remoteUrl, gitOpts, () => {
-      try {
-        runGit(['checkout', '--orphan', BRANCH_NAME], gitOpts);
-        runGit(['rm', '-rf', '--ignore-unmatch', '.'], gitOpts);
-      } catch {
-        runGit(['checkout', BRANCH_NAME], gitOpts);
-      }
+        const destPath = path.join(worktreeDir, relPath);
+        fs.mkdirSync(path.dirname(destPath), { recursive: true });
+        fs.writeFileSync(destPath, body, 'utf8');
 
-      const destPath = path.join(worktreeDir, relPath);
-      fs.mkdirSync(path.dirname(destPath), { recursive: true });
-      fs.writeFileSync(destPath, content, 'utf8');
-
-      runGit(['add', '--', relPath], gitOpts);
-      runGit(['commit', '-m', `run-log: ${prefix} run ${runId}`], gitOpts);
+        runGit(['add', '--', relPath], gitOpts);
+        runGit(['commit', '-m', `action-log: run ${info.runId}`], gitOpts);
+      });
     });
     console.log(`Pushed run log to the-intern-data:${BRANCH_NAME}/${relPath}`);
   } catch (err) {
-    console.warn(`::warning::Failed to push run log: ${err.message}`);
-  } finally {
-    runGit(['branch', '-D', BRANCH_NAME], { ...gitOpts, allowFailure: true });
-    runGit(['worktree', 'remove', '--force', worktreeDir], { allowFailure: true });
-    fs.rmSync(worktreeDir, { recursive: true, force: true });
+    console.warn(`::warning::Failed to push run log: ${redactSecrets(err.message, env)}`);
   }
 }
 
+// Daily retention: drop day directories older than RETENTION_DAYS and squash
+// the branch into one orphan commit (force-push guarded by a lease), so the
+// deleted logs are no longer reachable from the branch's history. Tradeoff:
+// no history of the log branch itself, which is fine for ephemeral logs.
+async function pruneRunLogs({ now = new Date(), days = RETENTION_DAYS, maxAttempts = 3 } = {}) {
+  let remoteUrl;
+  try {
+    remoteUrl = await resolveRemoteUrl();
+  } catch (err) {
+    console.warn(`::warning::Skipping run log prune: ${err.message}`);
+    return { deleted: [] };
+  }
+  try {
+    return await withWorktree((worktreeDir, gitOpts) => {
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        runGit(['branch', '-D', BRANCH_NAME], { ...gitOpts, allowFailure: true });
+        runGit(['fetch', remoteUrl, `${BRANCH_NAME}:${BRANCH_NAME}`], { ...gitOpts, allowFailure: true });
+        const oldSha = runGit(['rev-parse', '--verify', '-q', BRANCH_NAME], { ...gitOpts, allowFailure: true });
+        if (!oldSha) {
+          console.log(`No ${BRANCH_NAME} branch; nothing to prune.`);
+          return { deleted: [] };
+        }
+        runGit(['checkout', BRANCH_NAME], gitOpts);
+
+        const logRoot = path.join(worktreeDir, LOG_DIR);
+        const dirs = fs.existsSync(logRoot) ? fs.readdirSync(logRoot) : [];
+        const expired = dirs.filter(d => isExpiredDir(d, now, days));
+        if (expired.length === 0) {
+          console.log('No expired action-log directories.');
+          return { deleted: [] };
+        }
+        for (const d of expired) runGit(['rm', '-rq', '--', `${LOG_DIR}/${d}`], gitOpts);
+
+        runGit(['checkout', '--orphan', `${BRANCH_NAME}-squashed`], gitOpts);
+        runGit(['commit', '--allow-empty', '-m', `action-logs: prune logs older than ${days} days`], gitOpts);
+        try {
+          runGit(['push', `--force-with-lease=refs/heads/${BRANCH_NAME}:${oldSha}`, remoteUrl, `HEAD:refs/heads/${BRANCH_NAME}`], gitOpts);
+          console.log(`Pruned ${expired.length} action-log day director${expired.length === 1 ? 'y' : 'ies'}: ${expired.join(', ')}`);
+          return { deleted: expired };
+        } catch (err) {
+          if (attempt < maxAttempts) {
+            console.warn(`Prune push rejected (attempt ${attempt}/${maxAttempts}), retrying: ${err.message}`);
+            runGit(['checkout', '--detach'], { ...gitOpts, allowFailure: true });
+            runGit(['branch', '-D', `${BRANCH_NAME}-squashed`], { ...gitOpts, allowFailure: true });
+            continue;
+          }
+          throw err;
+        }
+      }
+    });
+  } catch (err) {
+    console.warn(`::warning::Failed to prune run logs: ${err.message}`);
+    return { deleted: [] };
+  }
+}
+
+function infoFromEnv(env = process.env) {
+  const server = env.GITHUB_SERVER_URL || 'https://github.com';
+  return {
+    runId: env.GITHUB_RUN_ID,
+    attempt: env.GITHUB_RUN_ATTEMPT || '1',
+    runUrl: env.GITHUB_REPOSITORY && env.GITHUB_RUN_ID ? `${server}/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}` : '',
+    trigger: env.RUN_LOG_TRIGGER || env.GITHUB_EVENT_NAME,
+    backend: env.RUN_LOG_BACKEND,
+    model: env.RUN_LOG_MODEL,
+    target: env.RUN_LOG_TARGET,
+    issue: env.RUN_LOG_ISSUE,
+    startedAt: env.RUN_LOG_STARTED,
+    status: env.RUN_LOG_STATUS,
+  };
+}
+
 if (require.main === module) {
-  saveRunLog({
-    prefix: process.env.RUN_LOG_PREFIX,
-    runId: process.env.GITHUB_RUN_ID,
-    logFile: process.env.LOG_FILE || undefined,
-  }).catch(err => {
-    // Mirrors the best-effort contract above: log it, but don't flip the
-    // step (and thus the already-failed job) into a harder failure over a
-    // debugging aid that didn't make it out.
-    console.warn(`::warning::Unexpected error saving run log: ${err.message}`);
+  const task = process.argv.includes('--prune')
+    ? pruneRunLogs()
+    : saveRunLog({ logFile: process.env.LOG_FILE || undefined, info: infoFromEnv() });
+  task.catch(err => {
+    // Best-effort contract: never fail the job over a debugging aid.
+    console.warn(`::warning::Unexpected error handling run log: ${err.message}`);
   });
 }
 
-module.exports = { BRANCH_NAME, MAX_LOG_BYTES, getLogPath, saveRunLog };
+module.exports = {
+  BRANCH_NAME, LOG_DIR, RETENTION_DAYS, MAX_LOG_BYTES,
+  getLogPath, redactSecrets, buildHeader, isExpiredDir, saveRunLog, pruneRunLogs, infoFromEnv,
+};
