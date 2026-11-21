@@ -6,6 +6,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   formatTokenCount,
   buildTable,
+  CODEX_MODELS,
+  buildCodexTable,
   buildSection,
   upsertReadme,
   getDefaultBranch,
@@ -96,6 +98,35 @@ describe('buildTable', () => {
   it('falls back to the bare id when display_name is missing', () => {
     const table = buildTable([{ id: 'claude-x', max_input_tokens: 1000, max_tokens: 1000 }]);
     expect(table).toContain('| claude-x | `claude-x` | 1K | 1K |');
+  });
+});
+
+describe('buildCodexTable', () => {
+  it('renders one row per hand-maintained codex model with the model= ID backticked', () => {
+    const table = buildCodexTable(CODEX_MODELS);
+    expect(table).toContain('| GPT-5.6 Sol (default) | `gpt-5.6-sol` |');
+    expect(table).toContain('| GPT-5.6 Astra | `gpt-5.6-astra` |');
+  });
+
+  it('falls back to the bare id when display_name is missing', () => {
+    const table = buildCodexTable([{ id: 'gpt-x' }]);
+    expect(table).toContain('| gpt-x | `gpt-x` |');
+  });
+});
+
+describe('buildSection (codex sibling section)', () => {
+  it('includes a hand-maintained Codex Models section alongside the Claude table', () => {
+    const section = buildSection(MODELS, '2026-08-18T09:00:00.000Z');
+    expect(section).toContain('## Current Claude Models');
+    expect(section).toContain('## Codex Models');
+    expect(section).toContain('gpt-5.6-sol');
+    expect(section).toContain('Hand-maintained, not fetched live');
+  });
+
+  it('lets callers override the codex model list (e.g. for tests)', () => {
+    const section = buildSection(MODELS, '2026-08-18T09:00:00.000Z', [{ id: 'gpt-test' }]);
+    expect(section).toContain('gpt-test');
+    expect(section).not.toContain('gpt-5.6-sol');
   });
 });
 
