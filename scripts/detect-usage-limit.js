@@ -31,6 +31,14 @@
 // 11:20pm (UTC)") — none of the speculative binary-derived patterns above it
 // match this phrasing (no "reached" verb), so real stalls fell through to
 // the generic failure path instead of queuing a retry.
+//
+// The "you've hit your usage limit" pattern is Codex's own wording (distinct
+// CLI, not claude-code), grounded in the literal `error`/`turn.failed` text
+// recovered from the codex-events.jsonl log for run 34002720228 (issue #205):
+// "You've hit your usage limit. Upgrade to Pro (...), visit (...) to purchase
+// more credits or try again at 2:00 AM." Codex's phrasing doesn't qualify the
+// limit with 5-hour/session/weekly/monthly, so it needs its own entry rather
+// than reusing the claude-code alternation above.
 const USAGE_LIMIT_PATTERNS = [
   /\busage[\s-]?(?:limit|credit limit|cap)s?\s+(?:reached|exceeded)\b/i,
   /reached\s+(?:your\s+)?(?:specified[\w\s-]*?)?usage\s+limits?\b/i,
@@ -39,6 +47,7 @@ const USAGE_LIMIT_PATTERNS = [
   /org'?s monthly usage limit/i,
   /group'?s usage limit is set to \$0/i,
   /you'?ve hit your (?:5-hour|five-hour|session|weekly|monthly) limit\b/i,
+  /you'?ve hit your usage limit\b/i,
 ];
 
 const DEFAULT_RETRY_DELAY_MS = 60 * 60 * 1000; // 1 hour fallback when no reset time can be parsed.
@@ -83,12 +92,15 @@ function parseRetryAfterMsRaw(text, now) {
     if (!Number.isNaN(parsed)) return parsed;
   }
 
-  // 3. Human clock time, e.g. "resets at 3pm" / "resets 3:00 PM", optionally
-  // qualified with a weekday (weekly-limit resets, e.g. "resets Monday 9am")
-  // and/or an explicit "(UTC)" marker — the shapes the live CLI actually
-  // renders (see module docstring).
+  // 3. Human clock time, e.g. "resets at 3pm" / "resets 3:00 PM" or Codex's
+  // "try again at 2:00 AM", optionally qualified with a weekday (weekly-limit
+  // resets, e.g. "resets Monday 9am") and/or an explicit "(UTC)" marker — the
+  // shapes the live CLIs actually render (see module docstring). Codex's
+  // "try again at" carries no UTC marker either, so it falls through the same
+  // local-time-then-roll-to-next-occurrence handling as claude-code's
+  // unqualified "resets 3pm".
   m = text.match(
-    /resets?\s+(?:at\s+)?(?:(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s*\((UTC)\))?/i
+    /(?:resets?\s+(?:at\s+)?|try again at\s+)(?:(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s*\((UTC)\))?/i
   );
   if (m) {
     const parsed = parseClockTime(m[2], now, { weekday: m[1], utc: !!m[3] });
